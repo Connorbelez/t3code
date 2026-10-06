@@ -29,6 +29,8 @@ import {
   type DiagramComposeInput,
   type DiagramComposeRequest,
   type DiagramComposeResult,
+  type DiagramPageScope,
+  type DiagramScope,
   type ProjectId,
   type ThreadId,
   type DiagramCounts,
@@ -876,38 +878,61 @@ export const make = Effect.gen(function* () {
   ) {
     const diagram = yield* targetMetadata(input);
     if (diagram.archivedAt) return yield* new DiagramOperationError({ code: "archived" });
+    const { operation, key, spec, mermaid, mode, removeKeys, relayout } = input;
     const request: DiagramComposeRequest = {
-      ...(input.spec ? { spec: input.spec } : {}),
-      ...(input.mermaid ? { mermaid: input.mermaid } : {}),
-      ...(input.relayout ? { relayout: true } : {}),
+      ...(operation === undefined ? {} : { operation }),
+      ...(key === undefined ? {} : { key }),
+      ...(spec === undefined ? {} : { spec }),
+      ...(mermaid === undefined ? {} : { mermaid }),
+      ...(mode === undefined ? {} : { mode }),
+      ...(removeKeys === undefined ? {} : { removeKeys }),
+      ...(relayout ? { relayout } : {}),
     };
     // Mermaid text can only be checked by the host's parser.
-    const compositionKey = yield* attempt(() => validateComposeRequest(request));
+    const compositionKey = yield* attempt(() =>
+      validateComposeRequest({
+        ...request,
+        includeMembers: input.includeMembers,
+        capture: input.capture,
+      }),
+    );
     const composed = yield* invoke({ ...input, operation: "compose", value: request });
     const result = yield* attempt(() => decodeHostComposeResult(composed.value));
-    if (!result.changes)
-      return {
-        requestId: null,
-        revision: (yield* attempt(() => metadata(input))).revision,
-        compositionKey,
-        counts: result.counts,
-        overlaps: result.overlaps,
-      } satisfies DiagramComposeResult;
     // Prepare on the host that composed: it measured against the records it is about to fence.
-    const receipt = yield* applyBatchCore({
-      projectId: input.projectId,
-      diagramId: input.diagramId,
-      namespace: input.namespace,
-      clientId: composed.host.clientId,
-      ...(input.threadId ? { threadId: input.threadId } : {}),
-      batch: { requestId: input.requestId ?? NodeCrypto.randomUUID(), ...result.changes },
-    });
+    const committed = result.changes
+      ? yield* applyBatchCore({
+          projectId: input.projectId,
+          diagramId: input.diagramId,
+          namespace: input.namespace,
+          clientId: composed.host.clientId,
+          ...(input.threadId ? { threadId: input.threadId } : {}),
+          batch: { requestId: input.requestId ?? NodeCrypto.randomUUID(), ...result.changes },
+        })
+      : null;
+    const revision = committed?.revision ?? (yield* attempt(() => metadata(input))).revision;
+    const members = input.includeMembers
+      ? yield* attempt(
+          () => readCompositions(database.read(input.diagramId)).memberShapes(compositionKey) ?? {},
+        )
+      : undefined;
+    const captured = input.capture
+      ? yield* captureAt(
+          {
+            projectId: input.projectId,
+            diagramId: input.diagramId,
+            scope: { kind: "composition", key: compositionKey },
+          },
+          { clientId: composed.host.clientId, revision },
+        )
+      : undefined;
     return {
-      requestId: receipt.requestId,
-      revision: receipt.revision,
+      requestId: committed?.requestId ?? null,
+      revision,
       compositionKey,
       counts: result.counts,
       overlaps: result.overlaps,
+      ...(members ? { members } : {}),
+      ...(captured ? { capture: captured } : {}),
     } satisfies DiagramComposeResult;
   });
 
@@ -993,14 +1018,32 @@ export const make = Effect.gen(function* () {
     });
   });
 
-  const capture = Effect.fn("DiagramService.capture")(function* (input: DiagramCaptureInput) {
+  /** Hosts capture page scopes; a composition resolves to its frame's current page and bounds. */
+  const pageScope = (scope: DiagramScope, records: () => readonly TLRecord[]): DiagramPageScope => {
+    if (scope.kind !== "composition") return scope;
+    const resolved = readCompositions(records()).frameScope(scope.key);
+    if (!resolved) throw new DiagramOperationError({ code: "scope-unavailable" });
+    return resolved;
+  };
+  /**
+   * `pin` targets the host that just committed a compose and requires the capture to show that
+   * commit's revision.
+   */
+  const captureAt = Effect.fn("DiagramService.capture")(function* (
+    input: DiagramCaptureInput,
+    pin: { clientId: string; revision: number } | null = null,
+  ) {
     yield* targetMetadata(input);
+    const scope = yield* attempt(() =>
+      pageScope(input.scope, () => database.read(input.diagramId)),
+    );
     const response = yield* invoke({
       ...input,
+      ...(pin ? { clientId: pin.clientId } : {}),
       operation: "capture",
       value: {
-        scope: input.scope,
-        revision: metadata(input).revision,
+        scope,
+        revision: pin?.revision ?? metadata(input).revision,
         format: input.format ?? "png",
       },
     });
@@ -1010,15 +1053,17 @@ export const make = Effect.gen(function* () {
       if (
         captured.diagramId !== input.diagramId ||
         captured.revision !== current.revision ||
-        encodeJson(captured.scope) !== encodeJson(input.scope)
+        encodeJson(captured.scope) !== encodeJson(scope)
       )
         throw new DiagramOperationError({ code: "stale" });
+      const result = { ...captured, scope: input.scope };
       sql
         .prepare("INSERT OR REPLACE INTO diagram_previews VALUES (?, ?, ?)")
-        .run(input.diagramId, encodeJson(input.scope), encodeJson(captured));
-      return captured;
+        .run(input.diagramId, encodeJson(input.scope), encodeJson(result));
+      return result;
     });
   });
+  const capture = (input: DiagramCaptureInput) => captureAt(input);
   const cachedPreview = Effect.fn("DiagramService.cachedPreview")(function* (
     input: DiagramCaptureInput,
   ) {
@@ -1052,11 +1097,12 @@ export const make = Effect.gen(function* () {
           attempt(() => {
             const diagram = metadata(input);
             const records = database.read(input.diagramId);
-            if (!records.some((item) => item.id === input.scope.pageId && item.typeName === "page"))
+            const scope = pageScope(input.scope, () => records);
+            if (!records.some((item) => item.id === scope.pageId && item.typeName === "page"))
               throw new DiagramOperationError({ code: "scope-unavailable" });
             if (
-              input.scope.kind === "selection" &&
-              input.scope.shapeIds.some(
+              scope.kind === "selection" &&
+              scope.shapeIds.some(
                 (id) => !records.some((item) => item.id === id && item.typeName === "shape"),
               )
             )
@@ -1067,20 +1113,20 @@ export const make = Effect.gen(function* () {
               diagram.revision,
               {
                 limit: 40,
-                ...(input.scope.kind === "selection"
-                  ? { recordIds: input.scope.shapeIds, pageId: input.scope.pageId }
-                  : input.scope.kind === "viewport"
-                    ? { pageId: input.scope.pageId, viewport: input.scope.bounds }
-                    : { priorityPageId: input.scope.pageId }),
+                ...(scope.kind === "selection"
+                  ? { recordIds: scope.shapeIds, pageId: scope.pageId }
+                  : scope.kind === "viewport"
+                    ? { pageId: scope.pageId, viewport: scope.bounds }
+                    : { priorityPageId: scope.pageId }),
               },
               compositions,
             );
             if (
-              input.scope.kind === "selection" &&
+              scope.kind === "selection" &&
               structure.shapes.length !==
                 Math.min(
                   40,
-                  input.scope.shapeIds.filter(
+                  scope.shapeIds.filter(
                     (id) => !compositions.isMember(id) && !compositions.compositionOf(id),
                   ).length,
                 )

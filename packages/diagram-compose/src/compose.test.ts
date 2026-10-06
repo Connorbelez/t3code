@@ -209,7 +209,9 @@ describe("compose", () => {
     });
     const branch = shapes(result).find((shape) => memberKey(shape) === "ok→pay:flow");
     expect(branch?.props).toMatchObject({ kind: "elbow", arrowheadEnd: "arrow", font: "sans" });
-    expect(result.changes?.expected.every((entry) => entry.record === null)).toBe(true);
+    expect(
+      result.changes?.expected.flatMap((entry) => (entry.record === null ? [] : [entry.id])),
+    ).toEqual(["page:main"]);
   });
 
   it("parents arrows to the frame, above both endpoints and below the next node", async () => {
@@ -325,7 +327,10 @@ describe("compose", () => {
       rehearse: (puts, deletes) => new Map(rehearse(records)(puts, deletes)).set(human.id, touched),
     });
     expect(result.changes?.puts.at(-1)).toEqual(touched);
-    expect(result.changes?.expected.at(-1)).toEqual({ id: "shape:human", record: human });
+    expect(result.changes?.expected.find((entry) => entry.id === human.id)).toEqual({
+      id: "shape:human",
+      record: human,
+    });
   });
 
   it("fails too-large when the composition exceeds one batch", async () => {
@@ -577,7 +582,7 @@ describe("regeneration", () => {
     } as TLShape;
     records = [...records, human];
     const result = await run(WITH_SHIP, records);
-    expect(result.changes?.expected.some((entry) => entry.id === human.id)).toBe(false);
+    expect(shapes(result).some((shape) => shape.id === human.id)).toBe(false);
     expect(box(mainOf(applied(records, result), "ship"))).toEqual({
       x: 448,
       y: 520,
@@ -626,6 +631,208 @@ describe("regeneration", () => {
   });
 });
 
+const byId = (records: readonly TLRecord[]) =>
+  Object.fromEntries(records.map((record) => [record.id, record]));
+
+const metaOf = (record: TLRecord | undefined) => record?.meta["t3Composition"];
+
+describe("patch", () => {
+  const patch = (
+    spec: Omit<DiagramSpec, "kit" | "key">,
+    records: readonly TLRecord[],
+    removeKeys?: string[],
+  ) =>
+    compose(
+      {
+        mode: "patch",
+        spec: { kit: "flow", key: "checkout", ...spec },
+        ...(removeKeys ? { removeKeys } : {}),
+      },
+      records,
+      portsFor(records),
+    );
+
+  it("upserts listed members and leaves every other member, edit and position alone", async () => {
+    let records = applied(BASE, await run(CHECKOUT));
+    records = change(records, "start", (shape) => recolored(moved(shape, 900, 900)));
+    const result = await patch({ nodes: [{ key: "pay", label: "Pay now" }] }, records);
+    expect(result.counts).toEqual({ created: 0, updated: 1, kept: 5, removed: 0 });
+    expect(writtenMembers(result)).toEqual(["pay"]);
+    const after = applied(records, result);
+    expect(mainOf(after, "start")).toEqual(mainOf(records, "start"));
+    expect(frameOf(after)?.props).toMatchObject({ name: "checkout" });
+    expect((await patch({ nodes: [{ key: "pay", label: "Pay now" }] }, after)).changes).toBeNull();
+  });
+
+  it("removes removeKeys with the member edges of removed nodes", async () => {
+    const records = applied(BASE, await run(CHECKOUT));
+    const result = await patch({ nodes: [] }, records, ["ok"]);
+    expect(result.counts).toEqual({ created: 0, updated: 0, kept: 3, removed: 3 });
+    const after = applied(records, result);
+    expect(readCompositions(after).detail({ offset: 0, limit: 10 }).items[0]?.members).toEqual([
+      { spec: { key: "start", kind: "start", label: "start" }, edited: false },
+      { spec: { key: "pay", kind: "process", label: "pay" }, edited: false },
+      {
+        spec: { key: "start→pay:flow", from: "start", to: "pay", kind: "flow", label: "" },
+        edited: false,
+      },
+    ]);
+    expect((await patch({ nodes: [] }, after, ["ok"])).changes).toBeNull();
+  });
+
+  it("converges with replacing the whole patched spec", async () => {
+    let records = applied(BASE, await run(CHECKOUT));
+    records = change(records, "pay", (shape) => moved(shape, 400, 40));
+    const patched = await patch(
+      {
+        nodes: [{ key: "pay", label: "Pay now" }, { key: "ship" }],
+        edges: [["ok", "ship", "yes"]],
+      },
+      records,
+      ["start"],
+    );
+    const replaced = await run(
+      {
+        ...CHECKOUT,
+        nodes: [{ key: "pay", label: "Pay now" }, { key: "ok", kind: "decision" }, { key: "ship" }],
+        edges: [
+          ["pay", "ok"],
+          ["ok", "pay", "no"],
+          ["ok", "ship", "yes"],
+        ],
+      },
+      records,
+    );
+    expect(patched.counts).toEqual({ created: 2, updated: 1, kept: 3, removed: 2 });
+    expect(replaced.counts).toEqual(patched.counts);
+    expect(byId(applied(records, patched))).toEqual(byId(applied(records, replaced)));
+  });
+
+  it("rebinds an untouched edge when the patch recreates its deleted endpoint", async () => {
+    const records = deleteNode(applied(BASE, await run(CHECKOUT)), "ok");
+    const result = await patch(
+      { nodes: [{ key: "ok", kind: "decision", label: "Paid?" }] },
+      records,
+    );
+    expect(writtenMembers(result)).toEqual(["ok", "pay→ok:flow", "ok→pay:flow"]);
+    expect(readCompositions(applied(records, result)).summaries[0]?.editedCount).toBe(0);
+  });
+
+  it("places new nodes in existing boundaries and notes on existing nodes", async () => {
+    const grouped: DiagramSpec = {
+      kit: "flow",
+      key: "checkout",
+      nodes: [
+        { key: "g", kind: "group" },
+        { key: "a", parent: "g" },
+      ],
+    };
+    const records = applied(BASE, await run(grouped));
+    const result = await patch(
+      {
+        nodes: [
+          { key: "b", parent: "g" },
+          { key: "n", kind: "note", body: { on: "a" } },
+        ],
+        edges: [["a", "b"]],
+      },
+      records,
+    );
+    expect(result.counts).toEqual({ created: 4, updated: 0, kept: 2, removed: 0 });
+    const after = applied(records, result);
+    expect(mainOf(after, "b").parentId).toBe(mainOf(after, "g").id);
+    await expect(patch({ nodes: [{ key: "c", parent: "a" }] }, after)).rejects.toMatchObject({
+      details: {
+        issues: [
+          {
+            path: "spec.nodes[0].parent",
+            message: '"a" is a process, which cannot hold nodes; parents must be group nodes',
+          },
+        ],
+      },
+    });
+  });
+
+  it("fails on a missing composition, a kit change, or an edge to a removed node", async () => {
+    await expect(patch({ nodes: [{ key: "a" }] }, BASE)).rejects.toMatchObject({
+      code: "invalid-spec",
+      details: {
+        issues: [
+          {
+            path: "spec.key",
+            message:
+              'no composition "checkout" on this diagram; a patch changes an existing composition, so compose the whole spec without mode "patch" first',
+          },
+        ],
+      },
+    });
+    const records = applied(BASE, await run(CHECKOUT));
+    await expect(
+      patch({ nodes: [{ key: "ship" }], edges: [["ok", "ship"]] }, records, ["ok", "ship"]),
+    ).rejects.toMatchObject({
+      details: {
+        issues: [
+          { path: "spec.edges[0][0]", message: 'unknown node "ok"; valid nodes: ship, start, pay' },
+        ],
+      },
+    });
+    await expect(patch({ nodes: [{ key: "ship" }] }, records, ["ship"])).rejects.toMatchObject({
+      details: {
+        issues: [{ path: "removeKeys[0]", message: '"ship" is also in the spec; list it once' }],
+      },
+    });
+  });
+});
+
+describe("remove and detach", () => {
+  const release = (operation: "remove" | "detach", records: readonly TLRecord[]) =>
+    compose({ operation, key: "checkout" }, records, portsFor(records));
+
+  it("removes every member and the frame, carrying shapes a human drew inside to the page", async () => {
+    const composed = applied(BASE, await run({ ...CHECKOUT, position: { x: 100, y: 50 } }));
+    const frame = frameOf(composed)!;
+    const note = {
+      ...mainOf(composed, "pay"),
+      id: "shape:note",
+      parentId: frame.id,
+      x: 10,
+      y: 20,
+      index: "a9",
+      meta: {},
+    } as TLShape;
+    const records = [...composed, note];
+    expect(frame.index).toBe("a0");
+    const result = await release("remove", records);
+    expect(result.counts).toEqual({ created: 0, updated: 0, kept: 0, removed: 6 });
+    const after = applied(records, result);
+    expect(after.filter((record) => record.typeName === "shape")).toEqual([
+      { ...note, parentId: "page:main", x: 110, y: 70, index: "a1" },
+    ]);
+    expect((await release("remove", after)).changes).toBeNull();
+  });
+
+  it("detaches members in place, and composing the key again starts a fresh epoch", async () => {
+    const records = applied(BASE, await run(CHECKOUT));
+    const result = await release("detach", records);
+    const after = applied(records, result);
+    expect(after.map((record) => ({ ...record, meta: {} }))).toEqual(
+      records.map((record) => ({ ...record, meta: {} })),
+    );
+    expect(after.some((record) => metaOf(record) !== undefined)).toBe(false);
+    expect(readCompositions(after).summaries).toEqual([]);
+    expect((await release("detach", after)).changes).toBeNull();
+
+    // The detached frame is gone too; the detached members still hold epoch 0's IDs.
+    const withoutFrame = after.filter((record) => record.id !== frameOf(after)?.id);
+    const again = await run(CHECKOUT, withoutFrame);
+    expect(again.counts.created).toBe(6);
+    expect(
+      again.changes?.expected.flatMap((entry) => (entry.record === null ? [] : [entry.id])),
+    ).toEqual(["page:main"]);
+    expect(byId(applied(withoutFrame, again))).toMatchObject(byId(withoutFrame));
+  });
+});
+
 describe("validateComposeRequest", () => {
   it("lists the valid options in path-addressed issues", () => {
     let error: unknown;
@@ -663,6 +870,54 @@ describe("validateComposeRequest", () => {
   });
 });
 
+describe("compose request fields", () => {
+  const issuesOf = (request: Parameters<typeof validateComposeRequest>[0]) => {
+    try {
+      validateComposeRequest(request);
+    } catch (cause) {
+      return (cause as { details?: unknown }).details;
+    }
+    return undefined;
+  };
+
+  it("teaches which fields go with which operation", () => {
+    expect(issuesOf({ operation: "remove", spec: CHECKOUT, capture: true })).toEqual({
+      issues: [
+        {
+          path: "spec",
+          message: 'only for operation "compose"; operation "remove" takes only key',
+        },
+        {
+          path: "capture",
+          message: 'only for operation "compose"; operation "remove" takes only key',
+        },
+        { path: "key", message: "required: the key of the composition to remove" },
+      ],
+    });
+    expect(issuesOf({ key: "checkout", removeKeys: ["a"] })).toEqual({
+      issues: [
+        {
+          path: "key",
+          message:
+            'only for operation "remove" or "detach"; a compose takes its composition key from spec.key',
+        },
+        {
+          path: "removeKeys",
+          message: 'only for mode "patch"; in replace mode, leave members out of the spec instead',
+        },
+        {
+          path: "spec",
+          message:
+            "pass a spec, or Mermaid as mermaid: { key, text, title? }; to remove or detach a composition, set operation and key instead",
+        },
+      ],
+    });
+    expect(
+      issuesOf({ mode: "patch", spec: { kit: "flow", key: "k", nodes: [], edges: [["a", "b"]] } }),
+    ).toBeUndefined();
+  });
+});
+
 describe("readCompositions", () => {
   it("summarizes each composition once and counts human edits", async () => {
     const records = applied(BASE, await run({ ...CHECKOUT, title: "Checkout" }));
@@ -687,6 +942,27 @@ describe("readCompositions", () => {
     ]);
     expect(view.compositionOfFrame(frame?.id ?? "")?.key).toBe("checkout");
     expect(records.filter((record) => view.isMember(record.id))).toHaveLength(13);
+  });
+
+  it("maps member keys to shape IDs and resolves the frame scope", async () => {
+    const records = deleteNode(applied(BASE, await run(CHECKOUT)), "ok");
+    const view = readCompositions(records);
+    const frame = frameOf(records)!;
+    expect(Object.keys(view.memberShapes("checkout") ?? {})).toEqual([
+      "start",
+      "pay",
+      "start→pay:flow",
+      "pay→ok:flow",
+      "ok→pay:flow",
+    ]);
+    expect(view.memberShapes("checkout")?.["pay"]).toBe(mainOf(records, "pay").id);
+    expect(view.frameScope("checkout")).toEqual({
+      kind: "selection",
+      pageId: "page:main",
+      shapeIds: [frame.id],
+      bounds: box(frame),
+    });
+    expect(view.frameScope("missing")).toBeUndefined();
   });
 
   it("ignores a pasted copy that carries a member's meta under a new ID", async () => {
@@ -899,7 +1175,11 @@ describe("validating boundaries, notes and sources", () => {
       code: "invalid-spec",
       details: {
         issues: [
-          { path: "spec", message: "pass a spec, or Mermaid as mermaid: { key, text, title? }" },
+          {
+            path: "spec",
+            message:
+              "pass a spec, or Mermaid as mermaid: { key, text, title? }; to remove or detach a composition, set operation and key instead",
+          },
         ],
       },
     });

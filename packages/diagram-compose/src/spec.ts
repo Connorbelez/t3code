@@ -35,15 +35,91 @@ export type ComposeSource =
   | { readonly spec: DiagramSpec }
   | { readonly mermaid: DiagramMermaidSource };
 
-export function sourceOf(request: DiagramComposeRequest): ComposeSource {
-  if (request.spec && request.mermaid) {
-    throw invalidSpec([{ path: "mermaid", message: "pass either spec or mermaid, not both" }]);
+/** A compose request with its field combinations checked. Mermaid is replace-only. */
+export type ComposeOperation =
+  | { readonly kind: "replace"; readonly source: ComposeSource; readonly relayout: boolean }
+  | {
+      readonly kind: "patch";
+      readonly spec: DiagramSpec;
+      readonly removeKeys: readonly string[];
+      readonly relayout: boolean;
+    }
+  | { readonly kind: "remove"; readonly key: string }
+  | { readonly kind: "detach"; readonly key: string };
+
+/** Extra request fields the server handles after the commit; checked here so errors stay in one place. */
+export interface ComposeExtras {
+  readonly includeMembers?: boolean | undefined;
+  readonly capture?: boolean | undefined;
+}
+
+/** Checks which fields go together. The spec itself is checked by `parseSpec`. */
+export function parseRequest(request: DiagramComposeRequest & ComposeExtras): ComposeOperation {
+  const operation = request.operation ?? "compose";
+  const issues: SpecIssue[] = [];
+  if (operation !== "compose") {
+    for (const field of [
+      "spec",
+      "mermaid",
+      "mode",
+      "removeKeys",
+      "relayout",
+      "includeMembers",
+      "capture",
+    ] as const) {
+      if (request[field] !== undefined) {
+        issues.push({
+          path: field,
+          message: `only for operation "compose"; operation "${operation}" takes only key`,
+        });
+      }
+    }
+    if (request.key === undefined) {
+      issues.push({ path: "key", message: `required: the key of the composition to ${operation}` });
+    }
+    if (issues.length > 0 || request.key === undefined) throw invalidSpec(issues);
+    return { kind: operation, key: request.key };
   }
-  if (request.spec) return { spec: request.spec };
-  if (request.mermaid) return { mermaid: request.mermaid };
-  throw invalidSpec([
-    { path: "spec", message: "pass a spec, or Mermaid as mermaid: { key, text, title? }" },
-  ]);
+
+  if (request.key !== undefined) {
+    issues.push({
+      path: "key",
+      message:
+        'only for operation "remove" or "detach"; a compose takes its composition key from spec.key',
+    });
+  }
+  if (request.mode !== "patch" && request.removeKeys !== undefined) {
+    issues.push({
+      path: "removeKeys",
+      message: 'only for mode "patch"; in replace mode, leave members out of the spec instead',
+    });
+  }
+  if (request.spec && request.mermaid) {
+    issues.push({ path: "mermaid", message: "pass either spec or mermaid, not both" });
+  } else if (request.mode === "patch" && request.mermaid) {
+    issues.push({
+      path: "mode",
+      message: "Mermaid always replaces the whole composition; patch with a spec instead",
+    });
+  }
+  const source: ComposeSource | null = request.spec
+    ? { spec: request.spec }
+    : request.mermaid
+      ? { mermaid: request.mermaid }
+      : null;
+  if (!source) {
+    issues.push({
+      path: "spec",
+      message:
+        "pass a spec, or Mermaid as mermaid: { key, text, title? }; to remove or detach a composition, set operation and key instead",
+    });
+  }
+  if (issues.length > 0 || !source) throw invalidSpec(issues);
+  const relayout = request.relayout ?? false;
+  if (request.mode === "patch" && "spec" in source) {
+    return { kind: "patch", spec: source.spec, removeKeys: request.removeKeys ?? [], relayout };
+  }
+  return { kind: "replace", source, relayout };
 }
 
 const MAX_ISSUES = 20;
@@ -55,8 +131,14 @@ export function invalidSpec(issues: readonly SpecIssue[]): DiagramOperationError
   });
 }
 
+/**
+ * Nodes a patch may reference besides its own: the composition's remaining nodes, null for a
+ * member a human deleted (its kind is unknown). "any" when they are unknown, as on the server.
+ */
+export type OutsideNodes = ReadonlyMap<string, StoredNode | null> | "any";
+
 /** Normalizes, then checks the spec against its kit. Issue messages name the valid options. */
-export function parseSpec(spec: DiagramSpec): ComposeSpec {
+export function parseSpec(spec: DiagramSpec, outside: OutsideNodes = new Map()): ComposeSpec {
   const kit = KITS[spec.kit];
   const issues: SpecIssue[] = [];
   const keys = new Set<string>();
@@ -85,9 +167,10 @@ export function parseSpec(spec: DiagramSpec): ComposeSpec {
     };
   });
 
-  const nodeKeys = nodes.map((node) => node.key);
+  const nodeKeys = [...nodes.map((node) => node.key), ...(outside === "any" ? [] : outside.keys())];
   const nodeKeySet = new Set(nodeKeys);
-  checkParents(kit, nodes, issues);
+  const known = (key: string) => outside === "any" || nodeKeySet.has(key);
+  checkParents(kit, nodes, outside, issues);
 
   const derivedCounts = new Map<string, number>();
   const edges = (spec.edges ?? []).map((edge, i): StoredEdge => {
@@ -104,7 +187,7 @@ export function parseSpec(spec: DiagramSpec): ComposeSpec {
             paths: { from: `${path}[0]`, to: `${path}[1]`, kind: `${path}.kind` },
           };
     for (const end of ["from", "to"] as const) {
-      if (!nodeKeySet.has(full[end])) {
+      if (!known(full[end])) {
         issues.push({
           path: full.paths[end],
           message: `unknown node "${full[end]}"; valid nodes: ${listOf(nodeKeys)}`,
@@ -129,7 +212,7 @@ export function parseSpec(spec: DiagramSpec): ComposeSpec {
     const on = node.kind === NOTE_KIND ? node.body?.["on"] : undefined;
     if (typeof on !== "string") return;
     const path = `spec.nodes[${i}].body.on`;
-    if (!nodeKeySet.has(on) || on === node.key) {
+    if (!known(on) || on === node.key) {
       const others = nodeKeys.filter((key) => key !== node.key);
       issues.push({ path, message: `unknown node "${on}"; valid nodes: ${listOf(others)}` });
       return;
@@ -209,13 +292,19 @@ function parseBody(
 }
 
 /** Parents must exist, be a container kind, and never loop back. */
-function checkParents(kit: Kit, nodes: readonly StoredNode[], issues: SpecIssue[]): void {
-  const byKey = new Map(nodes.map((node) => [node.key, node]));
+function checkParents(
+  kit: Kit,
+  nodes: readonly StoredNode[],
+  outside: OutsideNodes,
+  issues: SpecIssue[],
+): void {
+  const byKey = new Map<string, StoredNode | null>(outside === "any" ? [] : outside);
+  for (const node of nodes) byKey.set(node.key, node);
   const containerKinds = Object.entries(kit.nodeKinds).flatMap(([kind, row]) =>
     row.shape === "frame" ? [kind] : [],
   );
-  const containers = nodes.flatMap((node) =>
-    kit.nodeKinds[node.kind]?.shape === "frame" ? [node.key] : [],
+  const containers = Array.from(byKey.values()).flatMap((node) =>
+    node && kit.nodeKinds[node.kind]?.shape === "frame" ? [node.key] : [],
   );
   nodes.forEach((node, i) => {
     if (node.parent === null) return;
@@ -228,6 +317,8 @@ function checkParents(kit: Kit, nodes: readonly StoredNode[], issues: SpecIssue[
       return;
     }
     const parent = byKey.get(node.parent);
+    // A patch's parent may be a node only the canvas knows, or one a human deleted.
+    if (parent === null || (parent === undefined && outside === "any")) return;
     if (!parent) {
       issues.push({
         path,
@@ -250,7 +341,7 @@ function checkParents(kit: Kit, nodes: readonly StoredNode[], issues: SpecIssue[
         return;
       }
       const next = at.parent === null ? undefined : byKey.get(at.parent);
-      if (!next || chain.length > nodes.length) return;
+      if (!next || chain.length > byKey.size) return;
       at = next;
     }
   });

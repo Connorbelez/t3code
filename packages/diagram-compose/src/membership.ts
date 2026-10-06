@@ -197,7 +197,7 @@ export function detail(
 }
 
 /** Ledger order, which is spec order, then members the ledger lost track of by key. */
-function memberOrder(composition: CurrentComposition): CurrentMember[] {
+export function memberOrder(composition: CurrentComposition): CurrentMember[] {
   const listed = Array.from(composition.ledger.keys()).flatMap((key) => {
     const member = composition.members.get(key);
     return member ? [member] : [];

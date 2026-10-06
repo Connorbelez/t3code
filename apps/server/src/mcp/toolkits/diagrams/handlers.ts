@@ -9,7 +9,7 @@ import * as Schema from "effect/Schema";
 import { kitReference } from "@t3tools/diagram-compose/model";
 import * as Diagrams from "../../../diagrams/DiagramService.ts";
 import { readCaller, readMutationCaller, resolveProjectId } from "../../threadAccess.ts";
-import { DiagramToolkit, DiagramCaptureToolkit } from "./tools.ts";
+import { DiagramToolkit, DiagramImageToolkit } from "./tools.ts";
 
 const access = Effect.fn("DiagramToolkit.access")(function* (
   requested: ProjectId | undefined,
@@ -66,16 +66,6 @@ export const DiagramHandlersLive = DiagramToolkit.toLayer({
         ...(threadId === undefined ? {} : { threadId }),
       });
     }),
-  t3_diagram_compose: (input) =>
-    Effect.gen(function* () {
-      const { diagrams, projectId, namespace, threadId } = yield* access(input.projectId, true);
-      return yield* diagrams.compose({
-        ...input,
-        projectId,
-        namespace,
-        ...(threadId === undefined ? {} : { threadId }),
-      });
-    }),
   t3_diagram_kit: (input) =>
     Effect.gen(function* () {
       yield* readCaller();
@@ -102,7 +92,7 @@ export const DiagramHandlersLive = DiagramToolkit.toLayer({
     }),
 });
 
-export const DiagramCaptureHandlersLive = DiagramCaptureToolkit.toLayer({
+export const DiagramImageHandlersLive = DiagramImageToolkit.toLayer({
   t3_diagram_capture: (input) =>
     Effect.gen(function* () {
       const { diagrams, projectId } = yield* access(input.projectId);
@@ -112,6 +102,26 @@ export const DiagramCaptureHandlersLive = DiagramCaptureToolkit.toLayer({
         revision: capture.revision,
         scope: capture.scope,
         bounds: capture.bounds,
+        screenshot: {
+          data: capture.base64,
+          mimeType: "image/png" as const,
+          width: capture.width,
+          height: capture.height,
+        },
+      };
+    }),
+  t3_diagram_compose: (input) =>
+    Effect.gen(function* () {
+      const { diagrams, projectId, namespace, threadId } = yield* access(input.projectId, true);
+      const { capture, ...result } = yield* diagrams.compose({
+        ...input,
+        projectId,
+        namespace,
+        ...(threadId === undefined ? {} : { threadId }),
+      });
+      if (!capture) return result;
+      return {
+        ...result,
         screenshot: {
           data: capture.base64,
           mimeType: "image/png" as const,

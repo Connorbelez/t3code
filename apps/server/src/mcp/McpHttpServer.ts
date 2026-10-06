@@ -45,9 +45,10 @@ import * as DiagramThreads from "../orchestration-v2/ThreadManagementService.ts"
 import {
   DiagramToolkit,
   DiagramCaptureTool,
-  DiagramCaptureToolkit,
+  DiagramComposeTool,
+  DiagramImageToolkit,
 } from "./toolkits/diagrams/tools.ts";
-import { DiagramHandlersLive, DiagramCaptureHandlersLive } from "./toolkits/diagrams/handlers.ts";
+import { DiagramHandlersLive, DiagramImageHandlersLive } from "./toolkits/diagrams/handlers.ts";
 import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
 import * as PreviewHandlers from "./toolkits/preview/handlers.ts";
 import {
@@ -512,7 +513,8 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
 });
 
 interface ImageToolResult {
-  readonly screenshot: {
+  /** Absent when a tool returns an image only on request. */
+  readonly screenshot?: {
     readonly mimeType: "image/png";
     readonly data: string;
     readonly width: number;
@@ -621,16 +623,19 @@ const registerImageTool = <T extends Tool.Any, E, R>(
               onSuccess: ({ encodedResult }) => {
                 const { screenshot, ...rest } = encodedResult as ImageToolResult;
                 const includeImage =
+                  screenshot !== undefined &&
                   (payload as { readonly includeImage?: boolean } | undefined)?.includeImage !==
-                  false;
-                const metadata = {
-                  ...rest,
-                  screenshot: {
-                    mimeType: screenshot.mimeType,
-                    width: screenshot.width,
-                    height: screenshot.height,
-                  },
-                };
+                    false;
+                const metadata = screenshot
+                  ? {
+                      ...rest,
+                      screenshot: {
+                        mimeType: screenshot.mimeType,
+                        width: screenshot.width,
+                        height: screenshot.height,
+                      },
+                    }
+                  : rest;
                 return Effect.succeed(
                   new McpSchema.CallToolResult({
                     isError: false,
@@ -699,30 +704,43 @@ export const layerHtmlToolkit = Layer.mergeAll(
 
 const isDiagramOperationError = Schema.is(DiagramOperationError);
 
-const registerDiagramCapture = Effect.fn("McpHttpServer.registerDiagramCapture")(function* () {
-  const diagrams = yield* DiagramService.DiagramService;
-  const threads = yield* DiagramThreads.ThreadManagementService;
-  const built = yield* DiagramCaptureToolkit;
-  yield* registerImageTool(
-    DiagramCaptureTool,
-    (payload) =>
-      built
-        .handle("t3_diagram_capture", payload)
-        .pipe(Stream.unwrap, Stream.run(Sink.last()), Effect.flatMap(Effect.fromOption)),
-    (effect) =>
+const registerDiagramImageTools = Effect.fn("McpHttpServer.registerDiagramImageTools")(
+  function* () {
+    const diagrams = yield* DiagramService.DiagramService;
+    const threads = yield* DiagramThreads.ThreadManagementService;
+    const built = yield* DiagramImageToolkit;
+    const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
       effect.pipe(
         Effect.provideService(DiagramService.DiagramService, diagrams),
         Effect.provideService(DiagramThreads.ThreadManagementService, threads),
-      ),
-    "capture",
-    // Diagram errors carry only a code and server-built details.
-    (error) => (isDiagramOperationError(error) ? error.message : "Diagram capture failed."),
-  );
-});
+      );
+    yield* registerImageTool(
+      DiagramCaptureTool,
+      (payload) =>
+        built
+          .handle("t3_diagram_capture", payload)
+          .pipe(Stream.unwrap, Stream.run(Sink.last()), Effect.flatMap(Effect.fromOption)),
+      provide,
+      "capture",
+      (error) => (isDiagramOperationError(error) ? error.message : "Diagram capture failed."),
+    );
+    // Returns its failures as results, so their details reach the agent intact.
+    yield* registerImageTool(
+      DiagramComposeTool,
+      (payload) =>
+        built
+          .handle("t3_diagram_compose", payload)
+          .pipe(Stream.unwrap, Stream.run(Sink.last()), Effect.flatMap(Effect.fromOption)),
+      provide,
+      "compose",
+      () => "Diagram compose failed.",
+    );
+  },
+);
 
 const layerDiagramToolkit = Layer.mergeAll(
   McpServer.toolkit(DiagramToolkit).pipe(Layer.provide(DiagramHandlersLive)),
-  Layer.effectDiscard(registerDiagramCapture()).pipe(Layer.provide(DiagramCaptureHandlersLive)),
+  Layer.effectDiscard(registerDiagramImageTools()).pipe(Layer.provide(DiagramImageHandlersLive)),
 );
 
 const layerPreviewStandardToolkitRegistration = McpServer.toolkit(PreviewStandardToolkit).pipe(

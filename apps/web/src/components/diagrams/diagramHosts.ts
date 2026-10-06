@@ -5,6 +5,7 @@ import type {
   DiagramHostComposeResult,
   DiagramId,
   DiagramMetadata,
+  DiagramPageScope,
   DiagramScope,
   EnvironmentId,
 } from "@t3tools/contracts";
@@ -25,12 +26,12 @@ export type MountedDiagramHost = {
     batch: DiagramBatch,
   ) => Promise<{ connectionId: string; fingerprint: string }>;
   capture: (
-    scope: DiagramScope,
+    scope: DiagramPageScope,
     format: "png" | "svg",
     expectedRevision?: number,
   ) => Promise<DiagramCapture>;
   compose: (request: DiagramComposeRequest) => Promise<DiagramHostComposeResult>;
-  scope: (kind: DiagramScope["kind"]) => DiagramScope;
+  scope: (kind: DiagramPageScope["kind"]) => DiagramPageScope;
   saveState: () => DiagramSaveState;
   flush: () => Promise<void>;
   release: () => void;

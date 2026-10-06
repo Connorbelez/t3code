@@ -89,18 +89,11 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
   );
 
   const deletes: string[] = [];
-  const detached: TLRecord[] = [];
   for (const decision of decisions) {
-    if (decision.do === "remove") {
-      for (const record of partsInDeleteOrder(decision.current)) {
-        deletes.push(record.id);
-        final.delete(record.id);
-      }
-    } else if (decision.do === "detach") {
-      for (const record of decision.current.parts.values()) {
-        const { [META_KEY]: _dropped, ...meta } = record.meta;
-        detached.push(remember({ ...record, meta }));
-      }
+    if (decision.do !== "remove") continue;
+    for (const record of partsInDeleteOrder(decision.current)) {
+      deletes.push(record.id);
+      final.delete(record.id);
     }
   }
 
@@ -302,7 +295,33 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
     }
   }
 
-  return { puts: [frame, ...nodes, ...detached, ...arrows, ...bindings], deletes };
+  return { puts: [frame, ...nodes, ...arrows, ...bindings], deletes };
+}
+
+/**
+ * The composition ends. Remove deletes every member part, then the frame; detach strips the
+ * composition meta from all of them and leaves everything else exactly as it is.
+ */
+export function emitRelease(
+  kind: "remove" | "detach",
+  current: CurrentComposition,
+  decisions: readonly Decision[],
+): { puts: TLRecord[]; deletes: string[] } {
+  if (kind === "remove") {
+    const parts = decisions.flatMap((decision) =>
+      decision.do === "remove" ? partsInDeleteOrder(decision.current) : [],
+    );
+    return { puts: [], deletes: [...parts.map((record) => record.id), current.frame.id] };
+  }
+  const parts = decisions.flatMap((decision) =>
+    decision.do === "detach" ? Array.from(decision.current.parts.values()) : [],
+  );
+  return { puts: [current.frame, ...parts].map(withoutCompositionMeta), deletes: [] };
+}
+
+function withoutCompositionMeta<T extends TLRecord>(record: T): T {
+  const { [META_KEY]: _dropped, ...meta } = record.meta;
+  return { ...record, meta };
 }
 
 function withPartMeta<T extends TLRecord>(

@@ -3,7 +3,7 @@ import {
   type DiagramId,
   type DiagramLifecycleInput,
   type DiagramMetadata,
-  type DiagramScope,
+  type DiagramPageScope,
   type EnvironmentId,
   type ProjectId,
 } from "@t3tools/contracts";
@@ -80,7 +80,7 @@ function SupportedCanvasPanel(props: CanvasPanelProps) {
   const [archived, setArchived] = useState(false);
   const [busy, setBusy] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<DiagramMetadata | null>(null);
-  const [scope, setScope] = useState<DiagramScope["kind"]>("diagram");
+  const [scope, setScope] = useState<DiagramPageScope["kind"]>("diagram");
   const [saveState, setSaveState] = useState<DiagramSaveState>("connecting");
   const importRef = useRef<HTMLInputElement>(null);
   const active = diagrams.find((diagram) => diagram.id === props.diagramId) ?? null;

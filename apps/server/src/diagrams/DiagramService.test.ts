@@ -4,9 +4,10 @@ import {
   EnvironmentId,
   ProjectId,
   DiagramCapture,
-  DiagramScope,
+  DiagramPageScope,
   DiagramOperationError,
   DiagramReadResult,
+  type DiagramComposeRequest,
   type DiagramHostComposeResult,
   type DiagramHostOperation,
   type DiagramMetadata,
@@ -95,6 +96,7 @@ const connect = Effect.fn(function* (
   const { control } = options;
   const received: DiagramHostOperation[] = [];
   const composeInputs: unknown[] = [];
+  const captureScopes: unknown[] = [];
   const ready = yield* Deferred.make<string>();
   const connected = yield* Deferred.make<void>();
   const committed = yield* Deferred.make<{ generation: string; fence: string }>();
@@ -210,8 +212,9 @@ const connect = Effect.fn(function* (
         });
       } else {
         const input = yield* Schema.decodeUnknownEffect(
-          Schema.Struct({ scope: DiagramScope, revision: Schema.Number }),
+          Schema.Struct({ scope: DiagramPageScope, revision: Schema.Number }),
         )(request.input);
+        captureScopes.push(input.scope);
         const capture: DiagramCapture = {
           diagramId: diagram.id,
           revision: input.revision,
@@ -231,7 +234,7 @@ const connect = Effect.fn(function* (
     }),
   ).pipe(Effect.forkScoped);
   yield* Deferred.await(hostReady);
-  return { connectionId, committed, adopted, released, received, composeInputs };
+  return { connectionId, committed, adopted, released, received, composeInputs, captureScopes };
 });
 
 it.effect("selects the mounted host and refuses a busy context even when images are optional", () =>
@@ -1207,11 +1210,11 @@ it.effect("lists large compositions once in structure and attached context", () 
 /** Runs the real pipeline the way a host would and returns the records after its batch. */
 const composeRecords = Effect.fn(function* (
   records: readonly TLRecord[],
-  spec: DiagramSpec,
-  options: { relayout?: boolean } = {},
+  spec: DiagramSpec | undefined,
+  options: Omit<DiagramComposeRequest, "spec"> = {},
 ) {
   const result = yield* Effect.promise(() =>
-    compose({ spec, ...options }, records, {
+    compose({ ...(spec ? { spec } : {}), ...options }, records, {
       measureText: (text) => ({ w: text.length * 8, h: 20 }),
       parseMermaid: () => Promise.reject(new Error("not expected")),
       rehearse: (puts, deletes) => {
@@ -1478,5 +1481,173 @@ it.effect("sends Mermaid to the composing host unparsed and surfaces its Mermaid
     const both = yield* Effect.flip(service.compose({ ...target, spec: flowSpec, mermaid }));
     assert.equal(both.code, "invalid-spec");
     assert.deepEqual(host.composeInputs, [{ mermaid }, { mermaid: { key: "chart", text: "pie" } }]);
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
+const importComposed = Effect.fn(function* (
+  service: DiagramService.DiagramService["Service"],
+  name: string,
+) {
+  const page = document().records[0]!;
+  const documentRecord = sdkRecord({
+    id: "document:document",
+    typeName: "document",
+    gridSize: 10,
+    name: "",
+    meta: {},
+  });
+  const { records } = yield* composeRecords([documentRecord, page], authSpec);
+  const diagram = yield* service.importDocument({
+    projectId,
+    name,
+    document: { ...document(), records },
+  });
+  return {
+    diagram,
+    records,
+    frame: records.find(
+      (item) => item.id.startsWith("shape:") && item.typeName === "shape" && item.type === "frame",
+    )!,
+  };
+});
+
+// Needs the real compose pipeline and readCompositions from @t3tools/diagram-compose.
+it.effect("patches with the member map and a capture of the committed frame, then removes", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    const { diagram, records, frame } = yield* importComposed(service, "Patch");
+    const patch = {
+      mode: "patch" as const,
+      spec: {
+        kit: "flow" as const,
+        key: "auth",
+        nodes: [{ key: "session", label: "Open session" }],
+      },
+    };
+    const { result: patched, records: afterPatch } = yield* composeRecords(records, patch.spec, {
+      mode: "patch",
+    });
+    const { result: removed } = yield* composeRecords(afterPatch, undefined, {
+      operation: "remove",
+      key: "auth",
+    });
+    const host = yield* connect(service, diagram, {
+      operations: allOperations,
+      composeAnswers: [patched, removed, { changes: null, counts: removed.counts, overlaps: [] }],
+    });
+    const target = { projectId, diagramId: diagram.id, namespace: "provider" };
+
+    const result = yield* service.compose({
+      ...target,
+      ...patch,
+      requestId: "patch-1",
+      includeMembers: true,
+      capture: true,
+    });
+    const frameScope = {
+      kind: "selection",
+      pageId: frame.typeName === "shape" ? frame.parentId : "",
+      shapeIds: [frame.id],
+      bounds: { x: 0, y: 0, w: 256, h: 304 },
+    };
+    assert.deepEqual(
+      {
+        ...result,
+        members: Object.keys(result.members ?? {}),
+        capture: result.capture && {
+          revision: result.capture.revision,
+          scope: result.capture.scope,
+        },
+      },
+      {
+        requestId: "patch-1",
+        revision: 2,
+        compositionKey: "auth",
+        counts: { created: 0, updated: 1, kept: 2, removed: 0 },
+        overlaps: [],
+        members: ["login", "session", "login→session:flow"],
+        capture: { revision: 2, scope: { kind: "composition", key: "auth" } },
+      },
+    );
+    assert.equal(result.members?.["session"], memberShape(afterPatch, "session").id);
+    assert.deepEqual(host.captureScopes, [frameScope]);
+    const committed = yield* Deferred.await(host.committed);
+    yield* service.syncSend({
+      ...target,
+      connectionId: host.connectionId,
+      message: encode({
+        type: "diagram-adoption",
+        generation: committed.generation,
+        fence: committed.fence,
+        push: {
+          type: "push",
+          clientClock: 1,
+          diff: Object.fromEntries(
+            (patched.changes?.puts ?? []).map((item) => [sdkRecord(item).id, ["put", item]]),
+          ),
+        },
+      }),
+    });
+    yield* Deferred.await(host.adopted);
+
+    const removal = { ...target, operation: "remove" as const, key: "auth" };
+    assert.deepEqual(yield* service.compose({ ...removal, requestId: "remove-1" }), {
+      requestId: "remove-1",
+      revision: 3,
+      compositionKey: "auth",
+      counts: { created: 0, updated: 0, kept: 0, removed: 3 },
+      overlaps: [],
+    });
+    assert.equal((yield* service.compose(removal)).requestId, null);
+    const invalid = yield* Effect.flip(service.compose({ ...removal, spec: authSpec }));
+    assert.deepEqual(
+      invalid.details?.issues?.map((issue) => issue.path),
+      ["spec"],
+    );
+    assert.deepEqual(host.received, [
+      "compose",
+      "prepare-batch",
+      "capture",
+      "compose",
+      "prepare-batch",
+      "compose",
+    ]);
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
+// Needs readCompositions from @t3tools/diagram-compose.
+it.effect("captures and prepares context by composition key, and fails a missing key", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    const { diagram, frame } = yield* importComposed(service, "Scope");
+    const host = yield* connect(service, diagram, { operations: allOperations });
+    const scope = { kind: "composition" as const, key: "auth" };
+    const target = { projectId, diagramId: diagram.id };
+
+    const captured = yield* service.capture({ ...target, scope });
+    assert.deepEqual(captured.scope, scope);
+    assert.deepEqual(host.captureScopes, [
+      {
+        kind: "selection",
+        pageId: "page:imported",
+        shapeIds: [frame.id],
+        bounds: { x: 0, y: 0, w: 256, h: 304 },
+      },
+    ]);
+    const context = yield* service.prepareContext({ ...target, scope });
+    assert.deepEqual(
+      {
+        scope: context.scope,
+        compositions: context.structure.compositions.map((item) => item.key),
+        shapes: context.structure.shapes,
+      },
+      { scope, compositions: ["auth"], shapes: [] },
+    );
+
+    const missing = { ...target, scope: { kind: "composition" as const, key: "gone" } };
+    assert.equal((yield* Effect.flip(service.capture(missing))).code, "scope-unavailable");
+    assert.equal((yield* Effect.flip(service.prepareContext(missing))).code, "scope-unavailable");
   }).pipe(Effect.scoped, Effect.provide(dependencies)),
 );

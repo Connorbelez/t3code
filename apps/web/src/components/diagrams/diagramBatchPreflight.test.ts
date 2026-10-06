@@ -15,6 +15,8 @@ import {
   toRichText,
   type TLAnyShapeUtilConstructor,
   type TLRecord,
+  type TLShape,
+  type TLShapeId,
 } from "tldraw";
 import { afterEach, assert, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { rehearseDiagramChanges, validateDiagramBatch } from "./diagramBatchPreflight";
@@ -478,5 +480,208 @@ describe("regenerated batches", () => {
     expect(member(editor, "cart").props).toMatchObject({ color: "red" });
     expect((await composeInto(editor, relayout)).changes).toBeNull();
     expect((await composeInto(editor, next)).changes).toBeNull();
+  });
+});
+function compositionShapes(editor: Editor) {
+  return editor.getCurrentPageShapes().filter((shape) => shape.meta["t3Composition"] !== undefined);
+}
+/** A note drawn inside the frame and an arrow from a loose shape to the `pay` member. */
+function drawAround(editor: Editor) {
+  const frame = editor.getCurrentPageShapes().find((shape) => shape.type === "frame");
+  assert(frame, "the composition has a frame");
+  const note = createShapeId("inside");
+  const loose = createShapeId("loose");
+  const arrow = createShapeId("human-arrow");
+  editor.createShapes([
+    {
+      id: note,
+      type: "text",
+      parentId: frame.id,
+      x: 20,
+      y: 30,
+      props: { richText: toRichText("mine") },
+    },
+    { id: loose, type: "geo", x: -400, y: 0 },
+    { id: arrow, type: "arrow" },
+  ]);
+  editor.createBindings(
+    (["start", "end"] as const).map((terminal) => ({
+      type: "arrow",
+      fromId: arrow,
+      toId: terminal === "start" ? loose : member(editor, "pay").id,
+      props: {
+        terminal,
+        normalizedAnchor: { x: 0.5, y: 0.5 },
+        isExact: false,
+        isPrecise: false,
+        snap: "none",
+      },
+    })),
+  );
+  return { note, arrow, notePage: editor.getShapePageBounds(note)?.toJson() };
+}
+
+describe("patch, remove and detach batches", () => {
+  it("patch one member and drop another, then remove keeping the user's shapes", async () => {
+    const editor = mount();
+    const first = await composeInto(editor);
+    assert(first.changes, "a new composition must produce changes");
+    applyComposed(editor, first.changes);
+    const { note, arrow, notePage } = drawAround(editor);
+
+    const patch: DiagramComposeRequest = {
+      mode: "patch",
+      spec: { kit: "flow", key: "checkout", nodes: [{ key: "pay", label: "Charge card" }] },
+      removeKeys: ["receipt"],
+    };
+    const patched = await composeInto(editor, patch);
+    expect(patched.counts).toEqual({ created: 0, updated: 1, kept: 8, removed: 3 });
+    assert(patched.changes, "the patch must produce changes");
+    applyComposed(editor, patched.changes);
+    expect(editor.getShape(member(editor, "pay").id)?.props).toMatchObject({
+      richText: toRichText("Charge card"),
+    });
+    expect((await composeInto(editor, patch)).changes).toBeNull();
+
+    const remove: DiagramComposeRequest = { operation: "remove", key: "checkout" };
+    const removed = await composeInto(editor, remove);
+    assert(removed.changes, "removing must produce changes");
+    applyComposed(editor, removed.changes);
+    expect(compositionShapes(editor)).toEqual([]);
+    expect(editor.getShape(note)?.parentId).toBe(editor.getCurrentPageId());
+    expect(editor.getShapePageBounds(note)?.toJson()).toEqual(notePage);
+    expect(editor.getShape(arrow)).toBeDefined();
+    expect(editor.getBindingsFromShape(arrow, "arrow").map((binding) => binding.toId)).toEqual([
+      createShapeId("loose"),
+    ]);
+    expect((await composeInto(editor, remove)).changes).toBeNull();
+  });
+
+  it("detach leaves the shapes as they are, and composing again starts a new composition", async () => {
+    const editor = mount();
+    const first = await composeInto(editor);
+    assert(first.changes, "a new composition must produce changes");
+    applyComposed(editor, first.changes);
+    drawAround(editor);
+    const strip = (shapes: TLShape[]) => shapes.map((shape) => ({ ...shape, meta: {} }));
+    const before = strip(editor.getCurrentPageShapes());
+
+    const detach: DiagramComposeRequest = { operation: "detach", key: "checkout" };
+    const detached = await composeInto(editor, detach);
+    assert(detached.changes, "detaching must produce changes");
+    applyComposed(editor, detached.changes);
+    expect(compositionShapes(editor)).toEqual([]);
+    expect(strip(editor.getCurrentPageShapes())).toEqual(before);
+    expect((await composeInto(editor, detach)).changes).toBeNull();
+
+    const again = await composeInto(editor);
+    expect(again.counts.created).toBe(12);
+    assert(again.changes, "composing a detached key again must produce changes");
+    applyComposed(editor, again.changes);
+    expect(compositionShapes(editor)).toHaveLength(13);
+    expect(strip(before.flatMap((shape) => editor.getShape(shape.id) ?? []))).toEqual(before);
+  });
+});
+
+describe("removing boundaries", () => {
+  function drawInside(editor: Editor, parentKey: string, name: string) {
+    const id = createShapeId(name);
+    editor.createShape({
+      id,
+      type: "text",
+      parentId: member(editor, parentKey).id,
+      x: 8,
+      y: 12,
+      props: { richText: toRichText(name) },
+    });
+    return { id, page: editor.getShapePageBounds(id)?.toJson() };
+  }
+  function expectKept(editor: Editor, shape: { id: TLShapeId; page: unknown }, parentId: string) {
+    expect(editor.getShape(shape.id)?.parentId).toBe(parentId);
+    expect(editor.getShapePageBounds(shape.id)?.toJson()).toEqual(shape.page);
+  }
+
+  it("keeps shapes a user drew inside a boundary the spec drops, a patch removes, or remove deletes", async () => {
+    const editor = mount();
+    const first = await composeInto(editor, grouped);
+    assert(first.changes, "a new composition must produce changes");
+    applyComposed(editor, first.changes);
+    const frame = editor
+      .getCurrentPageShapes()
+      .find(
+        (shape) =>
+          shape.type === "frame" &&
+          shape.meta["t3Composition"] !== undefined &&
+          shape.parentId === editor.getCurrentPageId(),
+      );
+    assert(frame, "the composition has a frame");
+    const inServer = drawInside(editor, "server", "in-server");
+    const inClient = drawInside(editor, "client", "in-client");
+
+    const withoutServer: DiagramComposeRequest = {
+      spec: {
+        ...grouped.spec,
+        nodes: [
+          { key: "client", kind: "group", label: "Client" },
+          { key: "click", kind: "start", parent: "client" },
+          { key: "post", parent: "client" },
+          { key: "handle" },
+          { key: "store", kind: "io" },
+          { key: "tip", kind: "note", label: "Idempotent" },
+        ],
+      },
+    };
+    const replaced = await composeInto(editor, withoutServer);
+    assert(replaced.changes, "dropping a boundary must produce changes");
+    applyComposed(editor, replaced.changes);
+    expectKept(editor, inServer, frame.id);
+
+    const removeClient = {
+      mode: "patch",
+      spec: { kit: "flow", key: "grouped", nodes: [] },
+      removeKeys: ["client"],
+    } satisfies DiagramComposeRequest;
+    await expect(composeInto(editor, removeClient)).rejects.toMatchObject({
+      code: "invalid-spec",
+      details: {
+        issues: [
+          {
+            path: "removeKeys",
+            message: '"client" still holds "click"; remove it too, or patch its parent',
+          },
+          {
+            path: "removeKeys",
+            message: '"client" still holds "post"; remove it too, or patch its parent',
+          },
+        ],
+      },
+    });
+    const patched = await composeInto(editor, {
+      ...removeClient,
+      spec: { ...removeClient.spec, nodes: [{ key: "click", kind: "start" }, { key: "post" }] },
+    });
+    assert(patched.changes, "removing a boundary must produce changes");
+    applyComposed(editor, patched.changes);
+    expectKept(editor, inClient, frame.id);
+
+    const removed = await composeInto(editor, { operation: "remove", key: "grouped" });
+    assert(removed.changes, "removing must produce changes");
+    applyComposed(editor, removed.changes);
+    expect(compositionShapes(editor)).toEqual([]);
+    expectKept(editor, inServer, editor.getCurrentPageId());
+    expectKept(editor, inClient, editor.getCurrentPageId());
+  });
+
+  it("carries a shape out of a nested boundary when the whole composition is removed", async () => {
+    const editor = mount();
+    const first = await composeInto(editor, orders);
+    assert(first.changes, "a new composition must produce changes");
+    applyComposed(editor, first.changes);
+    const deep = drawInside(editor, "shipping", "deep");
+    const removed = await composeInto(editor, { operation: "remove", key: "orders" });
+    assert(removed.changes, "removing must produce changes");
+    applyComposed(editor, removed.changes);
+    expect(compositionShapes(editor)).toEqual([]);
+    expectKept(editor, deep, editor.getCurrentPageId());
   });
 });

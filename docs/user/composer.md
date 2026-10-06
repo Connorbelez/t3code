@@ -82,6 +82,13 @@ editable drawing, and asking again with changed Mermaid updates it in place.
 Mermaid styling is not carried over, and other Mermaid diagram types are not
 supported yet.
 
+To clear a generated drawing, ask the agent to remove it. Its shapes are
+deleted, but arrows you drew to them stay, unattached, and shapes you drew inside
+its frames stay where they are. To take a drawing over by hand, ask the agent to
+detach it instead. Every shape stays exactly where it is, and the agent no
+longer updates it. If you later ask for that drawing again, the agent starts a
+new one.
+
 ## Send while the agent is working
 
 On web and desktop, choose **Settings → General → Follow-up behavior** to queue

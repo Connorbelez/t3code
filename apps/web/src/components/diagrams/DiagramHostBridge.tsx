@@ -4,7 +4,7 @@ import {
   DiagramBatch,
   DiagramComposeRequest,
   DiagramOperationError,
-  DiagramScope,
+  DiagramPageScope,
   type DiagramHostRequest,
   type DiagramMetadata,
   type EnvironmentId,
@@ -25,7 +25,7 @@ import {
 const DiagramEditor = lazy(() => import("./DiagramEditor"));
 const isDiagramError = Schema.is(DiagramOperationError);
 const captureInput = Schema.Struct({
-  scope: DiagramScope,
+  scope: DiagramPageScope,
   revision: Schema.Number,
   format: Schema.Literals(["png", "svg"]),
 });

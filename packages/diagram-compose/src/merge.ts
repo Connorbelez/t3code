@@ -23,7 +23,7 @@ type Intent =
   | { readonly want: "purge" }
   | { readonly want: "detach" };
 
-interface Row {
+export interface Row {
   readonly key: string;
   readonly intent: Intent;
   /** Spec hash in the ledger; null when compose never wrote this member. */
@@ -51,37 +51,87 @@ export type Decision =
   | { readonly do: "detach"; readonly key: string; readonly current: CurrentMember }
   | { readonly do: "conflict"; readonly key: string };
 
-export function draftsOf(spec: ComposeSpec): MemberDraft[] {
-  return [...spec.nodes, ...spec.edges].map((member) => ({
-    key: member.key,
-    hash: specHash(member),
-    spec: member,
-  }));
+function draftOf(member: StoredMember): MemberDraft {
+  return { key: member.key, hash: specHash(member), spec: member };
 }
 
-/** Replace mode: spec members in spec order, then everything compose owns that the spec dropped. */
-function replaceRows(drafts: readonly MemberDraft[], current: CurrentComposition | null): Row[] {
-  const rows: Row[] = drafts.map((draft) => ({
-    key: draft.key,
-    intent: { want: "upsert", draft },
-    last: current?.ledger.get(draft.key) ?? null,
-    current: current?.members.get(draft.key) ?? null,
-  }));
-  if (!current) return rows;
-  const wanted = new Set(drafts.map((draft) => draft.key));
+export function draftsOf(spec: ComposeSpec): MemberDraft[] {
+  return [...spec.nodes, ...spec.edges].map(draftOf);
+}
+
+function rowOf(key: string, intent: Intent, current: CurrentComposition | null): Row {
+  return {
+    key,
+    intent,
+    last: current?.ledger.get(key) ?? null,
+    current: current?.members.get(key) ?? null,
+  };
+}
+
+/** Ledger order, then members the ledger lost track of by key. */
+function memberKeys(current: CurrentComposition): string[] {
   const unlisted = Array.from(current.members.keys())
     .filter((key) => !current.ledger.has(key))
     .sort(compareIndex);
-  for (const key of [...current.ledger.keys(), ...unlisted]) {
-    if (wanted.has(key)) continue;
-    rows.push({
-      key,
-      intent: { want: "drop" },
-      last: current.ledger.get(key) ?? null,
-      current: current.members.get(key) ?? null,
-    });
+  return [...current.ledger.keys(), ...unlisted];
+}
+
+/** Replace mode: spec members in spec order, then everything compose owns that the spec dropped. */
+export function replaceRows(
+  drafts: readonly MemberDraft[],
+  current: CurrentComposition | null,
+): Row[] {
+  const rows = drafts.map((draft) => rowOf(draft.key, { want: "upsert", draft }, current));
+  if (!current) return rows;
+  const wanted = new Set(drafts.map((draft) => draft.key));
+  for (const key of memberKeys(current)) {
+    if (!wanted.has(key)) rows.push(rowOf(key, { want: "drop" }, current));
   }
   return rows;
+}
+
+/**
+ * Patch mode: the composition's members in member order with listed members swapped in, removed
+ * keys and the member edges of removed nodes dropped, and everything else untouched. New nodes go
+ * before the first edge and new edges last, which is where replacing with the whole patched spec
+ * (nodes, then edges) puts them, so both modes write the same ledger.
+ */
+export function patchRows(
+  drafts: readonly MemberDraft[],
+  removeKeys: readonly string[],
+  current: CurrentComposition,
+): Row[] {
+  const byKey = new Map(drafts.map((draft) => [draft.key, draft]));
+  const removed = new Set(removeKeys);
+  const endpointRemoved = (member: CurrentMember | undefined) =>
+    member?.stored.role === "edge" &&
+    !byKey.has(member.key) &&
+    (removed.has(member.stored.from) || removed.has(member.stored.to));
+  const rows = memberKeys(current).map((key): Row => {
+    const draft = byKey.get(key);
+    if (draft) return rowOf(key, { want: "upsert", draft }, current);
+    if (removed.has(key) || endpointRemoved(current.members.get(key)))
+      return rowOf(key, { want: "drop" }, current);
+    return rowOf(key, { want: "untouched" }, current);
+  });
+  const isEdge = (row: Row) =>
+    row.intent.want === "upsert"
+      ? row.intent.draft.spec.role === "edge"
+      : row.current?.stored.role === "edge";
+  const firstEdge = rows.findIndex(isEdge);
+  const known = new Set(rows.map((row) => row.key));
+  const added = drafts
+    .filter((draft) => !known.has(draft.key))
+    .map((draft) => rowOf(draft.key, { want: "upsert", draft }, current));
+  const nodes = added.filter((row) => !isEdge(row));
+  const edges = added.filter(isEdge);
+  const at = firstEdge === -1 ? rows.length : firstEdge;
+  return [...rows.slice(0, at), ...nodes, ...rows.slice(at), ...edges];
+}
+
+/** Removing or detaching the whole composition: every member it knows of. */
+export function releaseRows(want: "purge" | "detach", current: CurrentComposition): Row[] {
+  return memberKeys(current).map((key) => rowOf(key, { want }, current));
 }
 
 function decide(row: Row): Decision {
@@ -110,11 +160,7 @@ function decide(row: Row): Decision {
 }
 
 /** Throws one `conflict` naming every member that both the spec and someone else changed. */
-export function decideReplace(
-  drafts: readonly MemberDraft[],
-  current: CurrentComposition | null,
-): Decision[] {
-  const rows = replaceRows(drafts, current);
+export function decideRows(rows: readonly Row[]): Decision[] {
   const decisions = rows.map(decide);
   const conflicts = decisions.flatMap((decision) =>
     decision.do === "conflict" ? [decision.key] : [],
@@ -133,7 +179,7 @@ export function decideReplace(
       decision.current?.stored.role === "edge" &&
       !decision.current.edited &&
       decision.current.parts.size < MEMBER_PARTS.edge.length &&
-      row?.intent.want === "upsert" &&
+      (row?.intent.want === "upsert" || row?.intent.want === "untouched") &&
       nodes.has(decision.current.stored.from) &&
       nodes.has(decision.current.stored.to)
     ) {
@@ -141,7 +187,7 @@ export function decideReplace(
       return {
         do: "overwrite",
         key: decision.key,
-        draft: row.intent.draft,
+        draft: row.intent.want === "upsert" ? row.intent.draft : draftOf(decision.current.stored),
         current: decision.current,
       };
     }

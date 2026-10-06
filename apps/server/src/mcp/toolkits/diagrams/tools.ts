@@ -60,24 +60,36 @@ const composeGuidance = [
   "Prefer this over t3_diagram_apply for structured diagrams, and describe content, not coordinates: labels default to keys, kinds default per kit, and edges accept [from, to, label?]. t3_diagram_kit lists a kit's vocabulary and an example; invalid specs fail listing the valid options.",
   'Group nodes inside a boundary kind (flow group, state composite) by setting parent to its key. Every kit has a note kind; body { "on": "<node key>" } attaches it to that node.',
   "Instead of spec you may pass Mermaid flowchart or stateDiagram text as mermaid: { key, text, title? }. Node IDs become member keys, so composing the same Mermaid again updates in place; subgraphs and composite states become boundaries, and styling is ignored. Other Mermaid types fail unsupported-mermaid.",
-  "The spec or Mermaid replaces the whole composition with that key. Before recomposing an existing key, read it with t3_diagram_read compositionKey and build the new spec from the member specs there.",
+  "By default the spec or Mermaid replaces the whole composition with that key. Before recomposing an existing key, read it with t3_diagram_read compositionKey and build the new spec from the member specs there.",
+  'For small changes to an existing composition, send mode "patch" with a spec of only the nodes and edges to add or change, plus removeKeys for members to delete (a removed node takes its edges with it); every other member stays as it is. Mermaid always replaces. A shorthand edge in a patch is matched by its derived key from→to:kind, so give key to change a repeated edge.',
   "Recomposing keeps every existing position, places new members around them, keeps human edits to members your spec leaves unchanged, and rewrites only unedited members whose spec changed.",
   "If your spec changes or drops a member that someone else also edited, nothing changes and the call fails with conflict listing those keys in details.members; merge their current text into your spec, or leave those members as they were, and retry.",
   "Set relayout: true only when the user asks to rearrange the diagram, because it moves every member. The result lists overlapping member pairs; mention them rather than relaying out unasked.",
+  'operation "remove" with key deletes a composition; arrows the user drew to it stay, unbound, and shapes the user drew inside its frame stay. operation "detach" with key leaves every shape in place as ordinary shapes you no longer manage; composing that key again starts a new composition. Do either only when the user asks.',
+  "includeMembers: true returns each member key's shape ID. capture: true returns an image of the composition's frame after the change, to check your own result; it is costly, so use it once you are done, not on every call.",
   "An identical retry is a no-op, so retry freely after an uncertain response. requestId is optional and only needed for t3_diagram_receipt lookup.",
   "One composition is at most 500 records; split large diagrams into several compositions by area.",
   "A connected editor host is required. Attaching a diagram is context and does not authorize changing it.",
 ].join(" ");
 
-const compose = Tool.make("t3_diagram_compose", {
+const { capture: _capture, ...composeResultFields } = Contracts.DiagramComposeResult.fields;
+
+/** Registered as an image tool: a capture goes out as image content, not base64 JSON. */
+export const DiagramComposeTool = Tool.make("t3_diagram_compose", {
   ...shared,
   description: composeGuidance,
-  parameters: Schema.Struct({
-    ...target,
-    requestId: Schema.optional(Contracts.DiagramRequestId),
-    ...Contracts.DiagramComposeRequest.fields,
+  parameters: Schema.Struct({ ...Contracts.DiagramComposeInput.fields, projectId }),
+  success: Schema.Struct({
+    ...composeResultFields,
+    screenshot: Schema.optional(
+      Schema.Struct({
+        data: Schema.String,
+        mimeType: Schema.Literal("image/png"),
+        width: Contracts.NonNegativeInt,
+        height: Contracts.NonNegativeInt,
+      }),
+    ),
   }),
-  success: Contracts.DiagramComposeResult,
 })
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true);
@@ -128,7 +140,7 @@ export const DiagramCaptureTool = Tool.make("t3_diagram_capture", {
   ...shared,
   failureMode: "error",
   description:
-    "Capture a fresh PNG of the specified page, saved selection IDs/bounds or viewport. Returns actual image content plus page-space bounds, dimensions and committed revision. Requires a connected web/desktop editor and preserves human camera/selection. A missing selected shape fails scope recovery rather than expanding the scope.",
+    'Capture a fresh PNG of the specified page, saved selection IDs/bounds, viewport, or composition frame ({kind: "composition", key}). Returns actual image content plus page-space bounds, dimensions and committed revision. Requires a connected web/desktop editor and preserves human camera/selection. A missing selected shape fails scope recovery rather than expanding the scope.',
   parameters: Schema.Struct({ ...target, scope: Contracts.DiagramScope }),
   success: Schema.Struct({
     diagramId: Contracts.DiagramId,
@@ -151,10 +163,9 @@ export const DiagramToolkit = Toolkit.make(
   read,
   create,
   apply,
-  compose,
   kit,
   receipt,
   lifecycle,
   exportDocument,
 );
-export const DiagramCaptureToolkit = Toolkit.make(DiagramCaptureTool);
+export const DiagramImageToolkit = Toolkit.make(DiagramCaptureTool, DiagramComposeTool);

@@ -51,7 +51,13 @@ export const DiagramBounds = Schema.Struct({
 });
 export type DiagramBounds = typeof DiagramBounds.Type;
 
-export const DiagramScope = Schema.Union([
+export const DiagramCompositionKey = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(120),
+  Schema.isPattern(/^\S+$/),
+);
+
+/** Scopes addressed by page and area: what clients attach and what an editor host captures. */
+export const DiagramPageScope = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("diagram"), pageId: DiagramRecordId }),
   Schema.Struct({
     kind: Schema.Literal("selection"),
@@ -67,6 +73,13 @@ export const DiagramScope = Schema.Union([
     pageId: DiagramRecordId,
     bounds: DiagramBounds,
   }),
+]);
+export type DiagramPageScope = typeof DiagramPageScope.Type;
+
+/** A composition scope resolves on the server to its frame's current page and bounds. */
+export const DiagramScope = Schema.Union([
+  ...DiagramPageScope.members,
+  Schema.Struct({ kind: Schema.Literal("composition"), key: DiagramCompositionKey }),
 ]);
 export type DiagramScope = typeof DiagramScope.Type;
 
@@ -397,10 +410,6 @@ export const DIAGRAM_KITS = ["flow", "state"] as const;
 export const DiagramKit = Schema.Literals(DIAGRAM_KITS);
 export type DiagramKit = typeof DiagramKit.Type;
 
-export const DiagramCompositionKey = TrimmedNonEmptyString.check(
-  Schema.isMaxLength(120),
-  Schema.isPattern(/^\S+$/),
-);
 /** Node keys cannot contain "." because edges address nested elements as `node.element`. */
 export const DiagramMemberKey = TrimmedNonEmptyString.check(
   Schema.isMaxLength(120),
@@ -475,13 +484,26 @@ export const DiagramMermaidSource = Schema.Struct({
 });
 export type DiagramMermaidSource = typeof DiagramMermaidSource.Type;
 
+export const DiagramComposeOperation = Schema.Literals(["compose", "remove", "detach"]);
+export type DiagramComposeOperation = typeof DiagramComposeOperation.Type;
+
 /**
- * What the editor host needs to compose, with exactly one of `spec` or `mermaid`; the server adds
- * the target and request ID.
+ * What the editor host needs; the server adds the target and request ID. `compose` (the default)
+ * takes exactly one of `spec` or `mermaid`; `remove` and `detach` take only the composition `key`.
+ * One flat struct keeps the MCP tool's input a single JSON object; the pipeline's validation
+ * enforces the combinations.
  */
 export const DiagramComposeRequest = Schema.Struct({
+  operation: Schema.optional(DiagramComposeOperation),
+  key: Schema.optional(DiagramCompositionKey),
   spec: Schema.optional(DiagramSpec),
   mermaid: Schema.optional(DiagramMermaidSource),
+  /** `replace` (default): the spec is the whole composition. `patch`: only the listed members. */
+  mode: Schema.optional(Schema.Literals(["replace", "patch"])),
+  /** Patch only: members to delete, with the member edges of any node among them. */
+  removeKeys: Schema.optional(
+    Schema.Array(DiagramMemberKey).check(Schema.isMaxLength(DIAGRAM_MAX_BATCH_RECORDS)),
+  ),
   /** Repositions every member; otherwise existing members stay where they are. */
   relayout: Schema.optional(Schema.Boolean),
 });
@@ -491,6 +513,10 @@ export const DiagramComposeInput = Schema.Struct({
   ...DiagramTarget.fields,
   requestId: Schema.optional(DiagramRequestId),
   ...DiagramComposeRequest.fields,
+  /** Return the member key to shape ID map. */
+  includeMembers: Schema.optional(Schema.Boolean),
+  /** Return a PNG of the composition frame at the committed revision. */
+  capture: Schema.optional(Schema.Boolean),
 });
 export type DiagramComposeInput = typeof DiagramComposeInput.Type;
 
@@ -514,6 +540,9 @@ export const DiagramComposeResult = Schema.Struct({
   compositionKey: DiagramCompositionKey,
   counts: DiagramComposeCounts,
   overlaps: DiagramComposeOverlaps,
+  /** Member key to main shape ID, only with `includeMembers`. */
+  members: Schema.optional(Schema.Record(Schema.String, DiagramRecordId)),
+  capture: Schema.optional(DiagramCapture),
 });
 export type DiagramComposeResult = typeof DiagramComposeResult.Type;
 
