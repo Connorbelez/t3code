@@ -4,8 +4,8 @@ import { videoMimeType } from "@t3tools/shared/video";
 import {
   COMPOSER_CONTEXT_MAX_RECORDS,
   ComposerContextId,
-  DiagramContextRecord,
   type ComposerContextRecord,
+  isKnownComposerContextRecord,
   OrchestrationMessageContext,
   type PullRequestContextMetadata,
   type ReviewCommentContextRecord,
@@ -13,8 +13,10 @@ import {
   type ThreadContextRecord,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
+import { stripAnnotationCapture } from "@t3tools/client-runtime/diagram-annotations";
 import {
   collectComposerContextReferences,
+  composerContextImageDependencies,
   formatComposerContextReference,
   replaceComposerContextReferences,
   sanitizeComposerContextLabel,
@@ -76,7 +78,7 @@ export function composerDocumentAttachment(
 export function composerDocumentAttachmentRecord(
   record: ComposerContextRecord | undefined,
 ): ComposerDocumentAttachment | null {
-  if (!record || "payload" in record || record.kind !== "file") return null;
+  if (!record || !isKnownComposerContextRecord(record) || record.kind !== "file") return null;
   if (videoMimeType(record) !== null) return null;
   const kind = filePreviewKind(record);
   if (kind === "image" || kind === "pdf" || kind === "video") return null;
@@ -159,24 +161,13 @@ export function composerContextEditorTokens(text: string, tokens: readonly Compo
   ].sort((a, b) => a.start - b.start);
 }
 
-/** Prunes removed references, retaining the screenshot bound to a preview annotation. */
+/** Prunes removed references, retaining the images a remaining record depends on. */
 export function referencedComposerContext(text: string, context?: OrchestrationMessageContext) {
   if (!context) return undefined;
   const ids = new Set(collectComposerContextReferences(text).map((ref) => ref.contextId));
   for (const record of context.records) {
-    if (
-      ids.has(record.contextId) &&
-      Schema.is(DiagramContextRecord)(record) &&
-      record.payload.screenshotContextId
-    )
-      ids.add(record.payload.screenshotContextId);
-    if (
-      ids.has(record.contextId) &&
-      record.kind === "preview-annotation" &&
-      "screenshotContextId" in record &&
-      record.screenshotContextId
-    ) {
-      ids.add(record.screenshotContextId);
+    if (ids.has(record.contextId)) {
+      for (const dependency of composerContextImageDependencies(record)) ids.add(dependency);
     }
   }
   const records = context.records.filter((record) => ids.has(record.contextId));
@@ -202,50 +193,63 @@ export function uploadedComposerContext(
   };
 }
 
-/** Imports with fresh identities so a pasted record cannot overwrite an existing snapshot. */
+/**
+ * Imports with fresh identities so a pasted record cannot overwrite an existing snapshot. An
+ * imported Canvas comment set is new work: its frozen capture and numbered images are dropped
+ * so the next send captures the diagram again.
+ */
 export function reidentifyComposerContext(
   text: string,
   records: readonly ComposerContextRecord[],
   createId: () => string,
 ) {
-  const ids = new Map(
-    records.map((record) => [record.contextId, ComposerContextId.make(createId())]),
+  const capturedImages = new Set(
+    records.flatMap((record) =>
+      isKnownComposerContextRecord(record) && record.kind === "diagram-annotations"
+        ? composerContextImageDependencies(record)
+        : [],
+    ),
   );
+  const kept = records.filter((record) => !capturedImages.has(record.contextId));
+  const ids = new Map(kept.map((record) => [record.contextId, ComposerContextId.make(createId())]));
+  const rebind = (contextId: ComposerContextId) => ids.get(contextId) ?? contextId;
   return {
     text: replaceComposerContextReferences(text, (ref) =>
-      formatComposerContextReference({
-        ...ref,
-        contextId: ids.get(ref.contextId) ?? ref.contextId,
-      }),
+      formatComposerContextReference({ ...ref, contextId: rebind(ref.contextId) }),
     ),
     context: {
       version: 1 as const,
-      records: records.map((record) => ({
-        ...record,
-        contextId: ids.get(record.contextId)!,
-        ...(Schema.is(DiagramContextRecord)(record)
-          ? {
+      records: kept.map((record): ComposerContextRecord => {
+        const contextId = ids.get(record.contextId)!;
+        if (!isKnownComposerContextRecord(record)) return { ...record, contextId };
+        switch (record.kind) {
+          case "diagram-annotations":
+            return { ...stripAnnotationCapture(record), contextId };
+          case "diagram": {
+            const { screenshotContextId } = record.payload;
+            return {
+              ...record,
+              contextId,
               payload: {
                 ...record.payload,
-                ...(record.payload.screenshotContextId
-                  ? {
-                      screenshotContextId:
-                        ids.get(record.payload.screenshotContextId) ??
-                        record.payload.screenshotContextId,
-                    }
+                ...(screenshotContextId
+                  ? { screenshotContextId: rebind(screenshotContextId) }
                   : {}),
               },
-            }
-          : {}),
-        ...(record.kind === "preview-annotation" &&
-        "screenshotContextId" in record &&
-        record.screenshotContextId
-          ? {
-              screenshotContextId:
-                ids.get(record.screenshotContextId) ?? record.screenshotContextId,
-            }
-          : {}),
-      })),
+            };
+          }
+          case "preview-annotation":
+            return {
+              ...record,
+              contextId,
+              ...(record.screenshotContextId
+                ? { screenshotContextId: rebind(record.screenshotContextId) }
+                : {}),
+            };
+          default:
+            return { ...record, contextId };
+        }
+      }),
     },
   };
 }
