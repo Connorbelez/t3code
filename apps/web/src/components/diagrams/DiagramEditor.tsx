@@ -11,27 +11,70 @@ import {
 } from "@t3tools/contracts";
 import {
   Box,
+  DefaultContextMenu,
+  DefaultContextMenuContent,
   EmbedShapeUtil,
   Tldraw,
+  TldrawUiMenuGroup,
+  TldrawUiMenuItem,
   getFontFamily,
+  react,
+  useEditor,
+  useValue,
   type Editor,
   type TLAssetStore,
+  type TLComponents,
   type TLRecord,
   type TLShapeId,
+  type TLUiContextMenuProps,
 } from "tldraw";
 import * as Schema from "effect/Schema";
-import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useContext,
+  useEffect,
+  useEffectEvent,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useTheme } from "~/hooks/useTheme";
 import { createDiagramApi, diagramSyncEvents } from "./diagramApi";
 import { DiagramSocket, parseDocumentRecord, type DiagramSaveState } from "./diagramSocket";
 import { diagramHostClientId, registerDiagramHost, type MountedDiagramHost } from "./diagramHosts";
 import { rehearseDiagramChanges, validateDiagramBatch } from "./diagramBatchPreflight";
 import { composeOnHost } from "./diagramHostCompose";
+import { addCanvasSelectionToChat, registerCanvasSelectionChat } from "./canvasSelectionChat";
 import "tldraw/tldraw.css";
 
 const assetUrls = getAssetUrlsByImport();
 const shapeUtils = [EmbedShapeUtil.configure({ embedDefinitions: [] })];
 const decodeScope = Schema.decodeSync(DiagramPageScope);
+function ChatContextMenu(props: TLUiContextMenuProps) {
+  const editor = useEditor();
+  const hasSelection = useValue("has selection", () => editor.getSelectedShapeIds().length > 0, [
+    editor,
+  ]);
+  return (
+    <DefaultContextMenu {...props}>
+      {hasSelection ? (
+        <TldrawUiMenuGroup id="t3-chat">
+          <TldrawUiMenuItem
+            id="add-selection-to-chat"
+            label="Add selection to chat"
+            readonlyOk
+            onSelect={() => {
+              addCanvasSelectionToChat();
+            }}
+          />
+        </TldrawUiMenuGroup>
+      ) : null}
+      <DefaultContextMenuContent />
+    </DefaultContextMenu>
+  );
+}
+const hiddenComponents: TLComponents = { SharePanel: null };
+const panelComponents: TLComponents = { SharePanel: null, ContextMenu: ChatContextMenu };
 const canonical = (value: unknown): string => {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
@@ -63,6 +106,8 @@ type DiagramEditorProps = {
   diagram: DiagramMetadata;
   onSaveState?: (state: DiagramSaveState) => void;
   onHostReady?: (host: MountedDiagramHost) => void;
+  /** Set by the Canvas panel: its selection can then be added to chat from the canvas. */
+  onAddSelectionToChat?: () => void;
   visible?: boolean;
 };
 export default function DiagramEditor(props: DiagramEditorProps) {
@@ -156,6 +201,20 @@ function MountedDiagramEditor(props: DiagramEditorProps & { onAdoptionLost: () =
       isReadonly: heldRef.current || props.diagram.archivedAt !== null,
     });
   }, [editor, props.diagram.archivedAt, resolvedTheme, synced.status]);
+
+  const addSelectionToChat = useEffectEvent(() => props.onAddSelectionToChat?.());
+  const chatAttachable = props.onAddSelectionToChat !== undefined;
+  useEffect(() => {
+    if (!editor || !chatAttachable) return;
+    const registration = registerCanvasSelectionChat(addSelectionToChat);
+    const stop = react("canvas selection for chat", () =>
+      registration.setHasSelection(editor.getSelectedShapeIds().length > 0),
+    );
+    return () => {
+      stop();
+      registration.unregister();
+    };
+  }, [chatAttachable, editor]);
 
   useEffect(() => {
     const socket = socketRef.current;
@@ -540,7 +599,7 @@ function MountedDiagramEditor(props: DiagramEditorProps & { onAdoptionLost: () =
         onMount={mount}
         licenseKey={import.meta.env.VITE_TLDRAW_LICENSE_KEY}
         options={{ maxPages: 100 }}
-        components={{ SharePanel: null }}
+        components={chatAttachable ? panelComponents : hiddenComponents}
       />
       {fenced ? (
         <div className="absolute inset-0 z-50 cursor-wait" aria-label="Applying diagram changes" />

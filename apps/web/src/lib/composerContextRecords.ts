@@ -1,4 +1,3 @@
-import { randomUUID } from "~/lib/utils";
 import {
   COMPOSER_CONTEXT_REVIEW_DIFF_MAX_CHARS,
   COMPOSER_CONTEXT_REVIEW_TEXT_MAX_CHARS,
@@ -187,13 +186,21 @@ export function diagramContextReference(record: DiagramContextRecord): ComposerC
   return { kind: "diagram", contextId: record.contextId, label: record.label };
 }
 
+/**
+ * The id is the diagram and the exact scope, so attaching the same selection twice, as a
+ * double-pressed shortcut does, reuses the chip. A moved or changed selection is a new record.
+ */
 export function diagramContextRecord(
   input: Pick<DiagramContextRecord, "label" | "payload">,
 ): DiagramContextRecord {
+  const { environmentId, diagramId, scope } = input.payload;
   return {
     version: 1,
     kind: "diagram",
-    contextId: toKindScopedComposerContextId("diagram", randomUUID()),
+    contextId: toKindScopedComposerContextId(
+      "diagram",
+      `${environmentId}:${diagramId}:${JSON.stringify(scope)}`,
+    ),
     label: sanitizeComposerContextLabel(input.label, "diagram"),
     payload: input.payload,
   };

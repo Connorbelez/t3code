@@ -14,7 +14,11 @@ import {
 } from "@t3tools/shared/composerContextReferences";
 
 import { useComposerDraftStore, composerDraftHasUserContent } from "~/composerDraftStore";
-import { asKnownContextRecord, buildMessageContext } from "./composerContextRecords";
+import {
+  asKnownContextRecord,
+  buildMessageContext,
+  diagramContextRecord,
+} from "./composerContextRecords";
 
 const record: DiagramContextRecord = {
   version: 1,
@@ -65,6 +69,42 @@ describe("diagram chat context", () => {
     expect(
       composerDraftHasUserContent(useComposerDraftStore.getState().getComposerDraft(ref)),
     ).toBe(false);
+  });
+
+  it("adds the same selection once and a changed selection as a second record", () => {
+    const ref = scopeThreadRef(record.payload.environmentId, ThreadId.make("diagram_dedupe_test"));
+    const store = useComposerDraftStore.getState();
+    store.clearComposerContent(ref);
+    const attach = (shapeIds: string[]) =>
+      diagramContextRecord({
+        label: "Architecture",
+        payload: {
+          environmentId: record.payload.environmentId,
+          projectId: record.payload.projectId,
+          diagramId: record.payload.diagramId,
+          scope: {
+            kind: "selection",
+            pageId: "page:one",
+            shapeIds,
+            bounds: { x: 1, y: 2, w: 3, h: 4 },
+          },
+        },
+      });
+    store.addDiagramContexts(ref, [attach(["shape:one"])]);
+    store.addDiagramContexts(ref, [attach(["shape:one"])]);
+    store.addDiagramContexts(ref, [attach(["shape:one", "shape:two"])]);
+    const draft = useComposerDraftStore.getState().getComposerDraft(ref);
+    expect(
+      draft?.diagramContexts.map((context) =>
+        context.payload.scope.kind === "selection" ? context.payload.scope.shapeIds : [],
+      ),
+    ).toEqual([["shape:one"], ["shape:one", "shape:two"]]);
+    expect(
+      draft?.diagramContexts.map(
+        (context) => draft.prompt.split(formatComposerContextReference(context)).length - 1,
+      ),
+    ).toEqual([1, 1]);
+    store.clearComposerContent(ref);
   });
 
   it("sends identity, selected scope and unavailable image evidence to providers", () => {

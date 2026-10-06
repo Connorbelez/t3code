@@ -75,6 +75,7 @@ import {
   useReducer,
   useRef,
   useState,
+  useSyncExternalStore,
   type KeyboardEvent,
   type ReactNode,
 } from "react";
@@ -188,6 +189,11 @@ import { Checkbox } from "./ui/checkbox";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { ProjectFilePicker } from "./files/ProjectFilePicker";
 import { openLinkPullRequestDialog } from "./pullRequest/LinkPullRequestDialog";
+import {
+  addCanvasSelectionToChat,
+  canvasSelectionChatState,
+  subscribeCanvasSelectionChat,
+} from "./diagrams/canvasSelectionChat";
 import { ProjectContentSearchDialog } from "./search/ProjectContentSearchDialog";
 import { toggleThemeEditorForTheme } from "./settings/themeEditorStore";
 import { searchSettings, SETTINGS_SECTION_LABELS } from "./settings/settingsSearch";
@@ -711,6 +717,10 @@ function OpenCommandPaletteDialog(props: {
     setHighlightedItemValue(null);
   }
   const clientSettings = useClientSettings();
+  const canvasSelection = useSyncExternalStore(
+    subscribeCanvasSelectionChat,
+    canvasSelectionChatState,
+  );
   const createProject = useAtomCommand(projectEnvironment.create, {
     reportFailure: false,
   });
@@ -1990,6 +2000,21 @@ function OpenCommandPaletteDialog(props: {
       icon: <PencilRulerIcon className={ITEM_ICON_CLASS} />,
       run: async () => {
         useRightPanelStore.getState().openCanvas(routeThreadRef);
+      },
+    });
+  }
+
+  if (canvasSelection !== "unavailable") {
+    actionItems.push({
+      kind: "action",
+      value: "action:add-canvas-selection-to-chat",
+      searchTerms: ["canvas", "diagram", "selection", "shapes", "context", "attach", "chat"],
+      title: "Add selection to chat",
+      disabled: canvasSelection === "empty",
+      icon: <PencilRulerIcon className={ITEM_ICON_CLASS} />,
+      shortcutCommand: "canvas.addSelectionToChat",
+      run: async () => {
+        addCanvasSelectionToChat();
       },
     });
   }

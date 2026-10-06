@@ -73,6 +73,7 @@ export const STATIC_KEYBINDING_COMMANDS = [
   "diff.toggle",
   "preview.toggle",
   "canvas.open",
+  "canvas.addSelectionToChat",
   "preview.refresh",
   "preview.focusUrl",
   "preview.zoomIn",
