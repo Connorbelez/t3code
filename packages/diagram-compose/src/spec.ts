@@ -142,7 +142,12 @@ export function invalidSpec(issues: readonly SpecIssue[]): DiagramOperationError
 export type OutsideNodes = ReadonlyMap<string, StoredNode | null> | "any";
 
 /** Normalizes, then checks the spec against its kit. Issue messages name the valid options. */
-export function parseSpec(spec: DiagramSpec, outside: OutsideNodes = new Map()): ComposeSpec {
+export function parseSpec(
+  spec: DiagramSpec,
+  outside: OutsideNodes = new Map(),
+  /** Edge keys a patch may reference besides its own, such as messages a sequence block spans. */
+  outsideEdges: ReadonlySet<string> = new Set(),
+): ComposeSpec {
   const kit = KITS[spec.kit];
   const issues: SpecIssue[] = [];
   const keys = new Set<string>();
@@ -252,6 +257,15 @@ export function parseSpec(spec: DiagramSpec, outside: OutsideNodes = new Map()):
     keys.add(key);
     edges.push({ role: "edge", key, from: node.key, to: on, kind: ATTACH_EDGE_KIND, label: "" });
   });
+  if (kit.check) {
+    issues.push(
+      ...kit.check({
+        nodes,
+        edges,
+        outside: outside === "any" ? null : new Set([...outside.keys(), ...outsideEdges]),
+      }),
+    );
+  }
 
   if (issues.length > 0) throw invalidSpec(issues);
   return {

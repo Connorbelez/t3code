@@ -23,6 +23,7 @@ import {
 import { indexBetween } from "./indexKeys.ts";
 import { type Kit, partsOf } from "./kit.ts";
 import { type MeasureText, place } from "./layout.ts";
+import { placeSequence } from "./sequenceLayout.ts";
 import {
   type Decision,
   decideRows,
@@ -118,15 +119,18 @@ export async function compose(
   }
 
   const arranged = arrangedScreens(spec, decisions, current, operation.relayout);
-  const placement = await place(
-    drawn,
-    decisions,
-    current,
-    index,
-    ports.measureText,
-    operation.relayout,
-    arranged,
-  );
+  const placement =
+    drawn.kit.layout === "sequence"
+      ? placeSequence(drawn, current, index, ports.measureText)
+      : await place(
+          drawn,
+          decisions,
+          current,
+          index,
+          ports.measureText,
+          operation.relayout,
+          arranged,
+        );
   const { puts, deletes } = emit({
     spec: drawn,
     epoch,
@@ -185,19 +189,24 @@ function planPatch(
   // In member order. Members a human deleted map to null: their role is unknown, and a replace
   // spec could still name them.
   const remaining = new Map<string, StoredNode | null>();
+  const remainingEdges = new Set<string>();
   for (const memberKey of new Set([...current.ledger.keys(), ...current.members.keys()])) {
     const stored = current.members.get(memberKey)?.stored;
     if (!stored) remaining.set(memberKey, null);
     else if (stored.role === "node") remaining.set(memberKey, stored);
+    else remainingEdges.add(memberKey);
   }
-  for (const memberKey of [...removed, ...listed.keys()]) remaining.delete(memberKey);
+  for (const memberKey of [...removed, ...listed.keys()]) {
+    remaining.delete(memberKey);
+    remainingEdges.delete(memberKey);
+  }
   // A listed node brings its whole contents and a removed one takes them along.
   for (const [memberKey, node] of remaining) {
     if (node && isContent(node) && (removed.has(node.parent) || listed.has(node.parent))) {
       remaining.delete(memberKey);
     }
   }
-  const spec = parseSpec(operation.spec, remaining);
+  const spec = parseSpec(operation.spec, remaining, remainingEdges);
   // A removed boundary must not leave children behind, as a replace spec could not either.
   const orphaned = Array.from(remaining.values()).flatMap((node) =>
     node?.parent != null && removed.has(node.parent) && !isContent(node) ? [node] : [],
@@ -312,6 +321,8 @@ const MAX_OVERLAPS = 50;
  * neither does a boundary holding its own descendant.
  */
 function overlapsOf(spec: ComposeSpec, epoch: number, index: RecordIndex): [string, string][] {
+  // The sequence engine places every member, and its blocks and bars overlap by design.
+  if (spec.kit.layout === "sequence") return [];
   const parents = new Map(spec.nodes.map((node) => [node.key, node.parent]));
   const encloses = (outer: string, inner: string) => {
     for (let at = parents.get(inner); at; at = parents.get(at)) if (at === outer) return true;

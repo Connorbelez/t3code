@@ -17,7 +17,14 @@ import type {
 } from "@tldraw/tlschema";
 import * as Schema from "effect/Schema";
 
-import { MEMBER_PARTS, type PartName, type StoredMember } from "./identity.ts";
+import {
+  MEMBER_PARTS,
+  type PartName,
+  type StoredEdge,
+  type StoredMember,
+  type StoredNode,
+} from "./identity.ts";
+import type { SpecIssue } from "./spec.ts";
 
 /** A kit is vocabulary plus style rows. Lowering, layout and emission stay generic. */
 
@@ -126,6 +133,37 @@ export interface LineKind extends KindBase {
   readonly color: TLDefaultColorStyle;
 }
 
+/**
+ * A sequence participant: a head box over a dashed lifeline, grouped so dragging the head carries
+ * the lifeline. Messages and note lines bind to the lifeline.
+ */
+export interface LifelineKind extends KindBase {
+  readonly shape: "lifeline";
+  readonly geo: TLGeoShapeGeoStyle;
+  readonly color: TLDefaultColorStyle;
+  readonly minSize: Size;
+  readonly labelRoom?: number;
+}
+
+/** A block's messages, by key, and where its sections start. */
+export interface BlockSpan {
+  readonly from: string;
+  readonly to: string;
+  readonly sections: ReadonlyArray<{ readonly from: string; readonly label: string }>;
+}
+
+/**
+ * A dashed box behind a range of sequence messages, titled "operator [label]". Each section, such
+ * as an alt's else, is a dashed box from its first message to the block's end, so its top edge
+ * divides the block.
+ */
+export interface BlockKind extends KindBase {
+  readonly shape: "block";
+  readonly body: BodySchema;
+  readonly color: TLDefaultColorStyle;
+  readonly span: (body: Schema.JsonObject) => BlockSpan;
+}
+
 export type NodeKind =
   | GeoKind
   | FrameKind
@@ -133,7 +171,9 @@ export type NodeKind =
   | CompartmentsKind
   | ScreenKind
   | TextKind
-  | LineKind;
+  | LineKind
+  | LifelineKind
+  | BlockKind;
 
 export interface EdgeKind {
   readonly description: string;
@@ -149,6 +189,11 @@ export interface EdgeKind {
   readonly body?: BodySchema;
   /** Draws the body: the arrow's text and, for a directed association, its head. */
   readonly draw?: (label: string, body: Schema.JsonObject) => EdgeDrawing;
+  /** Sequence messages: whether the message activates its receiver or ends its sender's activation. */
+  readonly activation?: (body: Schema.JsonObject) => {
+    readonly activate: boolean;
+    readonly deactivate: boolean;
+  };
 }
 
 export interface EdgeDrawing {
@@ -180,6 +225,15 @@ export interface Kit<N extends string = string, E extends string = string> {
   /** Null for a kit without edges. */
   readonly defaultEdgeKind: NoInfer<E> | null;
   readonly example: DiagramSpec;
+  /** `layered` (the default) places nodes with ELK; `sequence` lays out every member from the spec. */
+  readonly layout?: "layered" | "sequence";
+  /** Rules across members that a body schema cannot state, such as a block naming its messages. */
+  readonly check?: (spec: {
+    readonly nodes: readonly StoredNode[];
+    readonly edges: readonly StoredEdge[];
+    /** Members only the canvas knows, for a patch: null when unknown, as on the server. */
+    readonly outside: ReadonlySet<string> | null;
+  }) => SpecIssue[];
 }
 
 export const NOTE_KIND = "note";
@@ -218,9 +272,23 @@ export function edgeKindOf(kit: Kit, kind: string): EdgeKind | undefined {
 
 /** Every part a member is drawn with, `main` first. A member missing one of them was edited. */
 export function partsOf(kit: Kit, member: StoredMember): readonly PartName[] {
-  const kind = member.role === "node" ? kit.nodeKinds[member.kind] : undefined;
-  if (kind?.shape !== "compartments") return MEMBER_PARTS[member.role];
-  return ["main", "group", ...kind.compartments.map((_, i) => `c${i + 1}` as const)];
+  if (member.role === "edge") {
+    const activation = edgeKindOf(kit, member.kind)?.activation;
+    return activation && member.body && activation(member.body).activate
+      ? [...MEMBER_PARTS.edge, "activation"]
+      : MEMBER_PARTS.edge;
+  }
+  const kind = kit.nodeKinds[member.kind];
+  switch (kind?.shape) {
+    case "compartments":
+      return ["main", "group", ...kind.compartments.map((_, i) => `c${i + 1}` as const)];
+    case "lifeline":
+      return ["main", "group", "lifeline"];
+    case "block":
+      return ["main", ...kind.span(member.body ?? {}).sections.map((_, i) => `c${i + 1}` as const)];
+    default:
+      return MEMBER_PARTS.node;
+  }
 }
 
 /** The header box's text, then each compartment's, as drawn. */

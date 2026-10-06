@@ -12,12 +12,12 @@ import * as Schema from "effect/Schema";
 import mermaid from "mermaid";
 
 /**
- * Mermaid flowchart, stateDiagram, classDiagram and erDiagram text to a composition spec. Mermaid's parsed databases are
+ * Mermaid flowchart, stateDiagram, classDiagram, erDiagram and sequenceDiagram text to a composition spec. Mermaid's parsed databases are
  * semi-internal API, so mermaid is pinned exactly and each supported type has fixtures. Import
  * this module lazily: mermaid is large and needs a DOM.
  */
 
-const SUPPORTED = "flowchart, stateDiagram, classDiagram, erDiagram";
+const SUPPORTED = "flowchart, stateDiagram, classDiagram, erDiagram, sequenceDiagram";
 const TEXT_PATH = "mermaid.text";
 
 interface Content {
@@ -36,6 +36,7 @@ const MAPPERS: Record<string, { readonly kit: DiagramKit; readonly map: (db: obj
     class: { kit: "uml-class", map: classDiagram },
     classDiagram: { kit: "uml-class", map: classDiagram },
     er: { kit: "er", map: erDiagram },
+    sequence: { kit: "sequence", map: sequenceDiagram },
   };
 
 export async function mermaidToSpec(source: DiagramMermaidSource): Promise<DiagramSpec> {
@@ -523,6 +524,173 @@ function erDiagram(db: object): Content {
 }
 
 /** Mermaid writes generics as `List~String~`. */
+const SequenceActor = Schema.Struct({ description: Schema.String, type: Schema.String });
+const SequenceSignal = Schema.Struct({
+  from: Schema.optional(Schema.String),
+  to: Schema.optional(Schema.String),
+  message: Schema.optional(Schema.Unknown),
+  type: Schema.optional(Schema.Number),
+});
+const decodeActor = Schema.decodeUnknownSync(SequenceActor);
+const decodeSignals = Schema.decodeUnknownSync(Schema.Array(SequenceSignal));
+
+/** Mermaid's LINETYPE values; its database lists messages, blocks and activations as one stream. */
+const MESSAGE_KINDS: Record<number, "sync" | "async" | "reply"> = {
+  0: "sync",
+  3: "sync",
+  5: "sync",
+  24: "async",
+  1: "reply",
+  4: "reply",
+  6: "reply",
+  25: "reply",
+};
+const BLOCK_STARTS: Record<number, string> = {
+  10: "loop",
+  12: "alt",
+  15: "opt",
+  19: "par",
+  32: "par",
+};
+const BLOCK_SECTIONS: Record<number, "else" | "and"> = { 13: "else", 20: "and" };
+const BLOCK_ENDS = new Set([11, 14, 16, 21]);
+const ACTIVE_START = 17;
+const ACTIVE_END = 18;
+const NOTE = 2;
+/** Styling and numbering: rect highlights and autonumber. */
+const IGNORED = new Set([22, 23, 26]);
+
+interface OpenBlock {
+  readonly kind: string;
+  readonly key: string;
+  /** Where the block starts among the blocks, so outer blocks come first in the spec. */
+  readonly order: number;
+  readonly label: string;
+  readonly sections: { field: "else" | "and"; label: string; from?: string }[];
+  from?: string;
+  to?: string;
+}
+
+/**
+ * Messages keep Mermaid's order and take the keys the spec derives for them, from→to:kind with #2,
+ * #3 for repeats, so blocks can name them and the same Mermaid composes to the same members.
+ */
+function sequenceDiagram(db: object): Content {
+  const actors = call(db, "getActors");
+  const nodes = Array.from(actors instanceof Map ? actors : [], ([id, value]) => {
+    const actor = decodeActor(value);
+    return node(String(id), {
+      kind: actor.type === "actor" ? "actor" : undefined,
+      label: actor.description,
+    });
+  });
+  const messages: {
+    from: string;
+    to: string;
+    kind: "sync" | "async" | "reply";
+    label: string;
+    key: string;
+    body: { activate?: true; deactivate?: true };
+  }[] = [];
+  const counts = new Map<string, number>();
+  const open: OpenBlock[] = [];
+  const blocks: { readonly order: number; readonly node: DiagramSpecNode }[] = [];
+  const numbers = new Map<string, number>();
+  const textOfSignal = (signal: typeof SequenceSignal.Type) =>
+    cleanLabel(typeof signal.message === "string" ? signal.message : "");
+
+  for (const signal of decodeSignals(call(db, "getMessages"))) {
+    const type = signal.type ?? -1;
+    const kind = MESSAGE_KINDS[type];
+    const last = messages.at(-1);
+    if (kind !== undefined && signal.from !== undefined && signal.to !== undefined) {
+      const from = memberKey(signal.from);
+      const to = memberKey(signal.to);
+      const base = `${from}→${to}:${kind}`;
+      const count = (counts.get(base) ?? 0) + 1;
+      counts.set(base, count);
+      const key = count === 1 ? base : `${base}#${count}`;
+      messages.push({ from, to, kind, label: textOfSignal(signal), key, body: {} });
+      for (const block of open) {
+        block.from ??= key;
+        block.to = key;
+        for (const section of block.sections) section.from ??= key;
+      }
+    } else if (type === ACTIVE_START || type === ACTIVE_END) {
+      const actor = signal.from ?? "";
+      const starts = type === ACTIVE_START;
+      if (!last || (starts ? last.to : last.from) !== actor) {
+        throw unmappable(
+          starts
+            ? `activate ${actor} must follow a message to ${actor}, as in "X->>+${actor}"`
+            : `deactivate ${actor} must follow a message from ${actor}, as in "${actor}-->>-X"`,
+        );
+      }
+      last.body[starts ? "activate" : "deactivate"] = true;
+    } else if (BLOCK_STARTS[type] !== undefined) {
+      const kind = BLOCK_STARTS[type];
+      const number = (numbers.get(kind) ?? 0) + 1;
+      numbers.set(kind, number);
+      open.push({
+        kind,
+        key: `${kind}-${number}`,
+        order: blocks.length + open.length,
+        label: textOfSignal(signal),
+        sections: [],
+      });
+    } else if (BLOCK_SECTIONS[type] !== undefined) {
+      open.at(-1)?.sections.push({ field: BLOCK_SECTIONS[type], label: textOfSignal(signal) });
+    } else if (BLOCK_ENDS.has(type)) {
+      const block = open.pop();
+      if (!block) continue;
+      if (block.from === undefined || block.to === undefined) {
+        throw unmappable(`a ${block.kind} block holds no messages; leave it out`);
+      }
+      const sections = block.sections.flatMap((section) =>
+        section.from === undefined
+          ? []
+          : [{ from: section.from, ...(section.label === "" ? {} : { label: section.label }) }],
+      );
+      blocks.push({
+        order: block.order,
+        node: node(block.key, {
+          kind: block.kind,
+          label: block.label,
+          body: {
+            from: block.from,
+            ...(block.to === block.from ? {} : { to: block.to }),
+            ...(sections.length === 0 ? {} : { [block.sections[0]?.field ?? "else"]: sections }),
+          },
+        }),
+      });
+    } else if (type === NOTE) {
+      throw unmappable(
+        "sequence notes sit at a point in time, which the sequence kit cannot place; leave them out or fold their text into a message label",
+      );
+    } else if (!IGNORED.has(type)) {
+      throw unmappable(
+        "this Mermaid construct cannot be drawn; the sequence kit draws participants, actors, ->> -) -->> -> --> -x --x messages, activations, and loop, alt, opt and par blocks",
+      );
+    }
+  }
+
+  return {
+    direction: undefined,
+    nodes: [...nodes, ...blocks.sort((a, b) => a.order - b.order).map((block) => block.node)],
+    edges: messages.map(({ from, to, kind, label, body }) =>
+      kind === "sync" && Object.keys(body).length === 0
+        ? link(from, to, label)
+        : {
+            from,
+            to,
+            ...(kind === "sync" ? {} : { kind }),
+            ...(label === "" ? {} : { label }),
+            ...(Object.keys(body).length === 0 ? {} : { body }),
+          },
+    ),
+  };
+}
+
 function generics(text: string): string {
   return text.replace(/~([^~]*)~/g, "<$1>");
 }

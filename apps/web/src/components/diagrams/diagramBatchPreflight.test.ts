@@ -1,5 +1,9 @@
 // @vitest-environment jsdom
-import type { DiagramComposeRequest, DiagramHostComposeResult } from "@t3tools/contracts";
+import type {
+  DiagramComposeRequest,
+  DiagramHostComposeResult,
+  DiagramSpecEdge,
+} from "@t3tools/contracts";
 import { compose, type ComposePorts } from "@t3tools/diagram-compose/compose";
 import {
   Editor,
@@ -487,6 +491,51 @@ const wireframes = (children: readonly unknown[]) =>
     },
   }) satisfies DiagramComposeRequest;
 const screens = wireframes(feed);
+// A self call, an activation from a call to its reply, an alt block with an else branch nested
+// in a loop, an async message and a note under a lifeline.
+const loginMessages = [
+  ["user", "web", "Sign in"],
+  { key: "check", from: "web", to: "api", label: "POST /login", body: { activate: true } },
+  ["api", "api", "Hash password"],
+  { key: "ok", from: "api", to: "web", kind: "reply", label: "200 token" },
+  {
+    key: "denied",
+    from: "api",
+    to: "web",
+    kind: "reply",
+    label: "401",
+    body: { deactivate: true },
+  },
+  { key: "audit", from: "web", to: "api", kind: "async", label: "Log attempt" },
+] satisfies DiagramSpecEdge[];
+const sequenceOf = (edges: readonly DiagramSpecEdge[]) =>
+  ({
+    spec: {
+      kit: "sequence",
+      key: "login",
+      title: "Login",
+      nodes: [
+        { key: "user", kind: "actor", label: "User" },
+        { key: "web", label: "Web app" },
+        { key: "api", label: "API" },
+        {
+          key: "retry",
+          kind: "loop",
+          label: "up to 3 times",
+          body: { from: "check", to: "denied" },
+        },
+        {
+          key: "valid",
+          kind: "alt",
+          label: "password valid",
+          body: { from: "ok", to: "denied", else: [{ from: "denied", label: "wrong password" }] },
+        },
+        { key: "why", kind: "note", label: "Rate limited", body: { on: "api" } },
+      ],
+      edges,
+    },
+  }) satisfies DiagramComposeRequest;
+const login = sequenceOf(loginMessages);
 function composeInto(editor: Editor, request: DiagramComposeRequest = checkout) {
   const records = editor.store.serialize("document");
   return compose(request, Object.values(records), {
@@ -570,6 +619,7 @@ describe("composed batches", () => {
     ["a C4 component view with nested boundaries", containers, "Banking components"],
     ["an architecture diagram with nested zones", system, "System"],
     ["wireframes with chrome and a modal", screens, "Screens"],
+    ["a sequence with a self call, an activation and an alt block", login, "Login"],
   ])("pass the preflight for %s and recompose to no change", async (_, request, title) => {
     const editor = mount();
     addLooseShapes(editor);
@@ -599,6 +649,39 @@ describe("composed batches", () => {
     assert(changes, "an insertion must produce changes");
     expect(() => validateDiagramBatch(editor, { requestId: "insert", ...changes })).not.toThrow();
     applyChanges(editor, changes);
+    expect((await composeInto(editor, inserted)).changes).toBeNull();
+  });
+
+  it("keeps messages on their lifelines when a participant is dragged, and pushes them down for an inserted one", async () => {
+    const editor = mount();
+    const first = await composeInto(editor, login);
+    assert(first.changes, "a new composition must produce changes");
+    applyChanges(editor, first.changes);
+    const api = member(editor, "api");
+    const call = member(editor, "check");
+    const before = editor.getShapePageBounds(call.id)?.toJson();
+    assert(before, "the call is drawn");
+    // Dragging the head drags its group, lifeline and bar, and the bound call stretches along.
+    editor.updateShape({ id: api.parentId as TLShapeId, type: "group", x: 600 });
+    const dragged = editor.getShapePageBounds(call.id)?.toJson();
+    expect(dragged?.w).toBeGreaterThan(before.w);
+    expect(dragged?.y).toBe(before.y);
+    editor.updateShape({
+      id: member(editor, "ok").id,
+      type: "arrow",
+      props: { richText: toRichText("200 + token") },
+    });
+
+    const inserted = sequenceOf(loginMessages.toSpliced(1, 0, ["web", "web", "Validate form"]));
+    const { changes, counts } = await composeInto(editor, inserted);
+    expect(counts).toMatchObject({ created: 1, updated: 0, removed: 0 });
+    assert(changes, "an insertion must produce changes");
+    expect(() => validateDiagramBatch(editor, { requestId: "insert", ...changes })).not.toThrow();
+    applyChanges(editor, changes);
+    // Order is meaning: the participant is back in its column and later messages moved down.
+    expect(editor.getShape(api.parentId as TLShapeId)?.x).toBeLessThan(600);
+    expect(editor.getShapePageBounds(member(editor, "check").id)?.y).toBeGreaterThan(before.y);
+    expect(member(editor, "ok").props).toMatchObject({ richText: toRichText("200 + token") });
     expect((await composeInto(editor, inserted)).changes).toBeNull();
   });
 

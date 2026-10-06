@@ -3,7 +3,7 @@ import type { TLParentId } from "@tldraw/tlschema";
 import type { ELK, ElkNode } from "elkjs/lib/elk-api.js";
 
 import { localBox, pageBox, pagesInOrder, type RecordIndex, unionOf } from "./canvas.ts";
-import { isContent, type StoredNode } from "./identity.ts";
+import { isContent, type PartName, type StoredNode } from "./identity.ts";
 import {
   type CompartmentsKind,
   compartmentTexts,
@@ -27,20 +27,20 @@ export interface TextFont {
 
 export type MeasureText = (text: string, font: TextFont) => Size;
 
-interface Box extends Size {
+export interface Box extends Size {
   readonly x: number;
   readonly y: number;
 }
 
 /** tldraw's geo and note label: base font size 16 scaled for size `m`, inside 16px of padding per side. */
-const LABEL_FONT_SIZE_M = 16 * 1.375;
-const LABEL_FONT_SIZE_S = 16 * 1.125;
-const LABEL_PADDING = 16;
+export const LABEL_FONT_SIZE_M = 16 * 1.375;
+export const LABEL_FONT_SIZE_S = 16 * 1.125;
+export const LABEL_PADDING = 16;
 const LABEL_MAX_WIDTH = 240;
 /** tldraw notes are a fixed 200px square that grows down to fit its text. */
 export const NOTE_SIZE = 200;
 const GRID = 8;
-const FRAME_PADDING = 48;
+export const FRAME_PADDING = 48;
 /** Inside a boundary; its title sits above the frame, outside it. */
 const BOUNDARY_PADDING = 32;
 const EMPTY_BOUNDARY: Size = { w: 160, h: 96 };
@@ -48,8 +48,8 @@ const EMPTY_BOUNDARY: Size = { w: 160, h: 96 };
 const PLACEMENT_GAP = 160;
 
 /** Rounded up to the grid so sub-pixel font differences between hosts rarely change a size. */
-function geoSize(
-  kind: GeoKind,
+export function geoSize(
+  kind: Pick<GeoKind, "minSize" | "labelRoom">,
   label: string,
   family: TextFont["family"],
   measure: MeasureText,
@@ -66,7 +66,7 @@ function geoSize(
 }
 
 /** The height tldraw's note gives its label, so a later human edit does not make it jump. */
-function noteSize(label: string, family: TextFont["family"], measure: MeasureText): Size {
+export function noteSize(label: string, family: TextFont["family"], measure: MeasureText): Size {
   if (label.trim() === "") return { w: NOTE_SIZE, h: NOTE_SIZE };
   // tldraw leaves a pixel of slack inside the padding.
   const maxWidth = NOTE_SIZE - 2 * LABEL_PADDING - 1;
@@ -106,7 +106,7 @@ function compartmentsSize(
   return { size: { w, h: rows.reduce((sum, row) => sum + row, 0) }, rows };
 }
 
-function snap(value: number): number {
+export function snap(value: number): number {
   return Math.ceil(value / GRID) * GRID;
 }
 
@@ -205,6 +205,26 @@ export interface Placement {
   readonly parents: ReadonlyMap<string, string | null>;
   /** Header and compartment heights, top to bottom, of the compartments nodes this compose writes. */
   readonly rows: ReadonlyMap<string, readonly number[]>;
+  /**
+   * Engines that lay out every member (sequence) place each part of the members they draw, kept
+   * ones included, in frame coordinates; emit converts each to its parent's.
+   */
+  readonly parts?: ReadonlyMap<string, ReadonlyMap<PartName, PartPlace>>;
+  /** Where each arrow binds, as normalized anchors on its endpoints, and its bend. */
+  readonly arrows?: ReadonlyMap<string, ArrowPlace>;
+}
+
+export interface PartPlace extends Box {
+  /** The part this one sits in, or null for the composition frame. */
+  readonly parent: { readonly key: string; readonly part: PartName } | null;
+  /** Drawn behind every other shape in its parent, such as a sequence block. */
+  readonly behind?: true;
+}
+
+export interface ArrowPlace {
+  readonly start: { readonly x: number; readonly y: number };
+  readonly end: { readonly x: number; readonly y: number };
+  readonly bend: number;
 }
 
 /**
@@ -417,20 +437,31 @@ export async function place(
   }
 
   // Nodes a human dragged out of the frame do not grow it, unless relayout moved them back.
-  const fit = fitAround(null, FRAME_PADDING);
+  return {
+    ...frameAround(spec, current, index, fitAround(null, FRAME_PADDING)),
+    nodes,
+    parents,
+    rows,
+  };
+}
+
+/** A new frame goes beside the page's content; an existing one keeps its place and only grows. */
+export function frameAround(
+  spec: ComposeSpec,
+  current: CurrentComposition | null,
+  index: RecordIndex,
+  fit: Size,
+): Pick<Placement, "pageId" | "frame"> {
   if (current) {
     const { x, y, props } = current.frame;
     return {
       pageId: current.pageId,
       frame: { x, y, w: Math.max(props.w, fit.w), h: Math.max(props.h, fit.h) },
-      nodes,
-      parents,
-      rows,
     };
   }
   const pageId = targetPage(spec, index);
   const at = spec.position ?? besideContent(index, pageId);
-  return { pageId, frame: { x: at.x, y: at.y, ...fit }, nodes, parents, rows };
+  return { pageId, frame: { x: at.x, y: at.y, ...fit } };
 }
 
 /** Gap kept between a new node and anything already placed. */

@@ -32,6 +32,8 @@ export interface CurrentMember {
   readonly parts: ReadonlyMap<PartName, TLRecord>;
   /** Some part's content differs from what compose wrote, or a part is missing. */
   readonly edited: boolean;
+  /** Every part the member is drawn with is on the canvas. */
+  readonly complete: boolean;
 }
 
 /** The shape that places a node in its parent: a compartments node's group, else its main shape. */
@@ -106,17 +108,20 @@ export function scanCompositions(index: RecordIndex): CompositionScan {
     }
     const members = new Map<string, CurrentMember>();
     for (const [memberKey, { stored, parts: memberParts }] of present) {
-      const edited = partsOf(KITS[meta.kit], stored).some((name) => {
+      const expected = partsOf(KITS[meta.kit], stored);
+      const edited = expected.some((name) => {
         const part = memberParts.get(name);
         if (part) return fingerprint(part.record) !== part.meta.f;
-        // tldraw deletes a binding with its target; a deleted endpoint is not an edit of the edge.
+        // tldraw deletes a binding with its target, and a participant's group takes the activation
+        // bars inside it; a deleted endpoint is not an edit of the edge.
         if (stored.role === "edge" && name !== "main") {
           return present.has(name === "start" ? stored.from : stored.to);
         }
         return true;
       });
       const records = new Map(Array.from(memberParts, ([name, part]) => [name, part.record]));
-      members.set(memberKey, { key: memberKey, stored, parts: records, edited });
+      const complete = expected.every((name) => memberParts.has(name));
+      members.set(memberKey, { key: memberKey, stored, parts: records, edited, complete });
     }
     compositions.set(key, {
       key,

@@ -322,9 +322,122 @@ describe("Mermaid erDiagram", () => {
   });
 });
 
+describe("Mermaid sequenceDiagram", () => {
+  it("maps participants, actors, message kinds, activations and nested blocks to derived message keys", async () => {
+    const spec = await toSpec(`sequenceDiagram
+  autonumber
+  participant A as Alice
+  actor B
+  A->>+B: hi
+  B-->>-A: ok
+  activate A
+  A-)B: async
+  A-xB: cross
+  deactivate A
+  loop Every minute
+    A->>B: ping
+    opt cached
+      B->>B: lookup
+    end
+  end
+  alt is sick
+    B->>A: bad
+  else is well
+    B->>A: good
+  end
+  par one
+    A->>B: x
+  and two
+    A->>B: y
+  end
+  rect rgb(0, 0, 0)
+    A->>A: self
+  end`);
+    expect(spec).toEqual({
+      kit: "sequence",
+      key: "m",
+      nodes: [
+        { key: "A", label: "Alice" },
+        { key: "B", kind: "actor" },
+        {
+          key: "loop-1",
+          kind: "loop",
+          label: "Every minute",
+          body: { from: "A→B:sync#3", to: "B→B:sync" },
+        },
+        { key: "opt-1", kind: "opt", label: "cached", body: { from: "B→B:sync" } },
+        {
+          key: "alt-1",
+          kind: "alt",
+          label: "is sick",
+          body: {
+            from: "B→A:sync",
+            to: "B→A:sync#2",
+            else: [{ from: "B→A:sync#2", label: "is well" }],
+          },
+        },
+        {
+          key: "par-1",
+          kind: "par",
+          label: "one",
+          body: {
+            from: "A→B:sync#4",
+            to: "A→B:sync#5",
+            and: [{ from: "A→B:sync#5", label: "two" }],
+          },
+        },
+      ],
+      edges: [
+        { from: "A", to: "B", label: "hi", body: { activate: true } },
+        {
+          from: "B",
+          to: "A",
+          kind: "reply",
+          label: "ok",
+          body: { activate: true, deactivate: true },
+        },
+        { from: "A", to: "B", kind: "async", label: "async" },
+        { from: "A", to: "B", label: "cross", body: { deactivate: true } },
+        ["A", "B", "ping"],
+        ["B", "B", "lookup"],
+        ["B", "A", "bad"],
+        ["B", "A", "good"],
+        ["A", "B", "x"],
+        ["A", "B", "y"],
+        ["A", "A", "self"],
+      ],
+    });
+    // The derived keys the blocks name are the ones the spec gives those messages.
+    expect(validateComposeRequest({ spec })).toBe("m");
+  });
+
+  it.each([
+    [
+      "sequenceDiagram\n  A->>B: hi\n  Note right of B: thinks",
+      "sequence notes sit at a point in time, which the sequence kit cannot place; leave them out or fold their text into a message label",
+    ],
+    [
+      "sequenceDiagram\n  critical connect\n    A->>B: hi\n  end",
+      "this Mermaid construct cannot be drawn; the sequence kit draws participants, actors, ->> -) -->> -> --> -x --x messages, activations, and loop, alt, opt and par blocks",
+    ],
+    [
+      "sequenceDiagram\n  A->>B: hi\n  activate A",
+      'activate A must follow a message to A, as in "X->>+A"',
+    ],
+    [
+      "sequenceDiagram\n  A->>B: hi\n  loop never\n  end",
+      "a loop block holds no messages; leave it out",
+    ],
+  ])("fails %j as invalid-spec at the Mermaid text", async (text, message) => {
+    await expect(toSpec(text)).rejects.toMatchObject({
+      code: "invalid-spec",
+      details: { issues: [{ path: "mermaid.text", message }] },
+    });
+  });
+});
+
 describe("Mermaid errors", () => {
   it.each([
-    ["sequenceDiagram\n  A->>B: hi", "sequence diagrams are not supported"],
     ['pie\n  "a": 1', "pie diagrams are not supported"],
     ["hello world", "this text is not a Mermaid diagram type"],
   ])("rejects %j as unsupported, listing the supported types", async (text, reason) => {
@@ -334,7 +447,7 @@ describe("Mermaid errors", () => {
         issues: [
           {
             path: "mermaid.text",
-            message: `${reason}; supported types: flowchart, stateDiagram, classDiagram, erDiagram`,
+            message: `${reason}; supported types: flowchart, stateDiagram, classDiagram, erDiagram, sequenceDiagram`,
           },
         ],
       },

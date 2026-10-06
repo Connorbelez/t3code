@@ -27,21 +27,26 @@ import {
   META_KEY,
   type PartName,
   type StoredMember,
+  type StoredNode,
 } from "./identity.ts";
 import { indexBetween, type IndexKey } from "./indexKeys.ts";
 import {
+  type BlockKind,
   compartmentTexts,
   type CompartmentsKind,
   edgeKindOf,
   geoDrawing,
+  type LifelineKind,
   LOOKS,
   type NodeKind,
+  partsOf,
   type Size,
 } from "./kit.ts";
-import { NOTE_SIZE, type Placement } from "./layout.ts";
+import { type ArrowPlace, NOTE_SIZE, type PartPlace, type Placement } from "./layout.ts";
 import type { Decision } from "./merge.ts";
 import { type CurrentComposition, type CurrentMember, topShape } from "./membership.ts";
 import { CONTENT_KINDS } from "./screens.ts";
+import { blockText, sectionText } from "./sequenceLayout.ts";
 import type { ComposeSpec } from "./spec.ts";
 
 /**
@@ -109,6 +114,16 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
 
   const deletes: string[] = [];
   for (const decision of decisions) {
+    if (decision.do === "overwrite") {
+      // A rewrite can draw fewer parts, such as a block with fewer sections or a message that no
+      // longer activates its receiver.
+      const wanted = new Set(partsOf(spec.kit, decision.draft.spec));
+      for (const [part, record] of decision.current.parts) {
+        if (wanted.has(part)) continue;
+        deletes.push(record.id);
+        final.delete(record.id);
+      }
+    }
     if (decision.do !== "remove") continue;
     for (const record of partsInDeleteOrder(decision.current)) {
       deletes.push(record.id);
@@ -126,7 +141,52 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
     lastIndex.set(parentId, index);
     return index;
   };
+  /** Sequence blocks go under everything already in their parent. */
+  const firstIndex = (parentId: string): IndexKey =>
+    indexBetween(null, minChildIndex(final, parentId));
   const shapeIdOf = (key: string | null) => (key === null ? frame.id : at(key, "main"));
+  const frameOrigin = originOf(final, frame.id);
+  /**
+   * A part at its placed box, converted from frame coordinates to its parent's, keeping its index
+   * while its parent stays. Only geometry changes, so a human's edits to the part survive.
+   */
+  const placePart = (shape: TLShape, place: PartPlace, prior: TLShape | undefined): TLShape => {
+    const wanted = place.parent && at(place.parent.key, place.parent.part);
+    const parentId = wanted && final.has(wanted) ? wanted : frame.id;
+    const origin = originOf(final, parentId);
+    const index =
+      prior?.parentId === parentId
+        ? prior.index
+        : place.behind
+          ? firstIndex(parentId)
+          : nextIndex(parentId);
+    const moved = {
+      ...shape,
+      x: place.x + frameOrigin.x - origin.x,
+      y: place.y + frameOrigin.y - origin.y,
+      parentId,
+      index,
+    };
+    return moved.type === "line"
+      ? { ...moved, props: { ...moved.props, points: linePoints(place.w, place.h) } }
+      : resized(moved, place);
+  };
+  const priorShape = (decision: Decision, part: PartName): TLShape | undefined => {
+    const prior = decision.do === "overwrite" ? decision.current.parts.get(part) : undefined;
+    return prior?.typeName === "shape" ? prior : undefined;
+  };
+  const partBase = (key: string, part: PartName, prior: TLShape | undefined): ShapeBase => ({
+    id: at(key, part),
+    typeName: "shape",
+    x: 0,
+    y: 0,
+    rotation: prior?.rotation ?? 0,
+    index: prior?.index ?? indexBetween(null, null),
+    parentId: frame.id,
+    isLocked: prior?.isLocked ?? false,
+    opacity: prior?.opacity ?? 1,
+    meta: prior?.meta ?? {},
+  });
   const nodes: TLShape[] = [];
   // Boundaries before what they hold, so every parent exists when its children are placed.
   const parents = new Map(spec.nodes.map((node) => [node.key, node.parent]));
@@ -146,6 +206,18 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
   for (const { decision, node } of writtenNodes) {
     const box = placement.nodes.get(node.key);
     const kind = spec.kit.nodeKinds[node.kind];
+    const places = placement.parts?.get(node.key);
+    if (places && (kind?.shape === "lifeline" || kind?.shape === "block")) {
+      // In placement order, so a participant's group exists before its head and lifeline.
+      for (const [part, place] of places) {
+        const prior = priorShape(decision, part);
+        const record = drawPart(kind, node, part, look, partBase(node.key, part, prior));
+        nodes.push(
+          remember(withPartMeta(placePart(record, place, prior), spec.key, epoch, node, part)),
+        );
+      }
+      continue;
+    }
     if (!box || !kind) continue;
     const base = decision.do === "overwrite" ? topShape(decision.current) : undefined;
     const moved = placement.parents.get(node.key);
@@ -210,6 +282,7 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
       }
       continue;
     }
+    if (kind.shape === "lifeline" || kind.shape === "block") continue;
     const record = drawNode(kind, node.label, node.body, box, look, shape);
     nodes.push(remember(withPartMeta(record, spec.key, epoch, node, "main")));
   }
@@ -265,14 +338,51 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
     }
   }
 
+  // Engines that place every part also move kept nodes' parts and the bars of kept messages, and
+  // draw the bars of written ones, before any arrow so arrows can stack above them.
+  for (const decision of decisions) {
+    const places = placement.parts?.get(decision.key);
+    if (!places) continue;
+    if (decision.do === "keep" && decision.current) {
+      for (const [part, place] of places) {
+        const prior = decision.current.parts.get(part);
+        if (prior?.typeName === "shape") nodes.push(remember(placePart(prior, place, prior)));
+      }
+    }
+    const bar = places.get("activation");
+    if (!bar || (decision.do !== "create" && decision.do !== "overwrite")) continue;
+    const prior = priorShape(decision, "activation");
+    const record = activationBar(look, partBase(decision.key, "activation", prior));
+    nodes.push(
+      remember(
+        withPartMeta(
+          placePart(record, bar, prior),
+          spec.key,
+          epoch,
+          decision.draft.spec,
+          "activation",
+        ),
+      ),
+    );
+  }
+
   const placeArrow = arrowPlacer(final);
   const arrows: TLArrowShape[] = [];
   const bindings: TLArrowBinding[] = [];
+  const nodeKinds = new Map(spec.nodes.map((node) => [node.key, spec.kit.nodeKinds[node.kind]]));
+  /** Messages bind to a participant's lifeline; everything else to a node's main shape. */
+  const boundShape = (key: string): TLShape | undefined =>
+    (nodeKinds.get(key)?.shape === "lifeline" ? shapeOf(final, at(key, "lifeline")) : undefined) ??
+    shapeOf(final, at(key, "main"));
+  const ends = (start: TLShape, end: TLShape, placed: ArrowPlace | undefined) => ({
+    from: placed ? anchorPoint(final, start, placed.start) : center(final, start),
+    to: placed ? anchorPoint(final, end, placed.end) : center(final, end),
+  });
   for (const decision of written) {
     const edge = decision.draft.spec;
     if (edge.role !== "edge") continue;
-    const start = shapeOf(final, at(edge.from, "main"));
-    const end = shapeOf(final, at(edge.to, "main"));
+    const start = boundShape(edge.from);
+    const end = boundShape(edge.to);
     const kind = edgeKindOf(spec.kit, edge.kind);
     if (!start || !end || !kind) continue;
     const id = at(edge.key, "main");
@@ -287,8 +397,8 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
       base?.parentId === parentId ? base.index : null,
     );
     const origin = originOf(final, parentId);
-    const from = center(final, start);
-    const to = center(final, end);
+    const placed = placement.arrows?.get(edge.key);
+    const { from, to } = ends(start, end, placed);
     const arrow: TLArrowShape = {
       id,
       typeName: "shape",
@@ -313,7 +423,7 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
         font: look.font,
         start: { x: 0, y: 0 },
         end: { x: to.x - from.x, y: to.y - from.y },
-        bend: 0,
+        bend: placed?.bend ?? 0,
         richText: toRichText(drawing?.label ?? edge.label),
         labelPosition: 0.5,
         scale: 1,
@@ -331,13 +441,70 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
         meta: {},
         props: {
           terminal,
-          normalizedAnchor: { x: 0.5, y: 0.5 },
+          normalizedAnchor: placed?.[terminal] ?? { x: 0.5, y: 0.5 },
           isExact: false,
-          isPrecise: false,
+          isPrecise: placed !== undefined,
           snap: "none",
         },
       };
       bindings.push(remember(withPartMeta(binding, spec.key, epoch, edge, terminal)));
+    }
+  }
+  // Kept arrows the engine placed follow their rows: new ends, bend and anchors, same content.
+  for (const decision of decisions) {
+    const placed = placement.arrows?.get(decision.key);
+    const current = decision.do === "keep" ? decision.current : null;
+    if (!placed || current?.stored.role !== "edge") continue;
+    const main = mainShape(current);
+    const terminals = (["start", "end"] as const).flatMap((terminal) => {
+      const binding = current.parts.get(terminal);
+      return binding?.typeName === "binding" && binding.type === "arrow" ? [binding] : [];
+    });
+    const start = boundShape(current.stored.from);
+    const end = boundShape(current.stored.to);
+    // Only arrows still bound as composed; a human's rebinding is theirs to keep.
+    if (
+      main?.type !== "arrow" ||
+      !start ||
+      !end ||
+      terminals.length !== 2 ||
+      terminals[0]?.toId !== start.id ||
+      terminals[1]?.toId !== end.id
+    )
+      continue;
+    const parentId = arrowParent(final, start, end);
+    const index = placeArrow(
+      main.id,
+      parentId,
+      start,
+      end,
+      main.parentId === parentId ? main.index : null,
+    );
+    const origin = originOf(final, parentId);
+    const { from, to } = ends(start, end, placed);
+    arrows.push(
+      remember({
+        ...main,
+        x: from.x - origin.x,
+        y: from.y - origin.y,
+        parentId,
+        index,
+        props: {
+          ...main.props,
+          start: { x: 0, y: 0 },
+          end: { x: to.x - from.x, y: to.y - from.y },
+          bend: placed.bend,
+        },
+      }),
+    );
+    for (const binding of terminals) {
+      const terminal = binding.props.terminal;
+      bindings.push(
+        remember({
+          ...binding,
+          props: { ...binding.props, normalizedAnchor: placed[terminal], isPrecise: true },
+        }),
+      );
     }
   }
 
@@ -375,7 +542,7 @@ type Look = (typeof LOOKS)[keyof typeof LOOKS];
 
 /** The complete record tldraw stores for a node of this kind. */
 function drawNode(
-  kind: Exclude<NodeKind, CompartmentsKind>,
+  kind: Exclude<NodeKind, CompartmentsKind | LifelineKind | BlockKind>,
   label: string,
   body: Schema.JsonObject | null,
   box: Size,
@@ -470,14 +637,115 @@ function drawNode(
   }
 }
 
-/** A horizontal line from the shape's origin, `w` long. */
-function linePoints(w: number): TLLineShape["props"]["points"] {
+/** A line from the shape's origin to (w, h): horizontal unless `h` is given. */
+function linePoints(w: number, h = 0): TLLineShape["props"]["points"] {
   const start = indexBetween(null, null);
   const end = indexBetween(start, null);
   return {
     [start]: { id: start, index: start, x: 0, y: 0 },
-    [end]: { id: end, index: end, x: w, y: 0 },
+    [end]: { id: end, index: end, x: w, y: h },
   };
+}
+
+/** A geo box's props; layout sets the size. */
+function boxProps(props: Partial<TLGeoShape["props"]> & Pick<TLGeoShape["props"], "richText">) {
+  return {
+    geo: "rectangle",
+    dash: "solid",
+    url: "",
+    w: 1,
+    h: 1,
+    growY: 0,
+    scale: 1,
+    flipX: false,
+    flipY: false,
+    labelColor: "black",
+    color: "black",
+    fill: "none",
+    size: "m",
+    font: "sans",
+    align: "middle",
+    verticalAlign: "middle",
+    ...props,
+  } satisfies TLGeoShape["props"];
+}
+
+/**
+ * A sequence participant's group, head or dashed lifeline, or a block's box or section. Each
+ * section's top edge divides the block; its other edges lie on the block's.
+ */
+function drawPart(
+  kind: LifelineKind | BlockKind,
+  node: StoredNode,
+  part: PartName,
+  look: Look,
+  base: ShapeBase,
+): TLShape {
+  if (kind.shape === "lifeline") {
+    if (part === "group") return { ...base, type: "group", props: {} } satisfies TLGroupShape;
+    if (part === "lifeline") {
+      return {
+        ...base,
+        type: "line",
+        props: {
+          color: "grey",
+          dash: "dashed",
+          size: "s",
+          spline: "line",
+          scale: 1,
+          points: linePoints(0, 0),
+        },
+      } satisfies TLLineShape;
+    }
+    return {
+      ...base,
+      type: "geo",
+      props: boxProps({
+        geo: kind.geo,
+        dash: look.dash,
+        color: kind.color,
+        fill: look.fill,
+        font: look.font,
+        richText: toRichText(node.label),
+      }),
+    } satisfies TLGeoShape;
+  }
+  const section = part.startsWith("c")
+    ? kind.span(node.body ?? {}).sections[Number(part.slice(1)) - 1]
+    : undefined;
+  const text = section ? sectionText(section.label) : blockText(node);
+  return {
+    ...base,
+    type: "geo",
+    props: boxProps({
+      dash: "dashed",
+      color: kind.color,
+      size: "s",
+      font: look.font,
+      align: "start",
+      verticalAlign: "start",
+      richText: toRichText(text),
+    }),
+  } satisfies TLGeoShape;
+}
+
+/** A thin box on the receiver's lifeline while it is active, solid so the lifeline hides behind it. */
+function activationBar(look: Look, base: ShapeBase): TLGeoShape {
+  return {
+    ...base,
+    type: "geo",
+    props: boxProps({ color: "grey", fill: "solid", font: look.font, richText: toRichText("") }),
+  };
+}
+
+/** A normalized anchor on the shape's box, in page space. */
+function anchorPoint(
+  final: RecordIndex,
+  shape: TLShape,
+  anchor: { readonly x: number; readonly y: number },
+): { x: number; y: number } {
+  const box = pageBox(final, shape);
+  return { x: box.x + anchor.x * box.w, y: box.y + anchor.y * box.h };
 }
 
 /** The shape with its geometry props set to fill `box`; size is layout, not content. */
@@ -524,6 +792,20 @@ function mainShape(member: CurrentMember): TLShape | undefined {
 function partsInDeleteOrder(member: CurrentMember): TLRecord[] {
   const rank = (record: TLRecord) => (record.typeName === "binding" ? 0 : 1);
   return Array.from(member.parts.values()).sort((a, b) => rank(a) - rank(b));
+}
+
+function minChildIndex(final: RecordIndex, parentId: string): string | null {
+  let min: string | null = null;
+  for (const record of final.values()) {
+    if (
+      record.typeName === "shape" &&
+      record.parentId === parentId &&
+      (min === null || record.index < min)
+    ) {
+      min = record.index;
+    }
+  }
+  return min;
 }
 
 function maxChildIndex(final: RecordIndex, parentId: string): string | null {

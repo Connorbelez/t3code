@@ -55,10 +55,12 @@ export function isContent(
 
 /**
  * Record roles within a member. `main` carries the stored spec and decides whether the member
- * exists. A compartments node adds its `group` and one `c1`, `c2`, … geo per compartment.
+ * exists. A compartments node adds its `group` and one `c1`, `c2`, … geo per compartment; a
+ * sequence participant adds its `group` and `lifeline`, a block one `c1`, … per section, and an
+ * activating message its `activation` bar.
  */
 const PartName = Schema.Union([
-  Schema.Literals(["main", "start", "end", "group"]),
+  Schema.Literals(["main", "start", "end", "group", "lifeline", "activation"]),
   Schema.TemplateLiteral(["c", Schema.Int]),
 ]);
 export type PartName = typeof PartName.Type;

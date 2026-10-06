@@ -414,6 +414,7 @@ export const DIAGRAM_KITS = [
   "c4",
   "architecture",
   "wireframe",
+  "sequence",
 ] as const;
 export const DiagramKit = Schema.Literals(DIAGRAM_KITS);
 export type DiagramKit = typeof DiagramKit.Type;

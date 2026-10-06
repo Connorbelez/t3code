@@ -5,6 +5,7 @@ import { architecture } from "./architecture.ts";
 import { c4 } from "./c4.ts";
 import { er } from "./er.ts";
 import { flow } from "./flow.ts";
+import { sequence } from "./sequence.ts";
 import { state } from "./state.ts";
 import { umlClass } from "./uml-class.ts";
 import { wireframe } from "./wireframe.ts";
@@ -17,4 +18,5 @@ export const KITS: { readonly [K in DiagramKit]: Kit } = {
   c4,
   architecture,
   wireframe,
+  sequence,
 };

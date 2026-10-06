@@ -1,7 +1,7 @@
 import { DiagramOperationError } from "@t3tools/contracts";
 
 import { compareIndex } from "./canvas.ts";
-import { isContent, MEMBER_PARTS, specHash, type StoredMember } from "./identity.ts";
+import { isContent, specHash, type StoredMember } from "./identity.ts";
 import type { CurrentComposition, CurrentMember } from "./membership.ts";
 import type { ComposeSpec } from "./spec.ts";
 
@@ -224,12 +224,12 @@ export function decideRows(rows: readonly Row[]): Decision[] {
       decision.do === "keep" &&
       decision.current?.stored.role === "edge" &&
       !decision.current.edited &&
-      decision.current.parts.size < MEMBER_PARTS.edge.length &&
+      !decision.current.complete &&
       (row?.intent.want === "upsert" || row?.intent.want === "untouched") &&
       nodes.has(decision.current.stored.from) &&
       nodes.has(decision.current.stored.to)
     ) {
-      // An unedited edge lost its binding with a deleted endpoint that this compose recreates.
+      // An unedited edge lost its bindings (or bar) with a deleted endpoint this compose recreates.
       return {
         do: "overwrite",
         key: decision.key,
