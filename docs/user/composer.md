@@ -65,6 +65,8 @@ right of what is already on the first page. Everything stays editable, and the
 whole drawing is one Undo step. A diagram can hold several generated drawings
 side by side. When you attach a diagram, the agent sees each generated drawing as
 one summary instead of every shape, so large drawings don't crowd out the rest.
+To point at part of a drawing, select those shapes and add the selection to chat;
+the agent is told exactly which ones you mean.
 
 Ask for changes and the agent updates the same drawing. Shapes you moved or
 resized stay as you left them, new shapes are placed around them, and shapes you

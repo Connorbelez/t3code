@@ -17,6 +17,7 @@ export const DIAGRAM_PROTOCOL_VERSION = 1;
 export const DIAGRAM_SDK_VERSION = "5.5.2";
 export const DIAGRAM_MAX_BATCH_RECORDS = 500;
 export const DIAGRAM_MAX_READ_RECORDS = 200;
+export const DIAGRAM_MAX_SELECTED_MEMBERS = 50;
 export const DIAGRAM_MAX_DOCUMENT_BYTES = 16 * 1024 * 1024;
 
 export const DiagramId = Schema.String.check(
@@ -114,6 +115,33 @@ export const DiagramPageSummary = Schema.Struct({
 });
 export type DiagramPageSummary = typeof DiagramPageSummary.Type;
 
+export const DiagramSpecRef = Schema.Struct({
+  path: TrimmedNonEmptyString.check(Schema.isMaxLength(500)),
+  line: Schema.optional(PositiveInt),
+});
+export type DiagramSpecRef = typeof DiagramSpecRef.Type;
+
+/**
+ * A member the user selected, by the key a patch addresses. `label` is the text the user sees:
+ * the spec label, or the member's current text once edited.
+ */
+export const DiagramSelectedMember = Schema.Union([
+  Schema.Struct({
+    key: Schema.String,
+    kind: Schema.String,
+    label: Schema.String.check(Schema.isMaxLength(256)),
+    from: Schema.String,
+    to: Schema.String,
+  }),
+  Schema.Struct({
+    key: Schema.String,
+    kind: Schema.String,
+    label: Schema.String.check(Schema.isMaxLength(256)),
+    ref: Schema.optional(DiagramSpecRef),
+  }),
+]);
+export type DiagramSelectedMember = typeof DiagramSelectedMember.Type;
+
 /** One composition listed once in place of its member shapes. */
 export const DiagramCompositionSummary = Schema.Struct({
   key: Schema.String,
@@ -124,6 +152,10 @@ export const DiagramCompositionSummary = Schema.Struct({
   memberCount: NonNegativeInt,
   editedCount: NonNegativeInt,
   bounds: Schema.NullOr(DiagramBounds),
+  /** Present only for a selection of some members; selecting the frame means all of them. */
+  selectedMembers: Schema.optional(
+    Schema.Array(DiagramSelectedMember).check(Schema.isMaxLength(DIAGRAM_MAX_SELECTED_MEMBERS)),
+  ),
 });
 export type DiagramCompositionSummary = typeof DiagramCompositionSummary.Type;
 
@@ -438,12 +470,6 @@ const DiagramEdgeEndpoint = TrimmedNonEmptyString.check(Schema.isMaxLength(241))
 const DiagramEdgeKey = TrimmedNonEmptyString.check(Schema.isMaxLength(600));
 
 /** A source location an agent attaches to a node and reads back later. */
-export const DiagramSpecRef = Schema.Struct({
-  path: TrimmedNonEmptyString.check(Schema.isMaxLength(500)),
-  line: Schema.optional(PositiveInt),
-});
-export type DiagramSpecRef = typeof DiagramSpecRef.Type;
-
 /** `kind` defaults to the kit's most common kind and `label` to `key`; `body` is validated per kit. */
 export const DiagramSpecNode = Schema.Struct({
   key: DiagramMemberKey,

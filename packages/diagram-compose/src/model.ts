@@ -5,13 +5,22 @@ import type {
   DiagramKit,
   DiagramKitReference,
   DiagramPageScope,
+  DiagramSelectedMember,
 } from "@t3tools/contracts";
 import type { TLRecord } from "@tldraw/tlschema";
 
 import { indexRecords, pageBox } from "./canvas.ts";
 import { referenceOf } from "./kit.ts";
 import { KITS } from "./kits/index.ts";
-import { type DetailPage, detail, memberOrder, scanCompositions, summarize } from "./membership.ts";
+import {
+  type CurrentMember,
+  type DetailPage,
+  detail,
+  memberOrder,
+  scanCompositions,
+  selectedMember,
+  summarize,
+} from "./membership.ts";
 import { type ComposeExtras, parseRequest, parseSpec } from "./spec.ts";
 
 /**
@@ -47,6 +56,13 @@ export interface CompositionsView {
   readonly compositionOfFrame: (recordId: string) => DiagramCompositionSummary | undefined;
   /** The composition a genuine member record (or frame) belongs to, wherever it sits on the canvas. */
   readonly compositionOf: (recordId: string) => DiagramCompositionSummary | undefined;
+  /**
+   * The member a record draws, such as a class for one of its compartments. Undefined for frames,
+   * ordinary shapes and remnants of deleted members.
+   */
+  readonly memberOf: (
+    recordId: string,
+  ) => { readonly compositionKey: string; readonly member: DiagramSelectedMember } | undefined;
   /** Each member's last-emitted spec and whether someone edited it, paged by member. */
   readonly detail: (page: DetailPage) => DiagramCompositionsPage;
   /** The composition's frame as a selection scope, at its current page and bounds. */
@@ -62,6 +78,11 @@ export function readCompositions(records: Iterable<TLRecord>): CompositionsView 
   const summaries = summarize(index, scan);
   const byKey = new Map(summaries.map((summary) => [summary.key, summary]));
   const byFrame = new Map(summaries.map((summary) => [summary.frameId, summary]));
+  const byPart = new Map<string, { compositionKey: string; member: CurrentMember }>();
+  for (const composition of scan.compositions.values())
+    for (const member of composition.members.values())
+      for (const part of member.parts.values())
+        byPart.set(part.id, { compositionKey: composition.key, member });
   return {
     isMember: (recordId) => scan.owners.has(recordId),
     summaries,
@@ -69,6 +90,12 @@ export function readCompositions(records: Iterable<TLRecord>): CompositionsView 
     compositionOf: (recordId) => {
       const key = scan.owners.get(recordId);
       return key === undefined ? undefined : byKey.get(key);
+    },
+    memberOf: (recordId) => {
+      const found = byPart.get(recordId);
+      return (
+        found && { compositionKey: found.compositionKey, member: selectedMember(found.member) }
+      );
     },
     detail: (page) => detail(summaries, scan, page),
     frameScope: (key) => {

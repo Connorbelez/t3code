@@ -2,6 +2,7 @@ import type {
   DiagramCompositionMember,
   DiagramCompositionSummary,
   DiagramCompositionsPage,
+  DiagramSelectedMember,
 } from "@t3tools/contracts";
 import type { TLFrameShape, TLParentId, TLRecord, TLShape } from "@tldraw/tlschema";
 
@@ -268,14 +269,36 @@ function memberDetail(member: CurrentMember): DiagramCompositionMember {
           ...bodyOf(stored.body),
         };
   if (!member.edited) return { spec, edited: false };
-  const main = member.parts.get("main");
-  const text =
-    main?.typeName === "shape" && "richText" in main.props ? plainText(main.props.richText) : "";
+  const text = mainText(member) ?? "";
   return {
     spec,
     edited: true,
     text: text.length > MAX_TEXT ? `${text.slice(0, MAX_TEXT - 1)}…` : text,
   };
+}
+
+const MAX_LABEL = 256;
+
+/** A selected member by key, labelled with the text the user sees on it. */
+export function selectedMember(member: CurrentMember): DiagramSelectedMember {
+  const { stored } = member;
+  const text = (member.edited ? mainText(member) : undefined) ?? stored.label;
+  const label = text.length > MAX_LABEL ? `${text.slice(0, MAX_LABEL - 1)}…` : text;
+  return stored.role === "node"
+    ? {
+        key: stored.key,
+        kind: stored.kind,
+        label,
+        ...(stored.ref === null ? {} : { ref: stored.ref }),
+      }
+    : { key: stored.key, kind: stored.kind, label, from: stored.from, to: stored.to };
+}
+
+function mainText(member: CurrentMember): string | undefined {
+  const main = member.parts.get("main");
+  return main?.typeName === "shape" && "richText" in main.props
+    ? plainText(main.props.richText)
+    : undefined;
 }
 
 /** Bodies carry class members and columns, so a spec rebuilt from detail keeps them. */

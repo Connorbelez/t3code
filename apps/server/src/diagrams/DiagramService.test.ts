@@ -9,6 +9,7 @@ import {
   DiagramHostConnectInput,
   DiagramReadResult,
   type DiagramComposeRequest,
+  type DiagramCompositionSummary,
   type DiagramHostComposeResult,
   type DiagramHostOperation,
   type DiagramMetadata,
@@ -1396,7 +1397,7 @@ const composeRecords = Effect.fn(function* (
   return { result, records: Array.from(after.values()) };
 });
 
-function memberShape(records: readonly TLRecord[], key: string) {
+function memberShape(records: readonly TLRecord[], key: string, part = "main") {
   const shape = records.find((item) => {
     if (item.typeName !== "shape") return false;
     const meta = item.meta["t3Composition"];
@@ -1405,7 +1406,7 @@ function memberShape(records: readonly TLRecord[], key: string) {
       meta !== null &&
       !Array.isArray(meta) &&
       meta["m"] === key &&
-      meta["p"] === "main"
+      meta["p"] === part
     );
   });
   if (shape?.typeName !== "shape") throw new Error(`no member ${key}`);
@@ -1513,6 +1514,142 @@ it.effect("reads composition detail by key with its own pagination, ref and edit
       items: [],
       nextOffset: null,
     });
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
+it.effect("lists the selected members of a composition by key, up to 50", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    const page = document().records[0]!;
+    let { records } = yield* composeRecords([page], authSpec);
+    ({ records } = yield* composeRecords(records, {
+      kit: "uml-class",
+      key: "accounts",
+      nodes: [{ key: "Account", body: { attributes: [{ name: "id", type: "string" }] } }],
+    }));
+    ({ records } = yield* composeRecords(records, {
+      kit: "flow",
+      key: "big",
+      nodes: Array.from({ length: 60 }, (_, index) => ({ key: `n${index}` })),
+    }));
+    const session = memberShape(records, "session");
+    records = records.map((item) =>
+      item.id === session.id && item.typeName === "shape" && item.type === "geo"
+        ? sdkRecord({ ...item, props: { ...item.props, richText: toRichText("Start\nsession") } })
+        : item,
+    );
+    const diagram = yield* service.importDocument({
+      projectId,
+      name: "Selected members",
+      document: { ...document(), records },
+    });
+    const target = { projectId, diagramId: diagram.id, allowImageUnavailable: true };
+    const select = (shapeIds: readonly string[]) =>
+      service.prepareContext({
+        ...target,
+        scope: {
+          kind: "selection",
+          pageId: page.id,
+          shapeIds: [...shapeIds],
+          bounds: { x: 0, y: 0, w: 1, h: 1 },
+        },
+      });
+    const selected = (structure: { compositions: readonly DiagramCompositionSummary[] }) =>
+      structure.compositions.map((item) => [item.key, item.selectedMembers]);
+
+    const one = yield* select([session.id]);
+    assert.deepEqual(selected(one.structure), [
+      ["auth", [{ key: "session", kind: "process", label: "Start\nsession" }]],
+    ]);
+
+    const compartment = memberShape(records, "Account", "c1");
+    assert.deepEqual(selected((yield* select([compartment.id])).structure), [
+      ["accounts", [{ key: "Account", kind: "class", label: "Account" }]],
+    ]);
+
+    const read = yield* service.read({
+      ...target,
+      recordIds: [memberShape(records, "login→session:flow").id, memberShape(records, "login").id],
+    });
+    assert.deepEqual(selected(read.structure), [
+      [
+        "auth",
+        [
+          { key: "login→session:flow", kind: "flow", label: "ok", from: "login", to: "session" },
+          {
+            key: "login",
+            kind: "start",
+            label: "login",
+            ref: { path: "src/auth/login.ts", line: 12 },
+          },
+        ],
+      ],
+    ]);
+
+    const auth = one.structure.compositions[0]!;
+    assert.deepEqual(selected((yield* select([auth.frameId, session.id])).structure), [
+      ["auth", undefined],
+    ]);
+    const viewport = yield* service.prepareContext({
+      ...target,
+      scope: { kind: "viewport", pageId: page.id, bounds: auth.bounds! },
+    });
+    assert.deepEqual(selected(viewport.structure), [["auth", undefined]]);
+
+    const many = yield* service.read({
+      ...target,
+      recordIds: Array.from({ length: 60 }, (_, index) => memberShape(records, `n${index}`).id),
+    });
+    const big = many.structure.compositions[0]?.selectedMembers ?? [];
+    assert.deepEqual(
+      [big.length, big[0]?.key, big.at(-1)?.key, many.structure.truncated],
+      [50, "n0", "n49", true],
+    );
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
+it.effect("trims selected members before dropping the summaries that name them", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    const page = document().records[0]!;
+    let records: TLRecord[] = [page];
+    const keys = ["a", "b", "c", "d", "e"];
+    for (const key of keys)
+      ({ records } = yield* composeRecords(records, {
+        kit: "flow",
+        key,
+        nodes: Array.from({ length: 50 }, (_, index) => ({
+          key: `${key}${index}`,
+          label: "l".repeat(250),
+        })),
+      }));
+    const diagram = yield* service.importDocument({
+      projectId,
+      name: "Selected budget",
+      document: { ...document(), records },
+    });
+    const context = yield* service.prepareContext({
+      projectId,
+      diagramId: diagram.id,
+      allowImageUnavailable: true,
+      scope: {
+        kind: "selection",
+        pageId: page.id,
+        shapeIds: keys.flatMap((key) =>
+          Array.from({ length: 50 }, (_, index) => memberShape(records, `${key}${index}`).id),
+        ),
+        bounds: { x: 0, y: 0, w: 1, h: 1 },
+      },
+    });
+    const { compositions, truncated } = context.structure;
+    assert.deepEqual(
+      [compositions.map((item) => item.key), compositions[0]?.selectedMembers?.length, truncated],
+      [keys, 50, true],
+    );
+    assert.isBelow(compositions.at(-1)?.selectedMembers?.length ?? 0, 50);
+    assert.isBelow(Buffer.byteLength(encode(context.structure)), 48 * 1024 + 1);
   }).pipe(Effect.scoped, Effect.provide(dependencies)),
 );
 
