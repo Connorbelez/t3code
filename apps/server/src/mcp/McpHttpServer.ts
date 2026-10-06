@@ -13,7 +13,11 @@ import * as Stream from "effect/Stream";
 import type * as Types from "effect/Types";
 import { AiError, McpProtocol, McpSchema, McpServer, Tool } from "effect/ai";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
-import { OrchestratorMcpFailure, PreviewAutomationError } from "@t3tools/contracts";
+import {
+  DiagramOperationError,
+  OrchestratorMcpFailure,
+  PreviewAutomationError,
+} from "@t3tools/contracts";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
@@ -36,6 +40,14 @@ import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 import * as OrchestratorHandlers from "./toolkits/orchestrator/handlers.ts";
+import * as DiagramService from "../diagrams/DiagramService.ts";
+import * as DiagramThreads from "../orchestration-v2/ThreadManagementService.ts";
+import {
+  DiagramToolkit,
+  DiagramCaptureTool,
+  DiagramCaptureToolkit,
+} from "./toolkits/diagrams/tools.ts";
+import { DiagramHandlersLive, DiagramCaptureHandlersLive } from "./toolkits/diagrams/handlers.ts";
 import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
 import * as PreviewHandlers from "./toolkits/preview/handlers.ts";
 import {
@@ -685,6 +697,34 @@ export const layerHtmlToolkit = Layer.mergeAll(
   Layer.effectDiscard(registerHtmlPreview()).pipe(Layer.provide(HtmlHandlers.layerPreview)),
 ).pipe(Layer.provide(HtmlRender.layer), Layer.provide(PreviewBrowser.layer));
 
+const isDiagramOperationError = Schema.is(DiagramOperationError);
+
+const registerDiagramCapture = Effect.fn("McpHttpServer.registerDiagramCapture")(function* () {
+  const diagrams = yield* DiagramService.DiagramService;
+  const threads = yield* DiagramThreads.ThreadManagementService;
+  const built = yield* DiagramCaptureToolkit;
+  yield* registerImageTool(
+    DiagramCaptureTool,
+    (payload) =>
+      built
+        .handle("t3_diagram_capture", payload)
+        .pipe(Stream.unwrap, Stream.run(Sink.last()), Effect.flatMap(Effect.fromOption)),
+    (effect) =>
+      effect.pipe(
+        Effect.provideService(DiagramService.DiagramService, diagrams),
+        Effect.provideService(DiagramThreads.ThreadManagementService, threads),
+      ),
+    "capture",
+    // Diagram errors carry only a code and server-built details.
+    (error) => (isDiagramOperationError(error) ? error.message : "Diagram capture failed."),
+  );
+});
+
+const layerDiagramToolkit = Layer.mergeAll(
+  McpServer.toolkit(DiagramToolkit).pipe(Layer.provide(DiagramHandlersLive)),
+  Layer.effectDiscard(registerDiagramCapture()).pipe(Layer.provide(DiagramCaptureHandlersLive)),
+);
+
 const layerPreviewStandardToolkitRegistration = McpServer.toolkit(PreviewStandardToolkit).pipe(
   Layer.provide(PreviewHandlers.layerStandard),
 );
@@ -765,4 +805,5 @@ export const layer = Layer.mergeAll(
   layerPullRequestsToolkit,
   layerDeviceToolkit,
   layerHtmlToolkit,
+  layerDiagramToolkit,
 ).pipe(Layer.provideMerge(layerMcpTransport));

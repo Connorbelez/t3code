@@ -1,21 +1,30 @@
 import type { ConfirmDialogOptions, ConfirmDialogVariant } from "@t3tools/contracts";
 
+export interface ConfirmDialogAction {
+  readonly label: string;
+  readonly run: () => Promise<void>;
+}
+type ConfirmationOptions = ConfirmDialogOptions & { readonly action?: ConfirmDialogAction };
+
 export type ConfirmDialogState =
   | { readonly status: "idle" }
   | {
       readonly status: "confirming";
       readonly message: string;
       readonly variant: ConfirmDialogVariant;
+      readonly action?: ConfirmDialogAction;
     }
   | {
       readonly status: "closing";
       readonly message: string;
       readonly variant: ConfirmDialogVariant;
+      readonly action?: ConfirmDialogAction;
     };
 
 type PendingConfirmation = {
   readonly message: string;
   readonly variant: ConfirmDialogVariant;
+  readonly action?: ConfirmDialogAction;
   readonly resolve: (confirmed: boolean) => void;
 };
 
@@ -79,7 +88,7 @@ export function registerConfirmDialogHost(): () => void {
  */
 export function requestConfirmDialog(
   message: string,
-  options?: ConfirmDialogOptions,
+  options?: ConfirmationOptions,
 ): Promise<boolean> | undefined {
   if (registeredHostCount === 0) return undefined;
 
@@ -87,6 +96,7 @@ export function requestConfirmDialog(
     const pending = {
       message,
       variant: options?.variant ?? "default",
+      ...(options?.action === undefined ? {} : { action: options.action }),
       resolve,
     } satisfies PendingConfirmation;
     if (activeConfirmation || state.status === "closing") {
@@ -95,7 +105,12 @@ export function requestConfirmDialog(
     }
 
     activeConfirmation = pending;
-    publish({ status: "confirming", message, variant: pending.variant });
+    publish({
+      status: "confirming",
+      message,
+      variant: pending.variant,
+      ...(pending.action === undefined ? {} : { action: pending.action }),
+    });
   });
 
   return confirmation;
@@ -120,7 +135,12 @@ export function completeConfirmDialogClose(): void {
   }
 
   activeConfirmation = next;
-  publish({ status: "confirming", message: next.message, variant: next.variant });
+  publish({
+    status: "confirming",
+    message: next.message,
+    variant: next.variant,
+    ...(next.action === undefined ? {} : { action: next.action }),
+  });
 }
 
 export function resetConfirmDialogForTests(): void {

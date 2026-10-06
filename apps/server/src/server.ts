@@ -150,6 +150,8 @@ import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as RuntimeLayer from "./orchestration-v2/runtimeLayer.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
+import * as DiagramService from "./diagrams/DiagramService.ts";
+import { diagramAssetRouteLayer } from "./diagrams/http.ts";
 import * as ThreadSearch from "./orchestration-v2/ThreadSearch.ts";
 import * as ResourceCleanupService from "./orchestration-v2/ResourceCleanupService.ts";
 import * as ThreadSettlementService from "./orchestration-v2/ThreadSettlementService.ts";
@@ -420,6 +422,16 @@ const layerAuth = EnvironmentAuth.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
 );
 
+const layerDiagramService = DiagramService.layer.pipe(
+  Layer.provide(ProjectStore.layer.pipe(Layer.provide(layerPersistence))),
+  Layer.provide(ServerEnvironment.layerIdentity),
+  Layer.provide(ServerSecretStore.layer),
+);
+
+const layerDiagramProjectCleanup = DiagramService.projectCleanupLayer.pipe(
+  Layer.provideMerge(layerDiagramService),
+);
+
 const layerCloudManagedEndpointRuntime = Layer.mergeAll(
   layerRelayClient,
   CloudManagedEndpointRuntime.layer.pipe(
@@ -624,6 +636,7 @@ const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
 );
 
 const layerRuntimeDependencies = layerRuntimeCoreDependencies.pipe(
+  Layer.provideMerge(layerDiagramProjectCleanup),
   // Misc.
   Layer.provideMerge(layerBackground),
   Layer.provideMerge(layerResourceDiagnostics),
@@ -659,6 +672,7 @@ const layerMakeRoutes = Layer.mergeAll(
     ),
     ServerHttp.layerOtlpTracesProxyRoute,
     ServerHttp.layerAssetRoute,
+    diagramAssetRouteLayer,
     ServerHttp.layerAttachmentUploadRoute,
     DeviceHubProxy.layer,
     ServerHttp.layerStaticAndDevRoute,

@@ -16,6 +16,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { useComposerDraftStore } from "../../composerDraftStore";
 import { releaseProjectDraftUploads } from "../../lib/composerDraftUploads";
 import { readLocalApi } from "../../localApi";
+import { confirmProjectRemoval } from "../../lib/projectDiagramRemoval";
 import {
   type SidebarProjectGroupMember,
   type SidebarProjectSnapshot,
@@ -309,7 +310,7 @@ function ProjectDetail({
       const singleMember = members.length === 1 ? members[0]! : null;
       const targetLabel = singleMember?.title ?? group.displayName;
       const confirmed = await settlePromise(() =>
-        api.dialogs.confirm(
+        confirmProjectRemoval(
           [
             projectThreads.length > 0
               ? `Remove ${targetKind} "${targetLabel}" and delete its ${projectThreads.length} thread${projectThreads.length === 1 ? "" : "s"}?`
@@ -332,7 +333,7 @@ function ProjectDetail({
               : "Other entries in this grouped project are unaffected.",
             "This action cannot be undone.",
           ].join("\n"),
-          { variant: "destructive" },
+          members,
         ),
       );
       if (confirmed._tag === "Failure" || !confirmed.value) return;

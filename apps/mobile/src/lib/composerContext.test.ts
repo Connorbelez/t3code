@@ -2,6 +2,8 @@ import { upgradeLegacyContextMessage } from "@t3tools/shared/composerContextLega
 import { buildProjectThreadStartTurnInput } from "./projectThreadStartTurn";
 import {
   ProjectId,
+  EnvironmentId,
+  DiagramId,
   ProviderInstanceId,
   ComposerContextId,
   type OrchestrationMessageContext,
@@ -269,5 +271,56 @@ describe("host context compatibility", () => {
     expect(message.text).toContain(pr.pullRequest!.url);
     expect(serializeComposerMessageForServer(text, context, true)).toEqual({ text, context });
     expect(context.records).toEqual([terminal, review, pr]);
+  });
+});
+
+describe("diagram context dependencies", () => {
+  const diagram = {
+    version: 1 as const,
+    kind: "diagram" as const,
+    contextId: ComposerContextId.make("diagram_one"),
+    label: "Architecture",
+    payload: {
+      environmentId: EnvironmentId.make("env_test"),
+      projectId: ProjectId.make("project_test"),
+      diagramId: DiagramId.make("00000000-0000-4000-8000-000000000001"),
+      scope: { kind: "diagram" as const, pageId: "page:one" },
+      screenshotContextId: ComposerContextId.make("image_one"),
+    },
+  };
+  const image = {
+    version: 1 as const,
+    kind: "image" as const,
+    contextId: ComposerContextId.make("image_one"),
+    label: "Preview",
+    attachmentId: "attachment_one",
+    name: "Architecture.png",
+    mimeType: "image/png",
+    sizeBytes: 20,
+  };
+
+  it("retains the diagram's native image while the live reference exists", () => {
+    const context = { version: 1 as const, records: [diagram, image] };
+    expect(referencedComposerContext(formatComposerContextReference(diagram), context)).toEqual(
+      context,
+    );
+    expect(referencedComposerContext("Removed diagram", context)).toBeUndefined();
+  });
+
+  it("rebinds a copied diagram's screenshot to the copied image identity", () => {
+    const ids = ["diagram_copy", "image_copy"];
+    const copied = reidentifyComposerContext(
+      formatComposerContextReference(diagram),
+      [diagram, image],
+      () => ids.shift() ?? "unexpected",
+    );
+    expect(copied.context.records).toEqual([
+      {
+        ...diagram,
+        contextId: "diagram_copy",
+        payload: { ...diagram.payload, screenshotContextId: "image_copy" },
+      },
+      { ...image, contextId: "image_copy" },
+    ]);
   });
 });

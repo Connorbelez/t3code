@@ -639,6 +639,51 @@ export function createEnvironmentSubscriptionAtomFamily<R, ER, Input, A, E>(
     family(environmentRpcKey(target));
 }
 
+/** Consumes every protocol event before atom state can coalesce a stream chunk. */
+export function createEnvironmentEventSubscription<R, ER, Input, A, E>(
+  runtime: Atom.AtomRuntime<EnvironmentRegistry.EnvironmentRegistry | R, ER>,
+  options: EnvironmentSubscriptionAtomOptions<
+    Input,
+    A,
+    E,
+    EnvironmentSupervisor.EnvironmentSupervisor | R
+  >,
+) {
+  return (
+    registry: AtomRegistry.AtomRegistry,
+    target: {
+      readonly environmentId: EnvironmentIdType;
+      readonly input: Input;
+      readonly onEvent: (event: A) => void;
+      readonly onError: (cause: Cause.Cause<E | ER>) => void;
+    },
+  ) => {
+    let active = true;
+    const atom = runtime
+      .atom(
+        followStreamInEnvironment(target.environmentId, options.subscribe(target.input)).pipe(
+          Stream.runForEach((event) =>
+            Effect.sync(() => {
+              if (active) target.onEvent(event);
+            }),
+          ),
+        ),
+      )
+      .pipe(Atom.setIdleTTL(0), Atom.withLabel(`${options.label}:${target.environmentId}`));
+    const unsubscribe = registry.subscribe(
+      atom,
+      (result) => {
+        if (active && AsyncResult.isFailure(result)) target.onError(result.cause);
+      },
+      { immediate: true },
+    );
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  };
+}
+
 export function createEnvironmentCommand<R, ER, Input, A, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry.EnvironmentRegistry | R, ER>,
   options: EnvironmentCommandAtomOptions<

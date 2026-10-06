@@ -1,7 +1,9 @@
 import * as Schema from "effect/Schema";
+import { DiagramId, DiagramScope, DiagramStructure, DiagramRevision } from "./diagrams.ts";
 
 import {
   EnvironmentId,
+  ProjectId,
   ForwardCompatibleArray,
   NonNegativeInt,
   PositiveInt,
@@ -28,6 +30,7 @@ export const COMPOSER_CONTEXT_KINDS = [
   "mention",
   "skill",
   "thread",
+  "diagram",
 ] as const;
 export type KnownComposerContextKind = (typeof COMPOSER_CONTEXT_KINDS)[number];
 
@@ -231,6 +234,23 @@ export const ThreadContextRecord = Schema.Struct({
 });
 export type ThreadContextRecord = typeof ThreadContextRecord.Type;
 
+export const DiagramContextRecord = Schema.Struct({
+  ...recordBase,
+  kind: Schema.Literal("diagram"),
+  payload: Schema.Struct({
+    environmentId: EnvironmentId,
+    projectId: ProjectId,
+    diagramId: DiagramId,
+    scope: DiagramScope,
+    revision: Schema.optional(DiagramRevision),
+    structure: Schema.optional(DiagramStructure),
+    imageStatus: Schema.optional(Schema.Literals(["current", "unavailable"])),
+    imageUnavailableReason: Schema.optional(ShortString),
+    screenshotContextId: Schema.optional(ComposerContextId),
+  }).check(Schema.makeFilter((payload) => JSON.stringify(payload).length <= 64_000)),
+});
+export type DiagramContextRecord = typeof DiagramContextRecord.Type;
+
 /**
  * Catch-all for kinds this build does not know. Known discriminators are excluded so a
  * malformed known record fails its own schema instead of sliding through unchecked.
@@ -262,6 +282,7 @@ export const KnownComposerContextRecord = Schema.Union([
   MentionContextRecord,
   SkillContextRecord,
   ThreadContextRecord,
+  DiagramContextRecord,
 ]);
 export type KnownComposerContextRecord = typeof KnownComposerContextRecord.Type;
 

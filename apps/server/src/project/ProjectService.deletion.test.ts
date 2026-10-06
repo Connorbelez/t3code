@@ -3,6 +3,7 @@ import { assert, it } from "@effect/vitest";
 import {
   CommandId,
   EventId,
+  EnvironmentId,
   type OrchestrationV2AppThread,
   ProjectId,
   ProviderInstanceId,
@@ -33,6 +34,9 @@ import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import * as ProjectFaviconResolver from "./ProjectFaviconResolver.ts";
 import * as ProjectService from "./ProjectService.ts";
 import * as RepositoryIdentityResolver from "./RepositoryIdentityResolver.ts";
+import * as DiagramService from "../diagrams/DiagramService.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 
 const layerEventPersistence = EventSink.layer.pipe(
   Layer.provideMerge(Layer.merge(EventStore.layer, ProjectionStore.layer)),
@@ -84,6 +88,44 @@ const seedProject = Effect.fn("ProjectDeletionTest.seedProject")(function* (proj
     )
   `;
 });
+
+it.effect(
+  "project removal counts and deletes active and archived diagrams through the shared service",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const projectId = ProjectId.make("project:diagrams-deletion");
+        yield* seedProject(projectId);
+        const diagrams = yield* DiagramService.make.pipe(
+          Effect.provide(ServerSecretStore.layer),
+          Effect.provideService(ServerEnvironment.ServerEnvironmentIdentity, {
+            getEnvironmentId: Effect.succeed(EnvironmentId.make("environment:project-diagrams")),
+          }),
+        );
+        const active = yield* diagrams.create({ projectId, name: "Active diagram" });
+        const archived = yield* diagrams.create({ projectId, name: "Archived diagram" });
+        yield* diagrams.lifecycle({ projectId, diagramId: archived.id, operation: "archive" });
+        const service = yield* ProjectService.make.pipe(
+          Effect.provide(
+            DiagramService.projectCleanupLayer.pipe(
+              Layer.provide(Layer.succeed(DiagramService.DiagramService, diagrams)),
+            ),
+          ),
+        );
+        assert.deepEqual(yield* diagrams.count(projectId), { active: 1, archived: 1 });
+        const removed = yield* service.delete({
+          projectId,
+          commandId: CommandId.make("command:diagram-removal"),
+        });
+        assert.isNotNull(removed.deletedAt);
+        assert.deepEqual(yield* diagrams.count(projectId), { active: 0, archived: 0 });
+        assert.equal(
+          (yield* Effect.flip(diagrams.read({ projectId, diagramId: active.id }))).code,
+          "project-unavailable",
+        );
+      }).pipe(Effect.provide(layerServices)),
+    ).pipe(Effect.provide(layerDatabase)),
+);
 
 function nativeThreadCreated(projectId: ProjectId, threadId: ThreadId) {
   const createdAt = DateTime.makeUnsafe("2026-01-01T00:00:00.000Z");

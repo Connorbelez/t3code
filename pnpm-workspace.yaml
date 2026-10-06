@@ -166,6 +166,8 @@ minimumReleaseAgeExclude:
   - "@opencode/schema@2.0.23"
 
 overrides:
+  # tldraw's floating highlight range must match the composer's Tiptap core.
+  "@tiptap/extension-highlight": "3.31.3"
   # Keep jsdom's optional peer consistent so Vite+ has one test-runner instance.
   "@exodus/bytes>@noble/hashes": "1.8.0"
   # Earlier React Navigation declarations create a circular type alias in TypeScript 7.

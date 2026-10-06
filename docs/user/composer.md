@@ -32,6 +32,27 @@ also send files to T3 Code through another app's system share sheet.
 
 See [images and videos](#images-and-videos-in-messages) for previewing and saving media.
 
+## Sketch and attach diagrams
+
+On web and desktop, open **Canvas** from the right panel to create or reopen a
+project diagram. Threads and worktrees in the same project share those diagrams.
+Closing a Canvas or deleting a thread keeps them. Archive a diagram to keep a
+read-only copy, or duplicate it before making a separate version.
+
+Use **Add to context** for the whole diagram, selected shapes, or visible area.
+Sending reads the saved diagram again and gives the agent a current image and
+matching structure. Attaching a diagram supplies context; tell the agent what
+you want it to change. Deleted selected shapes require a new selection.
+
+Agent changes join the hosting editor's Undo history as one step. Changes hosted
+on another device arrive as remote edits. Fresh images and agent edits need a
+connected web or desktop editor. Mobile can view and attach saved diagrams;
+outdated previews are labeled, and missing current images are reported explicitly.
+
+Wait for **Saved** before closing or refreshing an editor with offline changes.
+Export editable diagrams or PNG/SVG images when you need files. Removing a project
+permanently deletes its active and archived diagrams; export them first to keep them.
+
 ## Send while the agent is working
 
 On web and desktop, choose **Settings → General → Follow-up behavior** to queue

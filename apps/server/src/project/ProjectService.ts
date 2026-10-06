@@ -32,6 +32,7 @@ import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecuto
 import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import * as DiagramService from "../diagrams/DiagramService.ts";
 
 export interface ProjectCreateInput extends ProjectCreatePayload {
   readonly commandId: CommandId;
@@ -91,6 +92,7 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
       "list-projects",
       "list-threads",
       "delete-thread",
+      "delete-diagrams",
       "dispatch-project-command",
     ]),
     projectId: Schema.optional(ProjectId),
@@ -146,6 +148,7 @@ export class ProjectService extends Context.Service<
 
 export const make = Effect.gen(function* () {
   const projects = yield* ProjectStore.ProjectStoreV2;
+  const diagrams = yield* DiagramService.DiagramProjectCleanup;
   const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
   const threadProjections = yield* ProjectionStore.ProjectionStoreV2;
@@ -498,6 +501,14 @@ export const make = Effect.gen(function* () {
 
       if (existing.value.deletedAt === null) {
         yield* deleteChildThreads(input);
+        yield* diagrams
+          .removeProject(projectId)
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProjectOperationError({ operation: "delete-diagrams", projectId, cause }),
+            ),
+          );
       }
       yield* commit({ type: "project.delete", commandId: input.commandId, projectId });
       yield* projectEnrichment.invalidate([existing.value.workspaceRoot]);

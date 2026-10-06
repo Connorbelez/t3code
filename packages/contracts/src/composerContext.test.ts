@@ -118,6 +118,17 @@ const knownRecords: Record<(typeof COMPOSER_CONTEXT_KINDS)[number], Record<strin
     threadId: "thread-1",
     title: "Fix login flow",
   },
+  diagram: {
+    ...base,
+    kind: "diagram",
+    label: "Architecture",
+    payload: {
+      environmentId: "environment-1",
+      projectId: "project-1",
+      diagramId: "00000000-0000-4000-8000-000000000001",
+      scope: { kind: "diagram", pageId: "page:one" },
+    },
+  },
 };
 
 describe("ComposerContextRecord", () => {
@@ -145,6 +156,9 @@ describe("ComposerContextRecord", () => {
 
   it("does not let a malformed known kind slide through as unknown", () => {
     expect(Option.isNone(decodeRecord({ ...base, kind: "image", label: "x" }))).toBe(true);
+    expect(Option.isNone(decodeRecord({ ...base, kind: "diagram", label: "x", payload: {} }))).toBe(
+      true,
+    );
   });
 
   it("bounds the serialized payload of future context kinds", () => {

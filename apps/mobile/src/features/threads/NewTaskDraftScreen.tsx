@@ -1738,6 +1738,21 @@ export function NewTaskDraftScreen(props: {
                     supportsFiles={Boolean(
                       selectedEnvironmentServerConfig?.environment.capabilities.fileAttachments,
                     )}
+                    onPickDiagram={
+                      selectedProject &&
+                      flow.draftKey &&
+                      selectedEnvironmentServerConfig?.environment.capabilities.diagrams
+                        ? () =>
+                            navigation.dispatch(
+                              StackActions.push("NewTaskDiagram", {
+                                environmentId: String(selectedProject.environmentId),
+                                projectId: String(selectedProject.id),
+                                newTask: true,
+                                draftKey: flow.draftKey,
+                              }),
+                            )
+                        : undefined
+                    }
                     onPickMedia={handlePickMedia}
                     onPickFiles={handlePickFiles}
                   />

@@ -1,3 +1,4 @@
+import { DiagramScreen } from "./features/diagrams/DiagramScreen";
 import {
   createPathConfigForStaticNavigation,
   getPathFromState,
@@ -484,6 +485,11 @@ const NewTaskSheetStack = createNativeStackNavigator({
       linking: "draft/files/:path*",
       options: SOLID_HEADER_OPTIONS,
     }),
+    NewTaskDiagram: createNativeStackScreen({
+      screen: DiagramScreen,
+      linking: "draft/diagrams/:diagramId?",
+      options: { ...SOLID_HEADER_OPTIONS, title: "Diagram" },
+    }),
     NewTaskAttachment: createNativeStackScreen({
       screen: AttachmentFileScreen,
       linking: "draft/attachments/:attachmentId",
@@ -735,6 +741,11 @@ const RootStackConfig = createNativeStackNavigator({
       screen: ThreadFileScreen,
       linking: `${THREAD_LINKING_PREFIX}/files/:path*`,
       options: SOLID_HEADER_OPTIONS,
+    }),
+    Diagram: createNativeStackScreen({
+      screen: DiagramScreen,
+      linking: `${THREAD_LINKING_PREFIX}/diagrams/:diagramId`,
+      options: { ...SOLID_HEADER_OPTIONS, title: "Diagram" },
     }),
     ThreadAttachment: createNativeStackScreen({
       screen: AttachmentFileScreen,

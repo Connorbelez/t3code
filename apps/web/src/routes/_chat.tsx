@@ -7,7 +7,7 @@ import { ThreadRouteView } from "../components/ThreadRouteView";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import { useClientSettings, useLegacySidebarEnabled } from "../hooks/useSettings";
 import { openCommandPalette } from "../commandPaletteBus";
-import { useProjects } from "../state/entities";
+import { useProjects, useServerConfigs } from "../state/entities";
 import { usePrimaryEnvironmentId } from "../state/environments";
 import { selectProjectGroupingSettings } from "../logicalProject";
 import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
@@ -38,6 +38,12 @@ function ChatRouteGlobalShortcuts() {
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const projects = useProjects();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const serverConfigs = useServerConfigs();
+  const diagramCapability = routeThreadRef
+    ? serverConfigs.get(routeThreadRef.environmentId)?.environment.capabilities.diagrams
+    : undefined;
+  const canvasAvailable =
+    diagramCapability?.sdkVersion === "5.5.2" && diagramCapability.protocolVersion === 1;
   const { scratchEnvironmentId, startScratchThread } = useScratchProject();
   const projectGroupCount = useMemo(
     () =>
@@ -137,6 +143,17 @@ function ChatRouteGlobalShortcuts() {
         return;
       }
 
+      if (
+        command === "canvas.open" &&
+        canvasAvailable &&
+        routeThreadRef &&
+        (activeThread || activeDraftThread)
+      ) {
+        event.preventDefault();
+        useRightPanelStore.getState().openCanvas(routeThreadRef);
+        return;
+      }
+
       if (command === "preview.toggle") {
         event.preventDefault();
         event.stopPropagation();
@@ -188,6 +205,7 @@ function ChatRouteGlobalShortcuts() {
   }, [
     activeDraftThread,
     activeThread,
+    canvasAvailable,
     clearSelection,
     handleNewThread,
     keybindings,

@@ -59,6 +59,7 @@ import {
   MonitorIcon,
   MoonIcon,
   PaletteIcon,
+  PencilRulerIcon,
   RotateCcwIcon,
   SettingsIcon,
   SquarePenIcon,
@@ -737,7 +738,7 @@ function OpenCommandPaletteDialog(props: {
   const desktopLocalBootstraps = useDesktopLocalBootstraps();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const availableSettingsSearchItems = useAvailableSettingsSearchItems();
-  const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread } =
+  const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread, routeThreadRef } =
     useHandleNewThread();
   const projects = useProjects();
   const referenceThreadRef =
@@ -1973,6 +1974,24 @@ function OpenCommandPaletteDialog(props: {
         },
       });
     }
+  }
+
+  if (
+    routeThreadRef &&
+    currentProjectId &&
+    activeThreadServerConfig?.environment.capabilities.diagrams?.protocolVersion === 1 &&
+    activeThreadServerConfig.environment.capabilities.diagrams.sdkVersion === "5.5.2"
+  ) {
+    actionItems.push({
+      kind: "action",
+      value: "action:open-canvas",
+      searchTerms: ["canvas", "diagram", "draw", "sketch"],
+      title: "Open Canvas",
+      icon: <PencilRulerIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        useRightPanelStore.getState().openCanvas(routeThreadRef);
+      },
+    });
   }
 
   if (activeThread !== null) {

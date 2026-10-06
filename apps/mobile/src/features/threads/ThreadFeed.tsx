@@ -1,3 +1,5 @@
+import { DiagramContextRecord } from "@t3tools/contracts";
+import * as DiagramSchema from "effect/Schema";
 import { ThreadContextDivider } from "./thread-context-divider";
 import { ThreadHandoffRow } from "./thread-handoff-row";
 import { SecretRequestCard } from "./SecretRequestCard";
@@ -1993,6 +1995,14 @@ function UserMessageContent(props: UserMessageContentProps) {
     );
     if (record?.kind === "mention" && "path" in record) {
       props.linkHandlers.onLinkPress?.(record.path);
+      return;
+    }
+    if (DiagramSchema.is(DiagramContextRecord)(record)) {
+      navigation.navigate("Diagram", {
+        environmentId: record.payload.environmentId,
+        projectId: record.payload.projectId,
+        diagramId: record.payload.diagramId,
+      });
       return;
     }
     if (record?.kind === "thread" && "threadId" in record) {

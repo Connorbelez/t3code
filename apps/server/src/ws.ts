@@ -180,6 +180,7 @@ import * as ServerSettings from "./serverSettings.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import { withTerminalOutputWindow } from "./terminal/OutputProtocol.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
+import * as DiagramService from "./diagrams/DiagramService.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import { remoteSshDeviceHosts } from "./device/localSshDeviceHost.ts";
 import * as PreviewManager from "./preview/Manager.ts";
@@ -1182,6 +1183,7 @@ const layerWsRpc = (
   clientOrigin: OrchestrationClientOrigin,
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
   previewAutomationBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"],
+  diagrams: DiagramService.DiagramService["Service"],
 ) =>
   ServerWsRpcGroup.toLayer(
     Effect.gen(function* () {
@@ -3505,6 +3507,82 @@ const layerWsRpc = (
           observeRpcEffect(WS_METHODS.previewReportStatus, previewManager.reportStatus(input), {
             "rpc.aggregate": "preview",
           }),
+        [WS_METHODS.diagramsChanges]: (input) =>
+          observeRpcStreamEffect(WS_METHODS.diagramsChanges, diagrams.changes(input), {
+            "rpc.aggregate": "diagrams",
+          }),
+        [WS_METHODS.diagramsList]: (input) =>
+          observeRpcEffect(WS_METHODS.diagramsList, diagrams.list(input), {
+            "rpc.aggregate": "diagrams",
+          }),
+        [WS_METHODS.diagramsCreate]: (input) =>
+          observeRpcEffect(WS_METHODS.diagramsCreate, diagrams.create(input), {
+            "rpc.aggregate": "diagrams",
+          }),
+        [WS_METHODS.diagramsRead]: (input) =>
+          observeRpcEffect(WS_METHODS.diagramsRead, diagrams.read(input), {
+            "rpc.aggregate": "diagrams",
+          }),
+        [WS_METHODS.diagramsLifecycle]: (input) =>
+          observeRpcEffect(WS_METHODS.diagramsLifecycle, diagrams.lifecycle(input), {
+            "rpc.aggregate": "diagrams",
+          }),
+        [WS_METHODS.diagramsApplyBatch]: (input) =>
+          observeRpcEffect(WS_METHODS.diagramsApplyBatch, diagrams.applyBatch(input), {
+            "rpc.aggregate": "diagrams",
+          }),
+        [WS_METHODS.diagramsReceipt]: (input) =>
+          observeRpcEffect(WS_METHODS.diagramsReceipt, diagrams.receipt(input), {
+            "rpc.aggregate": "diagrams",
+          }),
+        [WS_METHODS.diagramsCapture]: (input) =>
+          observeRpcEffect(WS_METHODS.diagramsCapture, diagrams.capture(input), {
+            "rpc.aggregate": "diagrams",
+          }),
+        [WS_METHODS.diagramsPrepareContext]: (input) =>
+          observeRpcEffect(WS_METHODS.diagramsPrepareContext, diagrams.prepareContext(input), {
+            "rpc.aggregate": "diagrams",
+          }),
+        [WS_METHODS.diagramsImport]: (input) =>
+          observeRpcEffect(WS_METHODS.diagramsImport, diagrams.importDocument(input), {
+            "rpc.aggregate": "diagrams",
+          }),
+        [WS_METHODS.diagramsExport]: (input) =>
+          observeRpcEffect(WS_METHODS.diagramsExport, diagrams.exportDocument(input), {
+            "rpc.aggregate": "diagrams",
+          }),
+        [WS_METHODS.diagramsCount]: (input) =>
+          observeRpcEffect(WS_METHODS.diagramsCount, diagrams.count(input.projectId), {
+            "rpc.aggregate": "diagrams",
+          }),
+        [WS_METHODS.diagramsSyncConnect]: (input) =>
+          observeRpcStreamEffect(WS_METHODS.diagramsSyncConnect, diagrams.syncConnect(input), {
+            "rpc.aggregate": "diagrams",
+          }),
+        [WS_METHODS.diagramsSyncSend]: (input) =>
+          observeRpcEffect(WS_METHODS.diagramsSyncSend, diagrams.syncSend(input), {
+            "rpc.aggregate": "diagrams",
+          }),
+        [WS_METHODS.diagramsHostConnect]: (input) =>
+          observeRpcStreamEffect(WS_METHODS.diagramsHostConnect, diagrams.hostConnect(input), {
+            "rpc.aggregate": "diagrams",
+          }),
+        [WS_METHODS.diagramsHostRespond]: (input) =>
+          observeRpcEffect(WS_METHODS.diagramsHostRespond, diagrams.hostRespond(input), {
+            "rpc.aggregate": "diagrams",
+          }),
+        [WS_METHODS.diagramsUploadAsset]: (input) =>
+          observeRpcEffect(WS_METHODS.diagramsUploadAsset, diagrams.assetUpload(input), {
+            "rpc.aggregate": "diagrams",
+          }),
+        [WS_METHODS.diagramsReadAsset]: (input) =>
+          observeRpcEffect(WS_METHODS.diagramsReadAsset, diagrams.readAsset(input), {
+            "rpc.aggregate": "diagrams",
+          }),
+        [WS_METHODS.diagramsPreview]: (input) =>
+          observeRpcEffect(WS_METHODS.diagramsPreview, diagrams.preview(input), {
+            "rpc.aggregate": "diagrams",
+          }),
         [WS_METHODS.previewAutomationConnect]: (input) =>
           observeRpcStreamEffect(
             WS_METHODS.previewAutomationConnect,
@@ -3796,6 +3874,7 @@ const layerWsRpc = (
 export const layer = Layer.unwrap(
   Effect.gen(function* () {
     const previewAutomationBroker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+    const diagrams = yield* DiagramService.DiagramService;
     const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
     const pullRequests = yield* PullRequestService.PullRequestService;
     const sql = yield* SqlClient.SqlClient;
@@ -3844,7 +3923,13 @@ export const layer = Layer.unwrap(
           return httpEffect;
         }).pipe(
           Effect.provide(
-            layerWsRpc(session, clientOrigin, clientAnalyticsProps, previewAutomationBroker).pipe(
+            layerWsRpc(
+              session,
+              clientOrigin,
+              clientAnalyticsProps,
+              previewAutomationBroker,
+              diagrams,
+            ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),
               Layer.provide(AgentSessionScanner.layer),

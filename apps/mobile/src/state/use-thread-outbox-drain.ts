@@ -1,3 +1,4 @@
+import { prepareMobileDiagramContext } from "../lib/diagramContext";
 import { useAtomValue } from "@effect/atom-react";
 import {
   threadRuntimeIsActive,
@@ -226,9 +227,27 @@ export async function prepareQueuedMessageAttachments(
   if (!(await confirmThreadOutboxMessageQueued(queuedMessage))) {
     return { status: "abandoned" };
   }
-  const revision = threadOutboxRevision(queuedMessage.messageId);
+  let revision = threadOutboxRevision(queuedMessage.messageId);
   if (!isQueuedMessagePayloadCurrent(queuedMessage, revision)) {
     return { status: "abandoned" };
+  }
+  const freshContext = await prepareMobileDiagramContext({
+    context: queuedMessage.context,
+    attachments: queuedMessage.attachments,
+  });
+  if (freshContext.context !== queuedMessage.context) {
+    if (freshContext.attachments.length > PROVIDER_SEND_TURN_MAX_ATTACHMENTS)
+      throw new Error(
+        `A message can have at most ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} attachments.`,
+      );
+    const updated = {
+      ...queuedMessage,
+      context: freshContext.context,
+      attachments: freshContext.attachments,
+    };
+    if (!(await updateThreadOutboxMessage(updated, revision))) return { status: "abandoned" };
+    queuedMessage = updated;
+    revision += 1;
   }
   let persistedMessage = queuedMessage;
   let deliveryRevision = revision;
@@ -900,8 +919,8 @@ export function useThreadOutboxDrain(): void {
             ...serializeComposerMessageForServer(
               queuedMessage.text,
               uploadedComposerContext(
-                queuedMessage.context,
-                queuedMessage.attachments,
+                persistedMessage.context,
+                persistedMessage.attachments,
                 prepared.attachments,
               ),
               currentConfig.environment.capabilities.inlineMessageContext === true,
@@ -1036,8 +1055,8 @@ export function useThreadOutboxDrain(): void {
           ...serializeComposerMessageForServer(
             queuedMessage.text.trim(),
             uploadedComposerContext(
-              queuedMessage.context,
-              queuedMessage.attachments,
+              persistedMessage.context,
+              persistedMessage.attachments,
               prepared.attachments,
             ),
             currentConfig.environment.capabilities.inlineMessageContext === true,

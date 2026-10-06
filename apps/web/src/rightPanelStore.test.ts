@@ -1,5 +1,5 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { type EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { DiagramId, type EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
@@ -27,6 +27,27 @@ beforeEach(() => {
 });
 
 describe("rightPanelStore", () => {
+  it("updates a saved diagram tab title without creating another tab", () => {
+    const store = useRightPanelStore.getState();
+    const diagramId = DiagramId.make("0c4f512c-bf35-4449-b227-a6e6652b7443");
+    const projectId = ProjectId.make("project-A");
+    store.openCanvas(refA, null);
+    store.openCanvas(refA, { diagramId, projectId, title: "Untitled diagram" });
+    store.openCanvas(refA, { diagramId, projectId, title: "Architecture" });
+    const state = selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA);
+    expect(state.surfaces).toEqual([
+      { id: "canvas:library", kind: "canvas", diagramId: null },
+      {
+        id: "canvas:0c4f512c-bf35-4449-b227-a6e6652b7443",
+        kind: "canvas",
+        diagramId: "0c4f512c-bf35-4449-b227-a6e6652b7443",
+        projectId: "project-A",
+        title: "Architecture",
+      },
+    ]);
+    expect(state.activeSurfaceId).toBe("canvas:0c4f512c-bf35-4449-b227-a6e6652b7443");
+  });
+
   it("gives each host/device its own tab and preserves renamed tabs", () => {
     const store = useRightPanelStore.getState();
     const android = {

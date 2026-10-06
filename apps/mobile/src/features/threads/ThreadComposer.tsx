@@ -838,6 +838,16 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                 supportsFiles={Boolean(
                   props.serverConfig?.environment.capabilities.fileAttachments,
                 )}
+                onPickDiagram={
+                  props.serverConfig?.environment.capabilities.diagrams
+                    ? () =>
+                        navigation.navigate("Diagram", {
+                          environmentId: String(props.environmentId),
+                          projectId: String(props.selectedThread.projectId),
+                          draftKey: composerDraftKey,
+                        })
+                    : undefined
+                }
                 onPickMedia={props.onPickDraftMedia}
                 onPickFiles={props.onPickDraftFiles}
               />
@@ -1115,6 +1125,16 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                       supportsFiles={Boolean(
                         props.serverConfig?.environment.capabilities.fileAttachments,
                       )}
+                      onPickDiagram={
+                        props.serverConfig?.environment.capabilities.diagrams
+                          ? () =>
+                              navigation.navigate("Diagram", {
+                                environmentId: String(props.environmentId),
+                                projectId: String(props.selectedThread.projectId),
+                                draftKey: composerDraftKey,
+                              })
+                          : undefined
+                      }
                       onPickMedia={props.onPickDraftMedia}
                       onPickFiles={props.onPickDraftFiles}
                     />

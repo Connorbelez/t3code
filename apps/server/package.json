@@ -38,6 +38,8 @@
     "@opencode/client": "2.0.23",
     "@opencode/protocol": "2.0.23",
     "@opencode/schema": "2.0.23",
+    "@tldraw/sync-core": "5.5.2",
+    "@tldraw/tlschema": "5.5.2",
     "diff": "8.0.3",
     "effect": "catalog:",
     "jose": "catalog:",

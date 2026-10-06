@@ -1,5 +1,7 @@
 import {
   EnvironmentId,
+  DIAGRAM_PROTOCOL_VERSION,
+  DIAGRAM_SDK_VERSION,
   ORCHESTRATION_PROTOCOL_VERSION,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   type ExecutionEnvironmentDescriptor,
@@ -224,6 +226,7 @@ export const make = Effect.gen(function* () {
       pullRequests: true,
       pullRequestChecks: true,
       inlineMessageContext: true,
+      diagrams: { protocolVersion: DIAGRAM_PROTOCOL_VERSION, sdkVersion: DIAGRAM_SDK_VERSION },
       requiredWorktreeBootstrap: true,
       threadSettlement: true,
       threadAutoSettlement: true,

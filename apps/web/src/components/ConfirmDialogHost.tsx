@@ -1,4 +1,4 @@
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 
 import {
   completeConfirmDialogClose,
@@ -17,6 +17,7 @@ import {
   AlertDialogTitle,
 } from "./ui/alert-dialog";
 import { Button } from "./ui/button";
+import { toastManager } from "./ui/toast";
 
 type ConfirmationCopy = {
   readonly title: string;
@@ -62,6 +63,7 @@ export function ConfirmDialogHost() {
 
   const copy = resolveConfirmDialogCopy(state.status === "idle" ? "" : state.message);
   const confirmVariant = state.status === "idle" ? "default" : state.variant;
+  const [actionPending, setActionPending] = useState(false);
   const onCancel = () => respondToConfirmDialog(false);
   const onConfirm = () => respondToConfirmDialog(true);
 
@@ -85,8 +87,32 @@ export function ConfirmDialogHost() {
           ) : null}
         </AlertDialogHeader>
         <AlertDialogFooter>
+          {state.status === "confirming" && state.action ? (
+            <Button
+              variant="outline"
+              disabled={actionPending}
+              onClick={() => {
+                setActionPending(true);
+                void state.action
+                  ?.run()
+                  .catch((error: unknown) => {
+                    toastManager.add({
+                      type: "error",
+                      title: "Export failed",
+                      description:
+                        error instanceof Error
+                          ? error.message
+                          : "The diagrams could not be exported.",
+                    });
+                  })
+                  .finally(() => setActionPending(false));
+              }}
+            >
+              {actionPending ? "Exporting…" : state.action.label}
+            </Button>
+          ) : null}
           <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
-          <Button variant={confirmVariant} onClick={onConfirm}>
+          <Button variant={confirmVariant} onClick={onConfirm} disabled={actionPending}>
             Confirm
           </Button>
         </AlertDialogFooter>

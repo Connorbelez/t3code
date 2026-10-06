@@ -43,6 +43,7 @@ const contextChipVariants = cva(
         "pr-merged": "[--context-chip-accent:oklch(0.62_0.16_292)]",
         "pr-closed": "[--context-chip-accent:oklch(0.62_0.16_16)]",
         skill: "[--context-chip-accent:oklch(0.62_0.16_322)]",
+        diagram: "[--context-chip-accent:oklch(0.62_0.12_190)]",
         thread: "[--context-chip-accent:oklch(0.62_0.12_190)]",
         citation: "[--context-chip-accent:oklch(0.62_0.16_259)]",
       },
@@ -70,6 +71,7 @@ const contextChipVariants = cva(
           "pr-closed",
           "skill",
           "thread",
+          "diagram",
           "citation",
         ],
         className:

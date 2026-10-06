@@ -28,6 +28,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { autoAnimate } from "@formkit/auto-animate";
 import React, { useCallback, useEffect, memo, useMemo, useRef, useState } from "react";
 import { cn } from "~/lib/utils";
+import { confirmProjectRemoval } from "~/lib/projectDiagramRemoval";
 import { useShallow } from "zustand/react/shallow";
 import {
   DndContext,
@@ -1581,7 +1582,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                       thread.environmentId === memberProjectRef.environmentId &&
                       thread.projectId === memberProjectRef.projectId,
                   );
-                  const confirmed = await api.dialogs.confirm(
+                  const confirmed = await confirmProjectRemoval(
                     latestProjectThreads.length > 0
                       ? [
                           `Remove project "${member.title}" and delete its ${latestProjectThreads.length} thread${
@@ -1604,7 +1605,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                           "This permanently clears any archived conversation history.",
                           "This removes only this project entry.",
                         ].join("\n"),
-                    { variant: "destructive" },
+                    [member],
                   );
                   if (!confirmed) {
                     return;
@@ -1654,7 +1655,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         "This permanently clears any archived conversation history.",
         "This removes only this project entry.",
       ].join("\n");
-      const confirmed = await api.dialogs.confirm(message, { variant: "destructive" });
+      const confirmed = await confirmProjectRemoval(message, [member]);
       if (!confirmed) {
         return;
       }

@@ -1,3 +1,5 @@
+import { DiagramContextRecord } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { SourceFileSurface } from "../features/files/SourceFileSurface";
 import { filePreviewKind } from "@t3tools/shared/filePreview";
 import type {
@@ -255,6 +257,34 @@ export function ComposerContextSheet(props: {
                 Context unavailable. The reference was copied without its payload. Copy it again
                 from the original message or remove it.
               </Text>
+            ) : Schema.is(DiagramContextRecord)(record) ? (
+              <View className="gap-3">
+                <ContextField label="Diagram" value={record.label} />
+                <ContextField label="Scope" value={record.payload.scope.kind} />
+                <ContextField
+                  label="Revision"
+                  value={
+                    record.payload.revision === undefined
+                      ? "Live reference, refreshed when sent"
+                      : String(record.payload.revision)
+                  }
+                />
+                <ContextField
+                  label="Image"
+                  value={
+                    record.payload.imageStatus === "current"
+                      ? "Snapshot from the sent revision"
+                      : (record.payload.imageUnavailableReason ?? "Prepared when sent")
+                  }
+                />
+                {record.payload.structure?.pages.map((page) => (
+                  <ContextField
+                    key={page.id}
+                    label={page.name}
+                    value={`${page.shapeCount} shapes`}
+                  />
+                ))}
+              </View>
             ) : "payload" in record ? (
               <Text className="text-foreground">
                 This context type is not supported by this version of the app. Its payload will be

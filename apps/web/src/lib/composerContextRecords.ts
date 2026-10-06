@@ -1,7 +1,10 @@
+import { randomUUID } from "~/lib/utils";
 import {
   COMPOSER_CONTEXT_REVIEW_DIFF_MAX_CHARS,
   COMPOSER_CONTEXT_REVIEW_TEXT_MAX_CHARS,
+  DiagramContextRecord as DiagramContextRecordSchema,
 } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import type {
   ComposerContextId,
   ComposerContextRecord,
@@ -17,6 +20,7 @@ import type {
   ScopedThreadRef,
   TerminalContextRecord,
   ThreadContextRecord,
+  DiagramContextRecord,
   ThreadId,
 } from "@t3tools/contracts";
 import { upgradeLegacyContextMessage } from "@t3tools/shared/composerContextLegacy";
@@ -179,6 +183,22 @@ export function threadContextRecord(ref: ScopedThreadRef, title: string): Thread
   };
 }
 
+export function diagramContextReference(record: DiagramContextRecord): ComposerContextReference {
+  return { kind: "diagram", contextId: record.contextId, label: record.label };
+}
+
+export function diagramContextRecord(
+  input: Pick<DiagramContextRecord, "label" | "payload">,
+): DiagramContextRecord {
+  return {
+    version: 1,
+    kind: "diagram",
+    contextId: toKindScopedComposerContextId("diagram", randomUUID()),
+    label: sanitizeComposerContextLabel(input.label, "diagram"),
+    payload: input.payload,
+  };
+}
+
 export function terminalContextRecord(context: TerminalContextDraft): TerminalContextRecord {
   return {
     version: 1,
@@ -320,6 +340,7 @@ export function buildMessageContext(input: {
   reviewComments: ReadonlyArray<ReviewCommentContext>;
   previewAnnotations: ReadonlyArray<PreviewAnnotationPayload>;
   threadContexts?: ReadonlyArray<ThreadContextRecord>;
+  diagramContexts?: ReadonlyArray<DiagramContextRecord>;
   attachments?: ReadonlyArray<BoundComposerAttachment>;
 }): OrchestrationMessageContext | undefined {
   // An annotation's screenshot travels as the image attachment that reuses its id.
@@ -332,6 +353,7 @@ export function buildMessageContext(input: {
     ...input.terminalContexts.map(terminalContextRecord),
     ...input.reviewComments.map(reviewCommentContextRecord),
     ...(input.threadContexts ?? []),
+    ...(input.diagramContexts ?? []),
     ...input.previewAnnotations.map((annotation) =>
       previewAnnotationContextRecord(annotation, {
         screenshotContextId: screenshotAttachmentIds.has(annotation.id) ? annotation.id : undefined,
@@ -349,7 +371,9 @@ export function buildMessageContext(input: {
 export function asKnownContextRecord(
   record: ComposerContextRecord | undefined,
 ): KnownComposerContextRecord | undefined {
-  if (!record || "payload" in record) return undefined;
+  if (!record) return undefined;
+  if (Schema.is(DiagramContextRecordSchema)(record)) return record;
+  if ("payload" in record) return undefined;
   return record as KnownComposerContextRecord;
 }
 

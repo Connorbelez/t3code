@@ -7,6 +7,7 @@ import {
   ChatGptHandoffState,
 } from "./providerSetup.ts";
 import * as Schema from "effect/Schema";
+import * as Diagram from "./diagrams.ts";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
 import * as RpcMiddleware from "effect/rpc/RpcMiddleware";
@@ -413,6 +414,26 @@ export const WS_METHODS = {
   terminalClear: "terminal.clear",
   terminalRestart: "terminal.restart",
   terminalClose: "terminal.close",
+
+  diagramsList: "diagrams.list",
+  diagramsChanges: "diagrams.changes",
+  diagramsCreate: "diagrams.create",
+  diagramsRead: "diagrams.read",
+  diagramsLifecycle: "diagrams.lifecycle",
+  diagramsApplyBatch: "diagrams.applyBatch",
+  diagramsReceipt: "diagrams.receipt",
+  diagramsCapture: "diagrams.capture",
+  diagramsPrepareContext: "diagrams.prepareContext",
+  diagramsImport: "diagrams.import",
+  diagramsExport: "diagrams.export",
+  diagramsCount: "diagrams.count",
+  diagramsSyncConnect: "diagrams.syncConnect",
+  diagramsSyncSend: "diagrams.syncSend",
+  diagramsHostConnect: "diagrams.hostConnect",
+  diagramsHostRespond: "diagrams.hostRespond",
+  diagramsUploadAsset: "diagrams.uploadAsset",
+  diagramsReadAsset: "diagrams.readAsset",
+  diagramsPreview: "diagrams.preview",
 
   // Preview methods
   previewOpen: "preview.open",
@@ -1419,6 +1440,121 @@ const WsPreviewReportStatusRpc = Rpc.make(WS_METHODS.previewReportStatus, {
   error: Schema.Union([PreviewError, EnvironmentAuthorizationError]),
 });
 
+const WsDiagramsChangesRpc = Rpc.make(WS_METHODS.diagramsChanges, {
+  payload: Diagram.DiagramProjectInput,
+  success: Diagram.DiagramMetadataChange,
+  error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
+const WsDiagramsListRpc = Rpc.make(WS_METHODS.diagramsList, {
+  payload: Diagram.DiagramListInput,
+  success: Schema.Array(Diagram.DiagramMetadata),
+  error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
+});
+
+const WsDiagramsCreateRpc = Rpc.make(WS_METHODS.diagramsCreate, {
+  payload: Diagram.DiagramCreateInput,
+  success: Diagram.DiagramMetadata,
+  error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
+});
+
+const WsDiagramsReadRpc = Rpc.make(WS_METHODS.diagramsRead, {
+  payload: Diagram.DiagramReadInput,
+  success: Diagram.DiagramReadResult,
+  error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
+});
+
+const WsDiagramsLifecycleRpc = Rpc.make(WS_METHODS.diagramsLifecycle, {
+  payload: Diagram.DiagramLifecycleInput,
+  success: Schema.NullOr(Diagram.DiagramMetadata),
+  error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
+});
+
+const WsDiagramsApplyBatchRpc = Rpc.make(WS_METHODS.diagramsApplyBatch, {
+  payload: Diagram.DiagramApplyInput,
+  success: Diagram.DiagramMutationReceipt,
+  error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
+});
+
+const WsDiagramsReceiptRpc = Rpc.make(WS_METHODS.diagramsReceipt, {
+  payload: Diagram.DiagramReceiptInput,
+  success: Schema.NullOr(Diagram.DiagramMutationReceipt),
+  error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
+});
+
+const WsDiagramsCaptureRpc = Rpc.make(WS_METHODS.diagramsCapture, {
+  payload: Diagram.DiagramCaptureInput,
+  success: Diagram.DiagramCapture,
+  error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
+});
+
+const WsDiagramsPrepareContextRpc = Rpc.make(WS_METHODS.diagramsPrepareContext, {
+  payload: Diagram.DiagramPrepareContextInput,
+  success: Diagram.DiagramPreparedContext,
+  error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
+});
+
+const WsDiagramsImportRpc = Rpc.make(WS_METHODS.diagramsImport, {
+  payload: Diagram.DiagramImportInput,
+  success: Diagram.DiagramMetadata,
+  error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
+});
+
+const WsDiagramsExportRpc = Rpc.make(WS_METHODS.diagramsExport, {
+  payload: Diagram.DiagramTarget,
+  success: Diagram.DiagramDocumentData,
+  error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
+});
+
+const WsDiagramsCountRpc = Rpc.make(WS_METHODS.diagramsCount, {
+  payload: Diagram.DiagramProjectInput,
+  success: Diagram.DiagramCounts,
+  error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
+});
+
+const WsDiagramsSyncConnectRpc = Rpc.make(WS_METHODS.diagramsSyncConnect, {
+  payload: Diagram.DiagramSyncConnectInput,
+  success: Diagram.DiagramSyncEvent,
+  error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
+const WsDiagramsSyncSendRpc = Rpc.make(WS_METHODS.diagramsSyncSend, {
+  payload: Diagram.DiagramSyncSendInput,
+  error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
+});
+
+const WsDiagramsHostConnectRpc = Rpc.make(WS_METHODS.diagramsHostConnect, {
+  payload: Diagram.DiagramHostConnectInput,
+  success: Diagram.DiagramHostRequest,
+  error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
+const WsDiagramsHostRespondRpc = Rpc.make(WS_METHODS.diagramsHostRespond, {
+  payload: Diagram.DiagramHostResponse,
+  error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
+});
+
+const WsDiagramsUploadAssetRpc = Rpc.make(WS_METHODS.diagramsUploadAsset, {
+  payload: Diagram.DiagramUploadAssetInput,
+  success: Diagram.DiagramAssetResult,
+  error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
+});
+
+const WsDiagramsReadAssetRpc = Rpc.make(WS_METHODS.diagramsReadAsset, {
+  payload: Diagram.DiagramReadAssetInput,
+  success: Diagram.DiagramAssetData,
+  error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
+});
+
+const WsDiagramsPreviewRpc = Rpc.make(WS_METHODS.diagramsPreview, {
+  payload: Diagram.DiagramTarget,
+  success: Diagram.DiagramPreviewResult,
+  error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
+});
+
 const WsPreviewAutomationConnectRpc = Rpc.make(WS_METHODS.previewAutomationConnect, {
   payload: PreviewAutomationHost,
   success: PreviewAutomationStreamEvent,
@@ -1890,6 +2026,25 @@ export const WsRpcGroup = RpcGroup.make(
   WsPreviewListRpc,
   WsPreviewReportStatusRpc,
   WsPreviewAutomationConnectRpc,
+  WsDiagramsListRpc,
+  WsDiagramsChangesRpc,
+  WsDiagramsCreateRpc,
+  WsDiagramsReadRpc,
+  WsDiagramsLifecycleRpc,
+  WsDiagramsApplyBatchRpc,
+  WsDiagramsReceiptRpc,
+  WsDiagramsCaptureRpc,
+  WsDiagramsPrepareContextRpc,
+  WsDiagramsImportRpc,
+  WsDiagramsExportRpc,
+  WsDiagramsCountRpc,
+  WsDiagramsSyncConnectRpc,
+  WsDiagramsSyncSendRpc,
+  WsDiagramsHostConnectRpc,
+  WsDiagramsHostRespondRpc,
+  WsDiagramsUploadAssetRpc,
+  WsDiagramsReadAssetRpc,
+  WsDiagramsPreviewRpc,
   WsPreviewAutomationRespondRpc,
   WsPreviewAutomationFocusHostRpc,
   WsSubscribePreviewEventsRpc,

@@ -8,7 +8,14 @@
  * workspace paths, and diff/files remain singleton surfaces.
  */
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { EnvironmentId, ThreadId, type ScopedThreadRef } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  DiagramId,
+  ProjectId,
+  ThreadId,
+  type ScopedThreadRef,
+} from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
@@ -22,6 +29,7 @@ const RIGHT_PANEL_KINDS = [
   "file",
   "preview",
   "device",
+  "canvas",
   "terminal",
   "pull-request",
   "pull-requests",
@@ -36,6 +44,14 @@ export interface DeviceTabTarget {
 }
 
 export type RightPanelSurface =
+  | { id: "canvas:library"; kind: "canvas"; diagramId: null }
+  | {
+      id: `canvas:${string}`;
+      kind: "canvas";
+      diagramId: DiagramId;
+      projectId: ProjectId;
+      title?: string;
+    }
   | { id: `browser:${string}`; kind: "preview"; resourceId: string }
   | { id: "browser:new"; kind: "preview"; resourceId: null }
   | { id: "device" | `device:${string}`; kind: "device"; target?: DeviceTabTarget; title?: string }
@@ -88,7 +104,9 @@ const RIGHT_PANEL_STORAGE_KEY = "t3code:right-panel-state:v2";
 // v11 stops persisting the pull-request list's shared panel, so a restart opens the page fresh.
 // v12 adds the device surface.
 // v14 removes the agents surface; lineage lives in the thread title bar.
-const RIGHT_PANEL_STORAGE_VERSION = 14;
+const RIGHT_PANEL_STORAGE_VERSION = 15;
+const isDiagramId = Schema.is(DiagramId);
+const isProjectId = Schema.is(ProjectId);
 
 /** A fixed workspace-level ref: each PR surface carries its own real environment. */
 export const PULL_REQUESTS_PANEL_REF = scopeThreadRef(
@@ -132,6 +150,10 @@ interface RightPanelStoreState {
   open: (
     ref: ScopedThreadRef,
     kind: Exclude<RightPanelKind, "file" | "terminal" | "pull-request">,
+  ) => void;
+  openCanvas: (
+    ref: ScopedThreadRef,
+    target?: { projectId: ProjectId; diagramId: DiagramId; title?: string },
   ) => void;
   openDevice: (ref: ScopedThreadRef, target: DeviceTabTarget, automatic?: boolean) => void;
   renameDevice: (ref: ScopedThreadRef, surfaceId: string, title: string) => void;
@@ -204,6 +226,8 @@ const singletonSurface = (
       return { id: "pull-requests", kind };
     case "device":
       return { id: "device", kind };
+    case "canvas":
+      return { id: "canvas:library", kind, diagramId: null };
   }
 };
 
@@ -435,6 +459,18 @@ export function migratePersistedRightPanelState(persistedState: unknown): {
                     // Removed surfaces: plans render inline, agents in thread lineage.
                     const kind = (surface as { kind?: string }).kind;
                     if (kind === "plan" || kind === "agents") return [];
+                    if (surface.kind === "canvas") {
+                      if (surface.diagramId === null && surface.id === "canvas:library")
+                        return [surface];
+                      if (
+                        isDiagramId(surface.diagramId) &&
+                        "projectId" in surface &&
+                        isProjectId(surface.projectId) &&
+                        surface.id === `canvas:${surface.diagramId}`
+                      )
+                        return [surface];
+                      return [];
+                    }
                     if (surface.kind === "file") {
                       const revealLine =
                         typeof surface.revealLine === "number" &&
@@ -600,6 +636,23 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
               return upsertSurface(current, existing ?? browserSurface(null));
             }
             return upsertSurface(current, singletonSurface(kind));
+          }),
+        ),
+      openCanvas: (ref, target) =>
+        set((state) =>
+          userAction(state, scopedThreadKey(ref), (current) => {
+            const surface: RightPanelSurface = target
+              ? { id: `canvas:${target.diagramId}`, kind: "canvas", ...target }
+              : { id: "canvas:library", kind: "canvas", diagramId: null };
+            return upsertSurface(
+              {
+                ...current,
+                surfaces: current.surfaces.map((entry) =>
+                  entry.id === surface.id ? surface : entry,
+                ),
+              },
+              surface,
+            );
           }),
         ),
       openDevice: (ref, target, automatic = false) =>

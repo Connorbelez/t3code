@@ -4,6 +4,7 @@ import { videoMimeType } from "@t3tools/shared/video";
 import {
   COMPOSER_CONTEXT_MAX_RECORDS,
   ComposerContextId,
+  DiagramContextRecord,
   type ComposerContextRecord,
   OrchestrationMessageContext,
   type PullRequestContextMetadata,
@@ -165,6 +166,12 @@ export function referencedComposerContext(text: string, context?: OrchestrationM
   for (const record of context.records) {
     if (
       ids.has(record.contextId) &&
+      Schema.is(DiagramContextRecord)(record) &&
+      record.payload.screenshotContextId
+    )
+      ids.add(record.payload.screenshotContextId);
+    if (
+      ids.has(record.contextId) &&
       record.kind === "preview-annotation" &&
       "screenshotContextId" in record &&
       record.screenshotContextId
@@ -216,6 +223,20 @@ export function reidentifyComposerContext(
       records: records.map((record) => ({
         ...record,
         contextId: ids.get(record.contextId)!,
+        ...(Schema.is(DiagramContextRecord)(record)
+          ? {
+              payload: {
+                ...record.payload,
+                ...(record.payload.screenshotContextId
+                  ? {
+                      screenshotContextId:
+                        ids.get(record.payload.screenshotContextId) ??
+                        record.payload.screenshotContextId,
+                    }
+                  : {}),
+              },
+            }
+          : {}),
         ...(record.kind === "preview-annotation" &&
         "screenshotContextId" in record &&
         record.screenshotContextId

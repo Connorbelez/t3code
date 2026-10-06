@@ -30,6 +30,7 @@ import {
   environmentRpcKey,
   createAtomCommandScheduler,
   createEnvironmentQueryAtomFamily,
+  createEnvironmentEventSubscription,
   createRuntimeCommand,
   scheduleAtomCommandEffect,
   executeAtomCommand,
@@ -120,6 +121,7 @@ const makeEnvironmentQueryHarness = Effect.fn("TestEnvironmentQuery.makeHarness"
   });
 
   return {
+    runtime,
     atom: family({ environmentId: QUERY_ENVIRONMENT.environmentId, input: undefined }),
     supervisorSession,
     supervisorState,
@@ -137,6 +139,70 @@ const readEnvironmentQuery = <A, E>(
   AtomRegistry.getResult(registry, atom, { suspendOnWaiting: true }).pipe(
     Effect.tap(() => Effect.yieldNow),
   );
+
+describe("environment protocol event subscriptions", () => {
+  it.effect("delivers every event in a chunk in order and closes on unsubscribe", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeEnvironmentQueryHarness(Effect.void);
+        const registry = yield* mountEnvironmentQuery(harness.atom);
+        const delivered = Latch.makeUnsafe();
+        const closed = Latch.makeUnsafe();
+        const events: string[] = [];
+        const listen = createEnvironmentEventSubscription(harness.runtime, {
+          label: "test.protocol-events",
+          subscribe: () =>
+            Stream.concat(Stream.make("ready", "commit", "patch"), Stream.never).pipe(
+              Stream.ensuring(Effect.sync(() => closed.openUnsafe())),
+            ),
+        });
+        const unsubscribe = listen(registry, {
+          environmentId: QUERY_ENVIRONMENT.environmentId,
+          input: undefined,
+          onEvent: (event) => {
+            events.push(event);
+            if (event === "patch") delivered.openUnsafe();
+          },
+          onError: () => {
+            throw new Error("Unexpected protocol failure");
+          },
+        });
+        yield* delivered.await;
+        expect(events).toEqual(["ready", "commit", "patch"]);
+        unsubscribe();
+        yield* closed.await;
+      }),
+    ),
+  );
+
+  it.effect("reports a terminal failure after delivering the preceding events", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeEnvironmentQueryHarness(Effect.void);
+        const registry = yield* mountEnvironmentQuery(harness.atom);
+        const failed = Latch.makeUnsafe();
+        const events: string[] = [];
+        const expected = new TestQueryError({ message: "Disconnected" });
+        const listen = createEnvironmentEventSubscription(harness.runtime, {
+          label: "test.protocol-failure",
+          subscribe: () => Stream.concat(Stream.make("ready", "commit"), Stream.fail(expected)),
+        });
+        const unsubscribe = listen(registry, {
+          environmentId: QUERY_ENVIRONMENT.environmentId,
+          input: undefined,
+          onEvent: (event) => events.push(event),
+          onError: (cause) => {
+            expect(Cause.squash(cause)).toBe(expected);
+            failed.openUnsafe();
+          },
+        });
+        yield* failed.await;
+        expect(events).toEqual(["ready", "commit"]);
+        unsubscribe();
+      }),
+    ),
+  );
+});
 
 const mountEnvironmentQuery = Effect.fn("TestEnvironmentQuery.mount")(function* <A, E>(
   atom: Atom.Atom<AsyncResult.AsyncResult<A, E>>,
