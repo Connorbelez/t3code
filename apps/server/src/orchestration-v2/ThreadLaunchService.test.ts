@@ -2210,7 +2210,7 @@ it.effect("keeps Canvas comments paired with their numbered image through intake
     assert.isNotNull(pendingPath);
     yield* fs.makeDirectory(config.attachmentsDir, { recursive: true });
     yield* fs.writeFile(pendingPath, new Uint8Array([1, 2, 3, 4]));
-    const comments = Schema.decodeUnknownSync(DiagramAnnotationsContextRecord)({
+    const comments = yield* Schema.decodeUnknownEffect(DiagramAnnotationsContextRecord)({
       version: 1,
       contextId: "diagram-annotations_page",
       kind: "diagram-annotations",
@@ -2300,7 +2300,7 @@ it.effect("keeps Canvas comments paired with their numbered image through intake
       comments,
       {
         version: 1,
-        contextId: "image_badges",
+        contextId: ComposerContextId.make("image_badges"),
         kind: "image",
         label: image.name,
         attachmentId: storedImage.id,
