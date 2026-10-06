@@ -23,7 +23,7 @@ Packages are public. Co-workers run:
 npx @connor_beleznay/t3@latest
 ```
 
-For the first publish, authenticate with npm locally and publish the three platform
+For the first publish, use Node 24.13.1, authenticate with npm locally, and publish the three platform
 tarballs first, then the launcher tarball, each with `npm publish <tarball> --access public`.
 Alternatively, set a granular publishing token as the fork's `NPM_TOKEN` Actions secret
 and run the workflow with publishing enabled. Never put the token in source control.
