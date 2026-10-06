@@ -11,6 +11,10 @@
       "types": "./src/handoff.ts",
       "default": "./src/handoff.ts"
     },
+    "./diagram-annotations": {
+      "types": "./src/diagramAnnotations.ts",
+      "default": "./src/diagramAnnotations.ts"
+    },
     "./device/stream": {
       "types": "./src/device/stream.ts",
       "default": "./src/device/stream.ts"
