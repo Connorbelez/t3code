@@ -13,6 +13,7 @@ import {
   Box,
   EmbedShapeUtil,
   Tldraw,
+  getFontFamily,
   type Editor,
   type TLAssetStore,
   type TLRecord,
@@ -24,7 +25,7 @@ import { useTheme } from "~/hooks/useTheme";
 import { createDiagramApi, diagramSyncEvents } from "./diagramApi";
 import { DiagramSocket, parseDocumentRecord, type DiagramSaveState } from "./diagramSocket";
 import { diagramHostClientId, registerDiagramHost, type MountedDiagramHost } from "./diagramHosts";
-import { validateDiagramBatch } from "./diagramBatchPreflight";
+import { rehearseDiagramChanges, validateDiagramBatch } from "./diagramBatchPreflight";
 import "tldraw/tldraw.css";
 
 const assetUrls = getAssetUrlsByImport();
@@ -371,6 +372,31 @@ function MountedDiagramEditor(props: DiagramEditorProps & { onAdoptionLost: () =
           mimeType: format === "svg" ? "image/svg+xml" : "image/png",
           base64,
         } satisfies DiagramCapture;
+      },
+      compose: async (request) => {
+        requireSafe();
+        await socket.waitUntilSaved();
+        requireSafe();
+        const records = editor.store.serialize("document");
+        // Loaded on first compose so the pipeline and ELK stay out of the editor chunk.
+        const { compose } = await import("@t3tools/diagram-compose/compose");
+        const theme = editor.getCurrentTheme();
+        return compose(request, Object.values(records), {
+          measureText: (text, font) => {
+            const { w, h } = editor.textMeasure.measureText(text, {
+              fontStyle: "normal",
+              fontWeight: "normal",
+              fontFamily: getFontFamily(theme, font.family),
+              fontSize: font.fontSize,
+              lineHeight: theme.lineHeight,
+              maxWidth: font.maxWidth,
+              padding: "0px",
+            });
+            return { w, h };
+          },
+          rehearse: (puts, deletes) =>
+            new Map(Object.entries(rehearseDiagramChanges(editor, records, puts, deletes))),
+        });
       },
     };
     socket.onFenceReleased = (event) => {

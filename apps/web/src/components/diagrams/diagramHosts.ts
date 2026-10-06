@@ -1,6 +1,8 @@
 import type {
   DiagramBatch,
   DiagramCapture,
+  DiagramComposeRequest,
+  DiagramHostComposeResult,
   DiagramId,
   DiagramMetadata,
   DiagramScope,
@@ -27,6 +29,7 @@ export type MountedDiagramHost = {
     format: "png" | "svg",
     expectedRevision?: number,
   ) => Promise<DiagramCapture>;
+  compose: (request: DiagramComposeRequest) => Promise<DiagramHostComposeResult>;
   scope: (kind: DiagramScope["kind"]) => DiagramScope;
   saveState: () => DiagramSaveState;
   flush: () => Promise<void>;

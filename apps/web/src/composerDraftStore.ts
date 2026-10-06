@@ -867,6 +867,10 @@ function copyDiagramContext(record: DiagramContextRecord): DeepMutable<DiagramCo
             structure: {
               ...structure,
               pages: structure.pages.map((page) => ({ ...page })),
+              compositions: structure.compositions.map((composition) => ({
+                ...composition,
+                bounds: composition.bounds ? { ...composition.bounds } : null,
+              })),
               shapes: structure.shapes.map((shape) => ({
                 ...shape,
                 bounds: shape.bounds ? { ...shape.bounds } : null,

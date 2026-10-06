@@ -30,7 +30,7 @@ const list = Tool.make("t3_diagram_list", {
 const read = Tool.make("t3_diagram_read", {
   ...shared,
   description:
-    "Read current diagram revision and bounded all-page shape/binding summaries. Set includeRecords or recordIds for schema-bearing records and paginate with nextOffset. Retain exact target, ancestor, binding and asset records as expected preconditions before editing. Reads work without an editor.",
+    "Read current diagram revision and bounded all-page shape/binding summaries. Each composition is listed once instead of its member shapes. Set includeRecords or recordIds for schema-bearing records and paginate with nextOffset. Retain exact target, ancestor, binding and asset records as expected preconditions before editing. Reads work without an editor.",
   parameters: Schema.Struct({ ...Contracts.DiagramReadInput.fields, projectId }),
   success: Contracts.DiagramReadResult,
 })
@@ -48,12 +48,44 @@ const create = Tool.make("t3_diagram_create", {
 const apply = Tool.make("t3_diagram_apply", {
   ...shared,
   description:
-    "Apply one atomic bounded SDK record batch. Read first and pass expected records for every target and required ancestor, parent, binding or asset dependency. Respect the attached selection focus and leave unrelated records unchanged. A connected editor host is required. Success is a durable receipt with one host Undo step. Reuse requestId with the identical batch after an uncertain response. Read the receipt before fresh work. Failed or disconnected work is never replayed later.",
+    "Apply one atomic bounded SDK record batch. Read first and pass expected records for every target and required ancestor, parent, binding or asset dependency. Respect the attached selection focus and leave unrelated records unchanged. A connected editor host is required. Success is a durable receipt with one host Undo step. Reuse requestId with the identical batch after an uncertain response. Read the receipt before fresh work. Failed or disconnected work is never replayed later. Prefer t3_diagram_compose for composition members (shapes whose meta has t3Composition); raw edits to them count as human edits.",
   parameters: Schema.Struct({ ...target, batch: Contracts.DiagramBatch }),
   success: Contracts.DiagramMutationReceipt,
 })
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true);
+
+const composeGuidance = [
+  "Compose a structured diagram such as a flowchart from a spec of nodes and edges. T3 Code lays it out and draws editable stock shapes inside a frame named by the composition key.",
+  "Prefer this over t3_diagram_apply for structured diagrams, and describe content, not coordinates: labels default to keys, kinds default per kit, and edges accept [from, to, label?]. t3_diagram_kit lists a kit's vocabulary and an example; invalid specs fail listing the valid options.",
+  "The spec replaces the whole composition with that key, so read the diagram before recomposing an existing key.",
+  "An identical retry is a no-op, so retry freely after an uncertain response. requestId is optional and only needed for t3_diagram_receipt lookup.",
+  "One composition is at most 500 records; split large diagrams into several compositions by area.",
+  "A connected editor host is required. Attaching a diagram is context and does not authorize changing it.",
+].join(" ");
+
+const compose = Tool.make("t3_diagram_compose", {
+  ...shared,
+  description: composeGuidance,
+  parameters: Schema.Struct({
+    ...target,
+    requestId: Schema.optional(Contracts.DiagramRequestId),
+    ...Contracts.DiagramComposeRequest.fields,
+  }),
+  success: Contracts.DiagramComposeResult,
+})
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
+
+const kit = Tool.make("t3_diagram_kit", {
+  ...shared,
+  description:
+    "Look up a composition kit's node kinds, edge kinds, defaults and a short example spec for t3_diagram_compose.",
+  parameters: Schema.Struct({ kit: Contracts.DiagramKit }),
+  success: Contracts.DiagramKitReference,
+})
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false);
 
 const receipt = Tool.make("t3_diagram_receipt", {
   ...shared,
@@ -114,6 +146,8 @@ export const DiagramToolkit = Toolkit.make(
   read,
   create,
   apply,
+  compose,
+  kit,
   receipt,
   lifecycle,
   exportDocument,

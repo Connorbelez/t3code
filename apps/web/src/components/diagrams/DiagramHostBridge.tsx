@@ -2,6 +2,7 @@ import { RegistryContext } from "@effect/atom-react";
 import {
   DIAGRAM_SDK_VERSION,
   DiagramBatch,
+  DiagramComposeRequest,
   DiagramOperationError,
   DiagramScope,
   type DiagramHostRequest,
@@ -30,6 +31,7 @@ const captureInput = Schema.Struct({
 });
 const decodeCaptureInput = Schema.decodeUnknownSync(captureInput);
 const decodeBatch = Schema.decodeUnknownSync(DiagramBatch);
+const decodeComposeRequest = Schema.decodeUnknownSync(DiagramComposeRequest);
 
 export default function DiagramHostBridge() {
   const configs = useServerConfigs();
@@ -137,6 +139,15 @@ function EnvironmentDiagramHost({ environmentId }: { environmentId: EnvironmentI
             connectionId: request.connectionId,
             result: { ok: true, value: result },
           });
+        } else if (request.operation === "compose") {
+          const value = await host.compose(decodeComposeRequest(request.input));
+          requireConnected();
+          await api.hostRespond({
+            requestId: request.requestId,
+            connectionId: request.connectionId,
+            result: { ok: true, value },
+          });
+          if (temporary) releaseTemporary();
         } else {
           const input = decodeCaptureInput(request.input);
           const value = await host.capture(input.scope, input.format, input.revision);
@@ -172,6 +183,7 @@ function EnvironmentDiagramHost({ environmentId }: { environmentId: EnvironmentI
         sdkVersion: DIAGRAM_SDK_VERSION,
         focused,
         mountedDiagramIds,
+        operations: ["prepare-batch", "capture", "compose"],
       },
       onEvent: (request) => {
         if (request.operation === "ready") {

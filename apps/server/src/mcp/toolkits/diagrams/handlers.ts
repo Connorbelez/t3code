@@ -6,6 +6,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import { kitReference } from "@t3tools/diagram-compose/model";
 import * as Diagrams from "../../../diagrams/DiagramService.ts";
 import { readCaller, readMutationCaller, resolveProjectId } from "../../threadAccess.ts";
 import { DiagramToolkit, DiagramCaptureToolkit } from "./tools.ts";
@@ -64,6 +65,21 @@ export const DiagramHandlersLive = DiagramToolkit.toLayer({
         namespace,
         ...(threadId === undefined ? {} : { threadId }),
       });
+    }),
+  t3_diagram_compose: (input) =>
+    Effect.gen(function* () {
+      const { diagrams, projectId, namespace, threadId } = yield* access(input.projectId, true);
+      return yield* diagrams.compose({
+        ...input,
+        projectId,
+        namespace,
+        ...(threadId === undefined ? {} : { threadId }),
+      });
+    }),
+  t3_diagram_kit: (input) =>
+    Effect.gen(function* () {
+      yield* readCaller();
+      return kitReference(input.kit);
     }),
   t3_diagram_receipt: (input) =>
     Effect.gen(function* () {

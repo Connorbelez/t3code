@@ -6,9 +6,13 @@ import {
   DiagramCapture,
   DiagramScope,
   DiagramOperationError,
+  type DiagramHostComposeResult,
+  type DiagramHostOperation,
   type DiagramMetadata,
+  type DiagramSpec,
 } from "@t3tools/contracts";
-import { PageRecordType, AssetRecordType, createTLSchema } from "@tldraw/tlschema";
+import { compose } from "@t3tools/diagram-compose/compose";
+import { PageRecordType, AssetRecordType, createTLSchema, type TLRecord } from "@tldraw/tlschema";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -47,6 +51,13 @@ const seed = Effect.gen(function* () {
     yield* sql`INSERT INTO projection_projects (project_id,title,workspace_root,default_model_selection_json,scripts_json,created_at,updated_at,deleted_at) VALUES (${id},'Diagrams',${`/test/${id}`},NULL,'[]','2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z',NULL)`;
 });
 
+function sdkRecord(value: unknown): TLRecord {
+  const { typeName } = Schema.decodeUnknownSync(Schema.Struct({ typeName: Schema.String }))(value);
+  const type = Object.values(sdkSchema.types).find((item) => item.typeName === typeName);
+  if (!type) throw new Error("Unknown SDK record type");
+  return type.validate(value);
+}
+
 function document(name = "Imported page") {
   return {
     tldrawFileFormatVersion: 1,
@@ -63,11 +74,19 @@ function document(name = "Imported page") {
   };
 }
 
+const allOperations: readonly DiagramHostOperation[] = ["prepare-batch", "capture", "compose"];
+
 const connect = Effect.fn(function* (
   service: DiagramService.DiagramService["Service"],
   diagram: DiagramMetadata,
-  control?: { entered: Deferred.Deferred<void>; continue: Deferred.Deferred<void> },
+  options: {
+    control?: { entered: Deferred.Deferred<void>; continue: Deferred.Deferred<void> };
+    operations?: readonly DiagramHostOperation[];
+    composeAnswers?: Array<DiagramHostComposeResult | DiagramOperationError>;
+  } = {},
 ) {
+  const { control } = options;
+  const received: DiagramHostOperation[] = [];
   const ready = yield* Deferred.make<string>();
   const connected = yield* Deferred.make<void>();
   const committed = yield* Deferred.make<{ generation: string; fence: string }>();
@@ -140,6 +159,7 @@ const connect = Effect.fn(function* (
     environmentId,
     sdkVersion: "5.5.2",
     focused: true,
+    ...(options.operations ? { operations: options.operations } : {}),
   });
   yield* Stream.runForEach(hosts, (request) =>
     Effect.gen(function* () {
@@ -147,7 +167,18 @@ const connect = Effect.fn(function* (
         yield* Deferred.succeed(hostReady, undefined);
         return;
       }
-      if (request.operation === "prepare-batch") {
+      received.push(request.operation);
+      if (request.operation === "compose") {
+        const answer = options.composeAnswers?.shift();
+        if (!answer) return yield* Effect.die("Unexpected compose request");
+        yield* service.hostRespond({
+          requestId: request.requestId,
+          connectionId: request.connectionId,
+          result: Schema.is(DiagramOperationError)(answer)
+            ? { ok: false, error: answer }
+            : { ok: true, value: answer },
+        });
+      } else if (request.operation === "prepare-batch") {
         if (control) {
           yield* Deferred.succeed(control.entered, undefined);
           yield* Deferred.await(control.continue);
@@ -164,18 +195,7 @@ const connect = Effect.fn(function* (
             ok: true,
             value: {
               connectionId,
-              fingerprint: diagramRecordFingerprint(
-                current.records.map((item) => {
-                  const { typeName } = Schema.decodeUnknownSync(
-                    Schema.Struct({ typeName: Schema.String }),
-                  )(item);
-                  const type = Object.values(sdkSchema.types).find(
-                    (type) => type.typeName === typeName,
-                  );
-                  if (!type) throw new Error("Unknown SDK record type");
-                  return type.validate(item);
-                }),
-              ),
+              fingerprint: diagramRecordFingerprint(current.records.map(sdkRecord)),
             },
           },
         });
@@ -202,7 +222,7 @@ const connect = Effect.fn(function* (
     }),
   ).pipe(Effect.forkScoped);
   yield* Deferred.await(hostReady);
-  return { connectionId, committed, adopted, released };
+  return { connectionId, committed, adopted, released, received };
 });
 
 it.effect("selects the mounted host and refuses a busy context even when images are optional", () =>
@@ -647,7 +667,7 @@ it.effect("fails disconnected visual work promptly without committing or replayi
     const diagram = yield* service.create({ projectId, name: "Disconnected" });
     const entered = yield* Deferred.make<void>();
     const resume = yield* Deferred.make<void>();
-    const host = yield* connect(service, diagram, { entered, continue: resume });
+    const host = yield* connect(service, diagram, { control: { entered, continue: resume } });
     const page = sdkSchema.types.page.validate({
       id: "page:disconnected",
       typeName: "page",
@@ -887,5 +907,271 @@ it.effect("prioritizes selected shapes and the active page in bounded chat struc
       scope: { kind: "viewport", pageId: second.id, bounds: { x: 0, y: 0, w: 1, h: 1 } },
     });
     assert.isTrue(viewport.structure.shapes.every((shape) => shape.pageId === second.id));
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
+const flowSpec: DiagramSpec = {
+  kit: "flow",
+  key: "checkout",
+  nodes: [{ key: "start", kind: "start" }, { key: "pay" }],
+  edges: [["start", "pay"]],
+};
+const unchanged: DiagramHostComposeResult = {
+  changes: null,
+  counts: { created: 0, updated: 0, kept: 3, removed: 0 },
+};
+
+// Needs the real validateComposeRequest from @t3tools/diagram-compose.
+it.effect("routes each host request only to hosts advertising its operation", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    const diagram = yield* service.create({ projectId, name: "Routing" });
+    const legacyReceived: string[] = [];
+    const ready = yield* Deferred.make<void>();
+    const legacy = yield* service.hostConnect({
+      clientId: "legacy",
+      environmentId,
+      sdkVersion: "5.5.2",
+      focused: false,
+      mountedDiagramIds: [diagram.id],
+    });
+    yield* Stream.runForEach(legacy, (request) =>
+      Effect.gen(function* () {
+        if (request.operation === "ready") return yield* Deferred.succeed(ready, undefined);
+        legacyReceived.push(request.operation);
+        yield* service.hostRespond({
+          requestId: request.requestId,
+          connectionId: request.connectionId,
+          result: { ok: false, error: new DiagramOperationError({ code: "busy" }) },
+        });
+      }),
+    ).pipe(Effect.forkScoped);
+    yield* Deferred.await(ready);
+    const input = { projectId, diagramId: diagram.id, namespace: "provider", spec: flowSpec };
+    assert.equal((yield* Effect.flip(service.compose(input))).code, "no-editor");
+
+    const editor = yield* connect(service, diagram, {
+      operations: allOperations,
+      composeAnswers: [unchanged],
+    });
+    assert.deepEqual(yield* service.compose(input), {
+      requestId: null,
+      revision: 0,
+      compositionKey: "checkout",
+      counts: unchanged.counts,
+    });
+    const page = sdkSchema.types.page.validate({
+      id: PageRecordType.createId("routed"),
+      typeName: "page",
+      meta: {},
+      name: "Routed",
+      index: "a2",
+    });
+    const apply = yield* Effect.flip(
+      service.applyBatch({
+        projectId,
+        diagramId: diagram.id,
+        namespace: "provider",
+        batch: {
+          requestId: "routed",
+          expected: [{ id: page.id, record: null }],
+          puts: [page],
+          deletes: [],
+        },
+      }),
+    );
+    assert.equal(apply.code, "busy");
+    assert.deepEqual(legacyReceived, ["prepare-batch"]);
+    assert.deepEqual(editor.received, ["compose"]);
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
+// Needs the real validateComposeRequest from @t3tools/diagram-compose.
+it.effect("applies composed changes on the composing host and no-ops an identical retry", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    const diagram = yield* service.create({ projectId, name: "Compose" });
+    const page = sdkSchema.types.page.validate({
+      id: PageRecordType.createId("composed"),
+      typeName: "page",
+      meta: {},
+      name: "Composed",
+      index: "a2",
+    });
+    const counts = { created: 1, updated: 0, kept: 0, removed: 0 };
+    const host = yield* connect(service, diagram, {
+      operations: allOperations,
+      composeAnswers: [
+        {
+          changes: { expected: [{ id: page.id, record: null }], puts: [page], deletes: [] },
+          counts,
+        },
+        unchanged,
+      ],
+    });
+    const input = { projectId, diagramId: diagram.id, namespace: "provider", spec: flowSpec };
+    assert.deepEqual(yield* service.compose({ ...input, requestId: "compose-1" }), {
+      requestId: "compose-1",
+      revision: 1,
+      compositionKey: "checkout",
+      counts,
+    });
+    assert.deepEqual(
+      yield* service.receipt({
+        projectId,
+        diagramId: diagram.id,
+        namespace: "provider",
+        requestId: "compose-1",
+      }),
+      { requestId: "compose-1", revision: 1, changedRecordIds: ["page:composed"] },
+    );
+    assert.deepEqual(yield* service.compose(input), {
+      requestId: null,
+      revision: 1,
+      compositionKey: "checkout",
+      counts: unchanged.counts,
+    });
+    assert.deepEqual(host.received, ["compose", "prepare-batch", "compose"]);
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
+// Needs the real validateComposeRequest from @t3tools/diagram-compose.
+it.effect("surfaces host compose errors intact and rejects invalid specs before any host", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    const diagram = yield* service.create({ projectId, name: "Errors" });
+    const host = yield* connect(service, diagram, {
+      operations: allOperations,
+      composeAnswers: [
+        new DiagramOperationError({ code: "conflict", details: { members: ["start", "pay"] } }),
+      ],
+    });
+    const input = { projectId, diagramId: diagram.id, namespace: "provider", spec: flowSpec };
+    const conflict = yield* Effect.flip(service.compose(input));
+    assert.deepEqual(
+      { code: conflict.code, details: conflict.details },
+      { code: "conflict", details: { members: ["start", "pay"] } },
+    );
+    const invalid = yield* Effect.flip(
+      service.compose({
+        ...input,
+        spec: { ...flowSpec, nodes: [{ key: "start", kind: "banana" }] },
+      }),
+    );
+    assert.equal(invalid.code, "invalid-spec");
+    assert.deepEqual(host.received, ["compose"]);
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
+// Needs the real compose pipeline and readCompositions from @t3tools/diagram-compose.
+it.effect("lists large compositions once in structure and attached context", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    const page = document().records[0]!;
+    const loose = ["one", "two", "three"].map((name, index) =>
+      sdkSchema.types.shape.create({
+        id: `shape:loose-${name}`,
+        type: "group",
+        parentId: page.id,
+        index: `a${index + 1}`,
+        props: {},
+      }),
+    );
+    let records: TLRecord[] = [page, ...loose];
+    for (const key of ["left", "right"]) {
+      const result = yield* Effect.promise(() =>
+        compose(
+          {
+            spec: {
+              kit: "flow",
+              key,
+              nodes: Array.from({ length: 150 }, (_, index) => ({ key: `${key}${index}` })),
+            },
+          },
+          records,
+          {
+            measureText: (text) => ({ w: text.length * 8, h: 20 }),
+            rehearse: (puts, deletes) => {
+              const after = new Map(records.map((item) => [item.id as string, item]));
+              for (const id of deletes) after.delete(id);
+              for (const item of puts) after.set(item.id, item);
+              return after;
+            },
+          },
+        ),
+      );
+      if (!result.changes) return yield* Effect.die("Expected a new composition");
+      records = [...records, ...result.changes.puts.map(sdkRecord)];
+    }
+    const rightFrame = records.findLast(
+      (item) => item.typeName === "shape" && item.type === "frame" && item.parentId === page.id,
+    );
+    const dragged = records.find(
+      (item) => item.typeName === "shape" && item.parentId === rightFrame?.id,
+    );
+    if (dragged?.typeName !== "shape" || rightFrame?.typeName !== "shape")
+      return yield* Effect.die("Expected a framed member");
+    const draggedOut = sdkRecord({
+      ...dragged,
+      parentId: page.id,
+      x: rightFrame.x + dragged.x,
+      y: rightFrame.y + 10_000,
+      index: "a9",
+    });
+    records = records.map((item) => (item.id === dragged.id ? draggedOut : item));
+    const diagram = yield* service.importDocument({
+      projectId,
+      name: "Compositions",
+      document: { ...document(), records },
+    });
+    const { structure } = yield* service.read({ projectId, diagramId: diagram.id });
+    assert.deepEqual(
+      structure.compositions.map((item) => [item.key, item.memberCount]),
+      [
+        ["left", 150],
+        ["right", 150],
+      ],
+    );
+    assert.deepEqual(
+      structure.shapes.map((shape) => shape.id),
+      loose.map((shape) => shape.id),
+    );
+    assert.equal(structure.totalShapes, records.filter((item) => item.typeName === "shape").length);
+    assert.isFalse(structure.truncated);
+
+    const left = structure.compositions[0]!;
+    const selection = yield* service.prepareContext({
+      projectId,
+      diagramId: diagram.id,
+      allowImageUnavailable: true,
+      scope: {
+        kind: "selection",
+        pageId: page.id,
+        shapeIds: [left.frameId, "shape:loose-one", dragged.id],
+        bounds: { x: 0, y: 0, w: 1, h: 1 },
+      },
+    });
+    assert.deepEqual(
+      selection.structure.compositions.map((item) => item.key),
+      ["left", "right"],
+    );
+    assert.deepEqual(
+      selection.structure.shapes.map((shape) => shape.id),
+      ["shape:loose-one"],
+    );
+    const viewport = yield* service.prepareContext({
+      projectId,
+      diagramId: diagram.id,
+      allowImageUnavailable: true,
+      scope: { kind: "viewport", pageId: page.id, bounds: left.bounds! },
+    });
+    assert.deepEqual(
+      viewport.structure.compositions.map((item) => item.key),
+      ["left"],
+    );
   }).pipe(Effect.scoped, Effect.provide(dependencies)),
 );

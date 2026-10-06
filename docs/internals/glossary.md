@@ -5,19 +5,19 @@ Terms whose meaning matters across T3 Code. Architecture and lifecycle constrain
 
 ## Workspace and conversation
 
-| Term           | Meaning                                                                                           |
-| -------------- | ------------------------------------------------------------------------------------------------- |
-| Environment    | One running server and the machine, credentials, workspace access, and state it owns.             |
-| Client         | A web, desktop, or mobile UI connected to an environment. The desktop app can also host a server. |
-| Project        | An environment-local workspace record rooted at a directory.                                      |
-| Workspace root | The project's base filesystem directory on the environment.                                       |
-| Worktree       | A separate Git checkout a thread can use instead of the project's main checkout.                  |
-| Thread         | The durable conversation and work history for a project. It survives provider process exits.      |
+| Term           | Meaning                                                                                                                   |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Environment    | One running server and the machine, credentials, workspace access, and state it owns.                                     |
+| Client         | A web, desktop, or mobile UI connected to an environment. The desktop app can also host a server.                         |
+| Project        | An environment-local workspace record rooted at a directory.                                                              |
+| Workspace root | The project's base filesystem directory on the environment.                                                               |
+| Worktree       | A separate Git checkout a thread can use instead of the project's main checkout.                                          |
+| Thread         | The durable conversation and work history for a project. It survives provider process exits.                              |
 | Diagram        | A saved visual document belonging to a project. Users and agents can edit it and reference it from the project's threads. |
-| Canvas         | The interactive area where a diagram is viewed and edited.                                        |
-| Turn           | One user-to-agent cycle, a V2 run. Provider work can end before checkpoint and diff work settles. |
-| Activity       | A non-message timeline item, such as a tool action, approval, or failure.                         |
-| T3 home        | The base data directory. Runtime state normally lives under its `userdata` directory.             |
+| Canvas         | The interactive area where a diagram is viewed and edited.                                                                |
+| Turn           | One user-to-agent cycle, a V2 run. Provider work can end before checkpoint and diff work settles.                         |
+| Activity       | A non-message timeline item, such as a tool action, approval, or failure.                                                 |
+| T3 home        | The base data directory. Runtime state normally lives under its `userdata` directory.                                     |
 
 ## Orchestration
 
@@ -64,3 +64,13 @@ Terms whose meaning matters across T3 Code. Architecture and lifecycle constrain
 | Attachment inventory | The ordered image records shown as thumbnails above the prose, including images with no inline references.                          |
 
 See [composer context references](./composer-context-references.md) for the contract and lifecycle.
+
+## Diagrams
+
+| Term        | Meaning                                                                                                                    |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------- |
+| Composition | A keyed group of shapes within a diagram, generated from a spec and regenerable in place. A diagram can hold many.         |
+| Kit         | A notation vocabulary for compositions, such as flow, UML class, C4, or wireframe: its node kinds, edge kinds, and layout. |
+| Spec        | The typed description of a composition's nodes and edges that the composition is generated from.                           |
+
+See [diagram compositions](./diagram-compositions.md) for ownership and regeneration.

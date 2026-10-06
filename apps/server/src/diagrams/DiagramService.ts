@@ -10,6 +10,8 @@ import {
   DiagramMutationReceipt,
   DiagramHostResponse,
   DiagramBatch,
+  DiagramHostComposeResult,
+  DIAGRAM_LEGACY_HOST_OPERATIONS,
   DIAGRAM_MAX_READ_RECORDS,
   DIAGRAM_MAX_DOCUMENT_BYTES,
   type DiagramTarget,
@@ -22,9 +24,12 @@ import {
   type DiagramSyncEvent,
   type DiagramSyncSendInput,
   type DiagramHostRequest,
+  type DiagramHostConnectInput,
+  type DiagramHostOperation,
+  type DiagramComposeInput,
+  type DiagramComposeResult,
   type ProjectId,
   type ThreadId,
-  type EnvironmentId,
   type DiagramCounts,
   type DiagramPreviewResult,
   type DiagramMetadataChange,
@@ -43,6 +48,7 @@ import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import { readCompositions, validateComposeRequest } from "@t3tools/diagram-compose/model";
 import * as ServerConfig from "../config.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
@@ -55,13 +61,7 @@ import {
   type DiagramHostFence,
 } from "./DiagramRoom.ts";
 
-type HostInput = {
-  clientId: string;
-  environmentId: EnvironmentId;
-  sdkVersion: "5.5.2";
-  focused: boolean;
-  mountedDiagramIds?: readonly DiagramId[];
-};
+type HostInput = typeof DiagramHostConnectInput.Type;
 type ApplyInput = DiagramTarget & {
   batch: DiagramBatch;
   namespace: string;
@@ -105,6 +105,9 @@ export class DiagramService extends Context.Service<
     readonly applyBatch: (
       input: ApplyInput,
     ) => Effect.Effect<DiagramMutationReceipt, DiagramOperationError>;
+    readonly compose: (
+      input: DiagramComposeInput & { namespace: string; threadId?: ThreadId },
+    ) => Effect.Effect<DiagramComposeResult, DiagramOperationError>;
     readonly receipt: (
       input: DiagramTarget & { namespace: string; requestId: string },
     ) => Effect.Effect<DiagramMutationReceipt | null, DiagramOperationError>;
@@ -209,6 +212,7 @@ const assetClaim = Schema.Struct({
   diagramId: Schema.String,
   expires: Schema.Number,
 });
+const decodeHostComposeResult = Schema.decodeUnknownSync(DiagramHostComposeResult);
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
@@ -319,6 +323,7 @@ export const make = Effect.gen(function* () {
       connectionId: string;
       focused: boolean;
       mountedDiagramIds: readonly DiagramId[];
+      operations: readonly DiagramHostOperation[];
       queue: Queue.Queue<DiagramHostRequest, Cause.Done>;
     }
   >();
@@ -715,6 +720,7 @@ export const make = Effect.gen(function* () {
       connectionId,
       focused: input.focused,
       mountedDiagramIds: input.mountedDiagramIds ?? [],
+      operations: input.operations ?? DIAGRAM_LEGACY_HOST_OPERATIONS,
       queue,
     };
     hosts.set(connectionId, host);
@@ -737,7 +743,7 @@ export const make = Effect.gen(function* () {
   });
   const invoke = Effect.fn("DiagramService.invoke")(function* (
     input: DiagramTarget & {
-      operation: "prepare-batch" | "capture";
+      operation: DiagramHostOperation;
       value: unknown;
       clientId?: string;
       threadId?: ThreadId;
@@ -750,7 +756,11 @@ export const make = Effect.gen(function* () {
             Number(a.mountedDiagramIds.includes(input.diagramId)) ||
           Number(b.focused) - Number(a.focused),
       )
-      .find((item) => !input.clientId || item.clientId === input.clientId);
+      .find(
+        (item) =>
+          item.operations.includes(input.operation) &&
+          (!input.clientId || item.clientId === input.clientId),
+      );
     if (!host) return yield* new DiagramOperationError({ code: "no-editor" });
     const requestId = NodeCrypto.randomUUID();
     const result = yield* Deferred.make<unknown, DiagramOperationError>();
@@ -848,6 +858,40 @@ export const make = Effect.gen(function* () {
     applyBatchCore(input).pipe(
       Effect.ensuring(Effect.sync(() => database.releaseIdle(input.diagramId))),
     );
+
+  const compose = Effect.fn("DiagramService.compose")(function* (
+    input: DiagramComposeInput & { namespace: string; threadId?: ThreadId },
+  ) {
+    const diagram = yield* targetMetadata(input);
+    if (diagram.archivedAt) return yield* new DiagramOperationError({ code: "archived" });
+    const request = { spec: input.spec };
+    yield* attempt(() => validateComposeRequest(request));
+    const composed = yield* invoke({ ...input, operation: "compose", value: request });
+    const result = yield* attempt(() => decodeHostComposeResult(composed.value));
+    const compositionKey = input.spec.key;
+    if (!result.changes)
+      return {
+        requestId: null,
+        revision: (yield* attempt(() => metadata(input))).revision,
+        compositionKey,
+        counts: result.counts,
+      } satisfies DiagramComposeResult;
+    // Prepare on the host that composed: it measured against the records it is about to fence.
+    const receipt = yield* applyBatchCore({
+      projectId: input.projectId,
+      diagramId: input.diagramId,
+      namespace: input.namespace,
+      clientId: composed.host.clientId,
+      ...(input.threadId ? { threadId: input.threadId } : {}),
+      batch: { requestId: input.requestId ?? NodeCrypto.randomUUID(), ...result.changes },
+    });
+    return {
+      requestId: receipt.requestId,
+      revision: receipt.revision,
+      compositionKey,
+      counts: result.counts,
+    } satisfies DiagramComposeResult;
+  });
 
   const failSyncRequests = Effect.fn(function* (clientId: string, diagramId: DiagramId) {
     for (const [requestId, entry] of pending)
@@ -999,17 +1043,29 @@ export const make = Effect.gen(function* () {
               )
             )
               throw new DiagramOperationError({ code: "scope-unavailable" });
-            const structure = diagramStructure(records, diagram.revision, {
-              limit: 40,
-              ...(input.scope.kind === "selection"
-                ? { recordIds: input.scope.shapeIds, pageId: input.scope.pageId }
-                : input.scope.kind === "viewport"
-                  ? { pageId: input.scope.pageId }
-                  : { priorityPageId: input.scope.pageId }),
-            });
+            const compositions = readCompositions(records);
+            const structure = diagramStructure(
+              records,
+              diagram.revision,
+              {
+                limit: 40,
+                ...(input.scope.kind === "selection"
+                  ? { recordIds: input.scope.shapeIds, pageId: input.scope.pageId }
+                  : input.scope.kind === "viewport"
+                    ? { pageId: input.scope.pageId, viewport: input.scope.bounds }
+                    : { priorityPageId: input.scope.pageId }),
+              },
+              compositions,
+            );
             if (
               input.scope.kind === "selection" &&
-              structure.shapes.length !== Math.min(40, input.scope.shapeIds.length)
+              structure.shapes.length !==
+                Math.min(
+                  40,
+                  input.scope.shapeIds.filter(
+                    (id) => !compositions.isMember(id) && !compositions.compositionOf(id),
+                  ).length,
+                )
             )
               throw new DiagramOperationError({ code: "scope-unavailable" });
             const structureBudget = Math.min(
@@ -1021,7 +1077,8 @@ export const make = Effect.gen(function* () {
             while (Buffer.byteLength(encodeJson(structure)) > structureBudget) {
               if (structure.bindings.length) structure.bindings.pop();
               else if (structure.shapes.length) structure.shapes.pop();
-              else structure.pages.pop();
+              else if (structure.pages.length) structure.pages.pop();
+              else structure.compositions.pop();
               structure.truncated = true;
             }
             return { diagram, structure };
@@ -1154,6 +1211,10 @@ export const make = Effect.gen(function* () {
     read,
     lifecycle,
     applyBatch,
+    compose: (input) =>
+      compose(input).pipe(
+        Effect.ensuring(Effect.sync(() => database.releaseIdle(input.diagramId))),
+      ),
     receipt,
     capture,
     prepareContext,

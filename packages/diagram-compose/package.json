@@ -1,0 +1,29 @@
+{
+  "name": "@t3tools/diagram-compose",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./model": {
+      "types": "./src/model.ts",
+      "import": "./src/model.ts"
+    },
+    "./compose": {
+      "types": "./src/compose.ts",
+      "import": "./src/compose.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vp test run --config ../../vite.config.ts --dir ."
+  },
+  "dependencies": {
+    "@t3tools/contracts": "workspace:*",
+    "@tldraw/tlschema": "5.5.2",
+    "effect": "catalog:",
+    "elkjs": "0.12.0"
+  },
+  "devDependencies": {
+    "@effect/vitest": "catalog:",
+    "vite-plus": "catalog:"
+  }
+}

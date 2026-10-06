@@ -53,6 +53,16 @@ Wait for **Saved** before closing or refreshing an editor with offline changes.
 Export editable diagrams or PNG/SVG images when you need files. Removing a project
 permanently deletes its active and archived diagrams; export them first to keep them.
 
+### Ask the agent for a diagram
+
+Ask the agent for a flowchart, for example "draw the checkout flow in the
+architecture diagram". The agent describes what the diagram contains, and T3 Code
+lays it out and draws it as ordinary shapes inside a named frame, placed to the
+right of what is already on the first page. Everything stays editable, and the
+whole drawing is one Undo step. A diagram can hold several generated drawings
+side by side. When you attach a diagram, the agent sees each generated drawing as
+one summary instead of every shape, so large drawings don't crowd out the rest.
+
 ## Send while the agent is working
 
 On web and desktop, choose **Settings → General → Follow-up behavior** to queue
