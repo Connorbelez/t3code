@@ -1,6 +1,6 @@
 import type { RecordIndex } from "./canvas.ts";
 import type { PartName, StoredEdge, StoredNode } from "./identity.ts";
-import { ATTACH_EDGE_KIND, edgeKindOf, LOOKS, type Size } from "./kit.ts";
+import { ATTACH_EDGE_KIND, edgeKindOf, LOOKS, nodeKindOf, type Size } from "./kit.ts";
 import {
   type ArrowPlace,
   type Box,
@@ -73,12 +73,11 @@ export function placeSequence(
   measure: MeasureText,
 ): Placement {
   const family = LOOKS[spec.kit.look].font;
-  const kinds = spec.kit.nodeKinds;
   const labelSize = (text: string, fontSize: number, maxWidth: number | null): Size =>
     text.trim() === "" ? { w: 0, h: 0 } : measure(text, { family, fontSize, maxWidth });
 
   const lifelines = spec.nodes.flatMap((node) => {
-    const kind = kinds[node.kind];
+    const kind = nodeKindOf(spec.kit, node.kind);
     return kind?.shape === "lifeline"
       ? [{ node, size: geoSize(kind, node.label, family, measure) }]
       : [];
@@ -126,7 +125,7 @@ export function placeSequence(
       : Math.max(centerOf(row.from), centerOf(row.to));
 
   const blocks = spec.nodes.flatMap((node, order): Block[] => {
-    const kind = kinds[node.kind];
+    const kind = nodeKindOf(spec.kit, node.kind);
     if (kind?.shape !== "block") return [];
     const span = kind.span(node.body ?? {});
     const a = rowOf.get(span.from);
@@ -316,7 +315,7 @@ export function placeSequence(
   let cursor = FRAME_PADDING;
   let bottom = lifelineBottom;
   for (const node of spec.nodes) {
-    if (kinds[node.kind]?.shape !== "note") continue;
+    if (nodeKindOf(spec.kit, node.kind)?.shape !== "note") continue;
     const size = noteSize(node.label, family, measure);
     const on = node.body?.["on"];
     const at = typeof on === "string" ? column.get(on) : undefined;

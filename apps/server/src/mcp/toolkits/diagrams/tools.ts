@@ -66,8 +66,9 @@ const composeGuidance = [
   "If your spec changes or drops a member that someone else also edited, nothing changes and the call fails with conflict listing those keys in details.members; merge their current text into your spec, or leave those members as they were, and retry.",
   "Set relayout: true only when the user asks to rearrange the diagram, because it moves every member. The result lists overlapping member pairs; mention them rather than relaying out unasked.",
   'operation "remove" with key deletes a composition; arrows the user drew to it stay, unbound, and shapes the user drew inside its frame stay. operation "detach" with key leaves every shape in place as ordinary shapes you no longer manage; composing that key again starts a new composition. Do either only when the user asks.',
-  "includeMembers: true returns each member key's shape ID. capture: true returns an image of the composition's frame after the change, to check your own result; it is costly, so use it once you are done, not on every call.",
-  "An identical retry is a no-op, so retry freely after an uncertain response. requestId is optional and only needed for t3_diagram_receipt lookup.",
+  "includeMembers: true returns each member key's shape ID. capture: true returns an image of the composition's frame after the change, to check your own result; it is costly, so use it once you are done, not on every call. When the image cannot be made, the change still applied and captureError says why.",
+  "Retry freely after an uncertain response: without requestId an identical retry is a no-op; with requestId, a retry of a request that already committed returns that commit with zero counts and no image, without composing again, so use a new requestId for new work.",
+  "If the call fails stale or busy, the canvas changed or someone is editing it: read the composition again and recompose against the current canvas.",
   "One composition is at most 500 records; split large diagrams into several compositions by area.",
   "A connected editor host is required. Attaching a diagram is context and does not authorize changing it.",
 ].join(" ");

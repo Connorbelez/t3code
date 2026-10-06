@@ -97,7 +97,9 @@ function offset(align: Align, free: number): number {
 
 /**
  * Boxes for every leaf and drawn container under `root`, laid out inside `box`, keyed by member
- * and rounded to whole pixels. Children past the end of the box overflow it rather than shrink.
+ * and rounded to whole pixels. Children past the end of the box overflow it rather than shrink,
+ * and a box squeezed to nothing, such as a fill child with no room left, keeps one pixel, the
+ * least tldraw draws.
  */
 export function arrangeStack(root: StackContainer, box: Box, sizer: LeafSizer): Map<string, Box> {
   const boxes = new Map<string, Box>();
@@ -109,8 +111,8 @@ export function arrangeStack(root: StackContainer, box: Box, sizer: LeafSizer): 
       boxes.set(item.member, {
         x: Math.round(at.x),
         y: Math.round(at.y),
-        w: Math.round(at.w),
-        h: Math.round(at.h),
+        w: Math.max(1, Math.round(at.w)),
+        h: Math.max(1, Math.round(at.h)),
       });
     }
     if (!isContainer(item)) return;

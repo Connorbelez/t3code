@@ -233,8 +233,14 @@ export interface Kit<N extends string = string, E extends string = string> {
   readonly check?: (spec: {
     readonly nodes: readonly StoredNode[];
     readonly edges: readonly StoredEdge[];
-    /** Members only the canvas knows, for a patch: null when unknown, as on the server. */
-    readonly outside: ReadonlySet<string> | null;
+    /**
+     * Members only the canvas knows, for a patch: nodes as stored, null for one a human deleted.
+     * Null when unknown, as on the server.
+     */
+    readonly outside: {
+      readonly nodes: ReadonlyMap<string, StoredNode | null>;
+      readonly edges: ReadonlySet<string>;
+    } | null;
   }) => SpecIssue[];
 }
 
@@ -268,8 +274,18 @@ export function defineKit<N extends string, E extends string>(kit: Kit<N, E>): K
   return { ...kit, nodeKinds };
 }
 
+/** A kind's row. Own keys only: kinds come from specs and canvas meta, and "constructor" is no kind. */
+export function rowOf<T>(rows: Readonly<Record<string, T>>, kind: string): T | undefined {
+  return Object.hasOwn(rows, kind) ? rows[kind] : undefined;
+}
+
+export function nodeKindOf(kit: Kit, kind: string): NodeKind | undefined {
+  return rowOf(kit.nodeKinds, kind);
+}
+
+/** Spec edge kinds, plus the attach line notes lower to. */
 export function edgeKindOf(kit: Kit, kind: string): EdgeKind | undefined {
-  return kind === ATTACH_EDGE_KIND ? attach : kit.edgeKinds[kind];
+  return kind === ATTACH_EDGE_KIND ? attach : rowOf(kit.edgeKinds, kind);
 }
 
 /** Every part a member is drawn with, `main` first. A member missing one of them was edited. */
@@ -280,7 +296,7 @@ export function partsOf(kit: Kit, member: StoredMember): readonly PartName[] {
       ? [...MEMBER_PARTS.edge, "activation"]
       : MEMBER_PARTS.edge;
   }
-  const kind = kit.nodeKinds[member.kind];
+  const kind = nodeKindOf(kit, member.kind);
   switch (kind?.shape) {
     case "compartments":
       return ["main", "group", ...kind.compartments.map((_, i) => `c${i + 1}` as const)];

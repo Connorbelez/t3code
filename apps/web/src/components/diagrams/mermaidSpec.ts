@@ -12,9 +12,9 @@ import * as Schema from "effect/Schema";
 import mermaid from "mermaid";
 
 /**
- * Mermaid flowchart, stateDiagram, classDiagram, erDiagram and sequenceDiagram text to a composition spec. Mermaid's parsed databases are
- * semi-internal API, so mermaid is pinned exactly and each supported type has fixtures. Import
- * this module lazily: mermaid is large and needs a DOM.
+ * Mermaid flowchart, stateDiagram, classDiagram, erDiagram and sequenceDiagram text to a
+ * composition spec. Mermaid's parsed databases are semi-internal API, so mermaid is pinned exactly
+ * and each supported type has fixtures. Import this module lazily: mermaid is large and needs a DOM.
  */
 
 const SUPPORTED = "flowchart, stateDiagram, classDiagram, erDiagram, sequenceDiagram";
@@ -145,9 +145,13 @@ function flowchart(db: object): Content {
       return !incoming.has(vertex.id) ? "start" : !outgoing.has(vertex.id) ? "end" : undefined;
     return FLOW_KINDS[type];
   };
-  // Subgraphs listed outermost first, so each sits after its parent like nodes in the spec.
+  // Subgraphs in written order, each after its parent like nodes in the spec.
+  const nested = (parent: string | undefined): (typeof FlowSubgraph.Type)[] =>
+    subgraphs.flatMap((subgraph) =>
+      parents.get(subgraph.id) === parent ? [subgraph, ...nested(subgraph.id)] : [],
+    );
   const nodes = [
-    ...subgraphs.toReversed().map((subgraph) =>
+    ...nested(undefined).map((subgraph) =>
       node(subgraph.id, {
         kind: "group",
         label: subgraph.title,
@@ -206,6 +210,7 @@ function stateDiagram(db: object): Content {
   const data = decodeStateData(call(db, "getData"));
   const noteEdges = data.edges.filter((edge) => edge.classes?.includes("note-edge"));
   const byId = new Map(data.nodes.map((state) => [state.id, state]));
+  const noteCounts = new Map<string, number>();
   const nodes = data.nodes.flatMap((state): DiagramSpecNode[] => {
     // Mermaid wraps each note and its state in a layout-only group.
     if (state.shape === "noteGroup") return [];
@@ -213,8 +218,10 @@ function stateDiagram(db: object): Content {
       const edge = noteEdges.find((link) => link.start === state.id || link.end === state.id);
       const on = edge?.start === state.id ? edge.end : edge?.start;
       if (on === undefined) return [];
+      const count = (noteCounts.get(on) ?? 0) + 1;
+      noteCounts.set(on, count);
       return [
-        node(`${on}-note`, {
+        node(`${on}-note${count === 1 ? "" : count}`, {
           kind: "note",
           label: textOf(state.label),
           parent: byId.get(on)?.parentId,
@@ -523,7 +530,6 @@ function erDiagram(db: object): Content {
   };
 }
 
-/** Mermaid writes generics as `List~String~`. */
 const SequenceActor = Schema.Struct({ description: Schema.String, type: Schema.String });
 const SequenceSignal = Schema.Struct({
   from: Schema.optional(Schema.String),
@@ -691,8 +697,9 @@ function sequenceDiagram(db: object): Content {
   };
 }
 
+/** Mermaid writes generics as `List~String~`. */
 function generics(text: string): string {
-  return text.replace(/~([^~]*)~/g, "<$1>");
+  return decodeMermaidEntities(text).replace(/~([^~]*)~/g, "<$1>");
 }
 
 /** Drops empty fields, and returns undefined when none are left, so specs stay as short as the Mermaid. */
@@ -745,12 +752,30 @@ function memberKey(id: string): string {
 }
 
 function cleanLabel(text: string): string {
-  return text
+  return decodeMermaidEntities(text)
     .replace(/<br\s*\/?>/gi, "\n")
     .split("\n")
     .map((line) => line.trim())
     .join("\n")
     .trim();
+}
+
+/**
+ * Mermaid swaps entity codes such as `#quot;` and `#35;` for placeholders before parsing and
+ * decodes them only when rendering, so the parsed text still holds the placeholders.
+ */
+function decodeMermaidEntities(text: string): string {
+  return text
+    .replace(/\uFB02\u00B0\u00B0(\+?\d+)\u00B6\u00DF/g, (match, code: string) => {
+      const point = Number(code);
+      return point <= 0x10ffff ? String.fromCodePoint(point) : match;
+    })
+    .replace(/\uFB02\u00B0(\w+)\u00B6\u00DF/g, (_, name: string) => {
+      // A textarea decodes the HTML entity without parsing markup.
+      const decoder = document.createElement("textarea");
+      decoder.innerHTML = `&${name};`;
+      return decoder.value;
+    });
 }
 
 function textOf(value: string | readonly string[] | undefined): string {

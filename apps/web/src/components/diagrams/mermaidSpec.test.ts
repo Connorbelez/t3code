@@ -79,6 +79,48 @@ describe("Mermaid flowchart", () => {
     expect((await toSpec(`${header}\n  a --> b`)).direction).toBe(direction);
   });
 
+  it("keeps sibling subgraphs in written order after their parents", async () => {
+    expect(
+      await toSpec(`flowchart TD
+  subgraph one
+    A
+    subgraph inner
+      C
+    end
+  end
+  subgraph two
+    B
+  end
+  A --> B`),
+    ).toEqual({
+      kit: "flow",
+      key: "m",
+      direction: "down",
+      nodes: [
+        { key: "one", kind: "group" },
+        { key: "inner", kind: "group", parent: "one" },
+        { key: "two", kind: "group" },
+        { key: "A", parent: "one" },
+        { key: "C", parent: "inner" },
+        { key: "B", parent: "two" },
+      ],
+      edges: [["A", "B"]],
+    });
+  });
+
+  it("decodes entity codes in labels", async () => {
+    expect(
+      await toSpec(`flowchart TD
+  A["Say #quot;hi#quot; for #35;1 #amp; #lt;more#gt;"] --> B`),
+    ).toEqual({
+      kit: "flow",
+      key: "m",
+      direction: "down",
+      nodes: [{ key: "A", label: 'Say "hi" for #1 & <more>' }, { key: "B" }],
+      edges: [["A", "B"]],
+    });
+  });
+
   it("uses the given title and key", async () => {
     expect(
       await mermaidToSpec({ key: "signup", title: "Signup", text: "flowchart TD\n  a --> b" }),
@@ -140,6 +182,26 @@ describe("Mermaid stateDiagram", () => {
         ["check", "root_end", "done"],
         ["check", "Idle", "retry"],
       ],
+    });
+  });
+
+  it("numbers a state's repeated notes", async () => {
+    expect(
+      await toSpec(`stateDiagram-v2
+  [*] --> S
+  note right of S : one
+  note left of S : two`),
+    ).toEqual({
+      kit: "state",
+      key: "m",
+      direction: "down",
+      nodes: [
+        { key: "root_start", kind: "initial" },
+        { key: "S" },
+        { key: "S-note", kind: "note", label: "one", body: { on: "S" } },
+        { key: "S-note2", kind: "note", label: "two", body: { on: "S" } },
+      ],
+      edges: [["root_start", "S"]],
     });
   });
 

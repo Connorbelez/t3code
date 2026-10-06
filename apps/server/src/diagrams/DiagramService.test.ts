@@ -6,6 +6,7 @@ import {
   DiagramCapture,
   DiagramPageScope,
   DiagramOperationError,
+  DiagramHostConnectInput,
   DiagramReadResult,
   type DiagramComposeRequest,
   type DiagramHostComposeResult,
@@ -27,6 +28,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as ServerConfig from "../config.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
@@ -82,6 +84,7 @@ function document(name = "Imported page") {
   };
 }
 
+const decodeHostConnectInput = Schema.decodeUnknownEffect(DiagramHostConnectInput);
 const allOperations: readonly DiagramHostOperation[] = ["prepare-batch", "capture", "compose"];
 
 const connect = Effect.fn(function* (
@@ -91,6 +94,8 @@ const connect = Effect.fn(function* (
     control?: { entered: Deferred.Deferred<void>; continue: Deferred.Deferred<void> };
     operations?: readonly DiagramHostOperation[];
     composeAnswers?: Array<DiagramHostComposeResult | DiagramOperationError>;
+    /** Failures for the next captures; "hang" never answers. Later captures succeed. */
+    captureFailures?: Array<DiagramOperationError | "hang">;
   } = {},
 ) {
   const { control } = options;
@@ -99,6 +104,7 @@ const connect = Effect.fn(function* (
   const captureScopes: unknown[] = [];
   const ready = yield* Deferred.make<string>();
   const connected = yield* Deferred.make<void>();
+  const captureHung = yield* Deferred.make<void>();
   const committed = yield* Deferred.make<{ generation: string; fence: string }>();
   const adopted = yield* Deferred.make<void>();
   const released = yield* Deferred.make<void>();
@@ -215,6 +221,14 @@ const connect = Effect.fn(function* (
           Schema.Struct({ scope: DiagramPageScope, revision: Schema.Number }),
         )(request.input);
         captureScopes.push(input.scope);
+        const failure = options.captureFailures?.shift();
+        if (failure === "hang") return yield* Deferred.succeed(captureHung, undefined);
+        if (failure)
+          return yield* service.hostRespond({
+            requestId: request.requestId,
+            connectionId: request.connectionId,
+            result: { ok: false, error: failure },
+          });
         const capture: DiagramCapture = {
           diagramId: diagram.id,
           revision: input.revision,
@@ -234,7 +248,16 @@ const connect = Effect.fn(function* (
     }),
   ).pipe(Effect.forkScoped);
   yield* Deferred.await(hostReady);
-  return { connectionId, committed, adopted, released, received, composeInputs, captureScopes };
+  return {
+    connectionId,
+    committed,
+    adopted,
+    released,
+    captureHung,
+    received,
+    composeInputs,
+    captureScopes,
+  };
 });
 
 it.effect("selects the mounted host and refuses a busy context even when images are optional", () =>
@@ -934,7 +957,6 @@ const unchanged: DiagramHostComposeResult = {
   overlaps: [["start", "pay"]],
 };
 
-// Needs the real validateComposeRequest from @t3tools/diagram-compose.
 it.effect("routes each host request only to hosts advertising its operation", () =>
   Effect.gen(function* () {
     yield* seed;
@@ -1001,7 +1023,6 @@ it.effect("routes each host request only to hosts advertising its operation", ()
   }).pipe(Effect.scoped, Effect.provide(dependencies)),
 );
 
-// Needs the real validateComposeRequest from @t3tools/diagram-compose.
 it.effect("applies composed changes on the composing host and no-ops an identical retry", () =>
   Effect.gen(function* () {
     yield* seed;
@@ -1055,13 +1076,88 @@ it.effect("applies composed changes on the composing host and no-ops an identica
   }).pipe(Effect.scoped, Effect.provide(dependencies)),
 );
 
+it.effect("answers a retry of a committed requestId from its receipt without any host", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    const diagram = yield* service.create({ projectId, name: "Replay" });
+    const page = sdkSchema.types.page.validate({
+      id: PageRecordType.createId("replayed"),
+      typeName: "page",
+      meta: {},
+      name: "Replayed",
+      index: "a2",
+    });
+    const host = yield* connect(service, diagram, {
+      operations: allOperations,
+      composeAnswers: [
+        {
+          changes: { expected: [{ id: page.id, record: null }], puts: [page], deletes: [] },
+          counts: { created: 1, updated: 0, kept: 0, removed: 0 },
+          overlaps: [],
+        },
+      ],
+    });
+    const input = { projectId, diagramId: diagram.id, namespace: "provider", spec: flowSpec };
+    yield* service.compose({ ...input, requestId: "compose-1" });
+    assert.deepEqual(
+      yield* service.compose({ ...input, requestId: "compose-1", relayout: true, capture: true }),
+      {
+        requestId: "compose-1",
+        revision: 1,
+        compositionKey: "checkout",
+        counts: { created: 0, updated: 0, kept: 0, removed: 0 },
+        overlaps: [],
+      },
+    );
+    assert.deepEqual(host.received, ["compose", "prepare-batch"]);
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
+it.effect("connects a host that advertises operations this server does not know", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    const diagram = yield* service.create({ projectId, name: "Future" });
+    const input = yield* decodeHostConnectInput({
+      clientId: "future",
+      environmentId,
+      sdkVersion: "5.5.2",
+      focused: true,
+      operations: ["prepare-batch", "capture", "compose", "export"],
+    });
+    assert.deepEqual(input.operations, ["prepare-batch", "capture", "compose"]);
+    const ready = yield* Deferred.make<void>();
+    const received: string[] = [];
+    const hosts = yield* service.hostConnect(input);
+    yield* Stream.runForEach(hosts, (request) =>
+      Effect.gen(function* () {
+        if (request.operation === "ready") return yield* Deferred.succeed(ready, undefined);
+        received.push(request.operation);
+        yield* service.hostRespond({
+          requestId: request.requestId,
+          connectionId: request.connectionId,
+          result: { ok: true, value: unchanged },
+        });
+      }),
+    ).pipe(Effect.forkScoped);
+    yield* Deferred.await(ready);
+    yield* service.compose({
+      projectId,
+      diagramId: diagram.id,
+      namespace: "provider",
+      spec: flowSpec,
+    });
+    assert.deepEqual(received, ["compose"]);
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
 const tooLargeIssue = {
   path: "spec",
   message:
     "needs 601 records but one compose writes at most 500; split it into several compositions",
 };
 
-// Needs the real validateComposeRequest from @t3tools/diagram-compose.
 it.effect("surfaces host compose errors intact and rejects invalid specs before any host", () =>
   Effect.gen(function* () {
     yield* seed;
@@ -1096,7 +1192,6 @@ it.effect("surfaces host compose errors intact and rejects invalid specs before 
   }).pipe(Effect.scoped, Effect.provide(dependencies)),
 );
 
-// Needs the real compose pipeline and readCompositions from @t3tools/diagram-compose.
 it.effect("lists large compositions once in structure and attached context", () =>
   Effect.gen(function* () {
     yield* seed;
@@ -1207,6 +1302,73 @@ it.effect("lists large compositions once in structure and attached context", () 
   }).pipe(Effect.scoped, Effect.provide(dependencies)),
 );
 
+it.effect("marks capped compositions truncated and drops other pages' before focused shapes", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    const archive = document("Archive").records[0]!;
+    let records: TLRecord[] = [archive];
+    for (let index = 0; index < 101; index++)
+      records = (yield* composeRecords(records, {
+        kit: "flow",
+        key: `${"k".repeat(110)}${index}`,
+        title: "t".repeat(200),
+        nodes: [{ key: "only" }],
+      })).records;
+    const focus = sdkSchema.types.page.validate({
+      id: PageRecordType.createId("focus"),
+      typeName: "page",
+      meta: {},
+      name: "Focus",
+      index: "a2",
+    });
+    const spare = Array.from({ length: 10 }, (_, index) =>
+      sdkSchema.types.page.validate({
+        id: PageRecordType.createId(`spare${index}`),
+        typeName: "page",
+        meta: {},
+        name: "s".repeat(256),
+        index: `a3${"ABCDEFGHIJ"[index]}`,
+      }),
+    );
+    const loose = ["one", "two", "three"].map((name, index) =>
+      sdkSchema.types.shape.create({
+        id: `shape:focus-${name}`,
+        type: "group",
+        parentId: focus.id,
+        index: `a${index + 1}`,
+        props: {},
+      }),
+    );
+    const diagram = yield* service.importDocument({
+      projectId,
+      name: "Many compositions",
+      document: { ...document(), records: [...records, focus, ...spare, ...loose] },
+    });
+    const { structure } = yield* service.read({ projectId, diagramId: diagram.id });
+    assert.deepEqual([structure.compositions.length, structure.truncated], [100, true]);
+
+    const context = yield* service.prepareContext({
+      projectId,
+      diagramId: diagram.id,
+      allowImageUnavailable: true,
+      scope: { kind: "diagram", pageId: focus.id },
+    });
+    assert.deepEqual(
+      {
+        shapes: context.structure.shapes.map((shape) => shape.id),
+        pages: context.structure.pages.length,
+        truncated: context.structure.truncated,
+      },
+      {
+        shapes: ["shape:focus-one", "shape:focus-two", "shape:focus-three"],
+        pages: 12,
+        truncated: true,
+      },
+    );
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
 /** Runs the real pipeline the way a host would and returns the records after its batch. */
 const composeRecords = Effect.fn(function* (
   records: readonly TLRecord[],
@@ -1264,7 +1426,6 @@ const authSpec: DiagramSpec = {
   edges: [["login", "session", "ok"]],
 };
 
-// Needs the real compose pipeline and readCompositions from @t3tools/diagram-compose.
 it.effect("reads composition detail by key with its own pagination, ref and edited text", () =>
   Effect.gen(function* () {
     yield* seed;
@@ -1355,7 +1516,6 @@ it.effect("reads composition detail by key with its own pagination, ref and edit
   }).pipe(Effect.scoped, Effect.provide(dependencies)),
 );
 
-// Needs the real compose pipeline from @t3tools/diagram-compose.
 it.effect("fails stale and changes nothing when a member changes between compose and commit", () =>
   Effect.gen(function* () {
     yield* seed;
@@ -1438,7 +1598,6 @@ it.effect("fails stale and changes nothing when a member changes between compose
   }).pipe(Effect.scoped, Effect.provide(dependencies)),
 );
 
-// Needs the real validateComposeRequest from @t3tools/diagram-compose.
 it.effect("sends Mermaid to the composing host unparsed and surfaces its Mermaid errors", () =>
   Effect.gen(function* () {
     yield* seed;
@@ -1511,7 +1670,73 @@ const importComposed = Effect.fn(function* (
   };
 });
 
-// Needs the real compose pipeline and readCompositions from @t3tools/diagram-compose.
+it.effect(
+  "returns a committed compose without its image when the capture fails, and keeps the host",
+  () =>
+    Effect.gen(function* () {
+      yield* seed;
+      const service = yield* DiagramService.make;
+      const { diagram } = yield* importComposed(service, "Capture");
+      const page = sdkSchema.types.page.validate({
+        id: PageRecordType.createId("captured"),
+        typeName: "page",
+        meta: {},
+        name: "Captured",
+        index: "a2",
+      });
+      const counts = { created: 1, updated: 0, kept: 0, removed: 0 };
+      const host = yield* connect(service, diagram, {
+        operations: allOperations,
+        composeAnswers: [
+          {
+            changes: { expected: [{ id: page.id, record: null }], puts: [page], deletes: [] },
+            counts,
+            overlaps: [],
+          },
+          unchanged,
+          unchanged,
+        ],
+        captureFailures: [new DiagramOperationError({ code: "busy" }), "hang"],
+      });
+      const input = {
+        projectId,
+        diagramId: diagram.id,
+        namespace: "provider",
+        spec: authSpec,
+        capture: true,
+      };
+      assert.deepEqual(yield* service.compose({ ...input, requestId: "capture-1" }), {
+        requestId: "capture-1",
+        revision: 2,
+        compositionKey: "auth",
+        counts,
+        overlaps: [],
+        captureError: "busy",
+      });
+      const slow = yield* service.compose(input).pipe(Effect.forkScoped);
+      yield* Deferred.await(host.captureHung);
+      yield* TestClock.adjust("20 seconds");
+      assert.deepEqual(yield* Fiber.join(slow), {
+        requestId: null,
+        revision: 2,
+        compositionKey: "auth",
+        counts: unchanged.counts,
+        overlaps: unchanged.overlaps,
+        captureError: "busy",
+      });
+      assert.equal((yield* service.compose(input)).capture?.revision, 2);
+      assert.deepEqual(host.received, [
+        "compose",
+        "prepare-batch",
+        "capture",
+        "compose",
+        "capture",
+        "compose",
+        "capture",
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
 it.effect("patches with the member map and a capture of the committed frame, then removes", () =>
   Effect.gen(function* () {
     yield* seed;
@@ -1616,7 +1841,6 @@ it.effect("patches with the member map and a capture of the committed frame, the
   }).pipe(Effect.scoped, Effect.provide(dependencies)),
 );
 
-// Needs readCompositions from @t3tools/diagram-compose.
 it.effect("captures and prepares context by composition key, and fails a missing key", () =>
   Effect.gen(function* () {
     yield* seed;

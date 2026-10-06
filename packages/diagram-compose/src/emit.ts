@@ -10,6 +10,7 @@ import {
   type TLParentId,
   type TLRecord,
   type TLShape,
+  type TLShapeId,
   type TLTextShape,
 } from "@tldraw/tlschema";
 
@@ -20,9 +21,11 @@ import {
   encodeMeta,
   isContent,
   fingerprint,
+  readPartMeta,
   type FrameMeta,
   frameShapeId,
   memberBindingId,
+  memberPartId,
   memberShapeId,
   META_KEY,
   type PartName,
@@ -35,19 +38,22 @@ import {
   compartmentTexts,
   type CompartmentsKind,
   edgeKindOf,
+  type Kit,
   geoDrawing,
   type LifelineKind,
   LOOKS,
   type NodeKind,
+  nodeKindOf,
   partsOf,
   type Size,
 } from "./kit.ts";
 import { type ArrowPlace, NOTE_SIZE, type PartPlace, type Placement } from "./layout.ts";
 import type { Decision } from "./merge.ts";
 import { type CurrentComposition, type CurrentMember, topShape } from "./membership.ts";
-import { CONTENT_KINDS } from "./screens.ts";
+import { KITS } from "./kits/index.ts";
+import { contentKindOf } from "./screens.ts";
 import { blockText, sectionText } from "./sequenceLayout.ts";
-import type { ComposeSpec } from "./spec.ts";
+import { type ComposeSpec, invalidSpec } from "./spec.ts";
 
 /**
  * Decisions plus geometry to exact tldraw 5.5.2 records. `store.put` fills no defaults, so every
@@ -64,19 +70,32 @@ interface EmitInput {
   /** Screens whose contents were laid out again. */
   readonly arranged: ReadonlySet<string>;
   readonly placement: Placement;
-  readonly index: RecordIndex;
+  /** The document as tldraw sees it when the puts land: carried shapes moved, deletes still there. */
+  readonly tree: RecordIndex;
+  /** Shapes moved out of deleted parents, already in `tree`. */
+  readonly carried: readonly TLShape[];
+  /** Records the batch deletes after its puts. */
+  readonly deletes: ReadonlySet<string>;
 }
 
-/** Puts in tldraw-safe order (frame, nodes, arrows, bindings) and deletes. */
-export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } {
-  const { spec, epoch, current, decisions, placement, index } = input;
+/**
+ * Records to put, in tldraw-safe order (frame, nodes, arrows, bindings), and the carried shapes
+ * emit did not write itself. The batch puts before it deletes, so arrows are placed among
+ * siblings that are still there at put time.
+ */
+export function emit(input: EmitInput): { puts: TLRecord[]; carried: TLShape[] } {
+  const { spec, epoch, current, decisions, placement, deletes } = input;
   const look = LOOKS[spec.kit.look];
-  const at = (key: string, part: PartName) => memberShapeId(spec.key, epoch, key, part);
-  const final = new Map(index);
+  const at = (key: string, part: PartName) => memberShapeId(spec.key, epoch, key, part, "node");
+  const edgeAt = (key: string, part: PartName) => memberShapeId(spec.key, epoch, key, part, "edge");
+  const final = new Map(input.tree);
   const remember = <T extends TLRecord>(record: T): T => {
     final.set(record.id, record);
     return record;
   };
+  /** A shape that is there once the batch applies. */
+  const live = (id: string): TLShape | undefined =>
+    deletes.has(id) ? undefined : shapeOf(final, id);
 
   const frameMeta: FrameMeta = {
     v: 1,
@@ -88,7 +107,9 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
     ledger: input.ledger,
     ...(input.arrangements.length > 0 ? { arrangements: input.arrangements } : {}),
   };
-  const frameSize = { w: placement.frame.w, h: placement.frame.h, name: spec.title };
+  // A human's rename stands until the spec's title changes.
+  const name = current && current.meta.title === spec.title ? current.frame.props.name : spec.title;
+  const frameSize = { w: placement.frame.w, h: placement.frame.h, name };
   const frame = remember<TLFrameShape>(
     current
       ? {
@@ -112,25 +133,6 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
         },
   );
 
-  const deletes: string[] = [];
-  for (const decision of decisions) {
-    if (decision.do === "overwrite") {
-      // A rewrite can draw fewer parts, such as a block with fewer sections or a message that no
-      // longer activates its receiver.
-      const wanted = new Set(partsOf(spec.kit, decision.draft.spec));
-      for (const [part, record] of decision.current.parts) {
-        if (wanted.has(part)) continue;
-        deletes.push(record.id);
-        final.delete(record.id);
-      }
-    }
-    if (decision.do !== "remove") continue;
-    for (const record of partsInDeleteOrder(decision.current)) {
-      deletes.push(record.id);
-      final.delete(record.id);
-    }
-  }
-
   const written = decisions.flatMap((decision) =>
     decision.do === "create" || decision.do === "overwrite" ? [decision] : [],
   );
@@ -152,7 +154,7 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
    */
   const placePart = (shape: TLShape, place: PartPlace, prior: TLShape | undefined): TLShape => {
     const wanted = place.parent && at(place.parent.key, place.parent.part);
-    const parentId = wanted && final.has(wanted) ? wanted : frame.id;
+    const parentId = wanted && live(wanted) ? wanted : frame.id;
     const origin = originOf(final, parentId);
     const index =
       prior?.parentId === parentId
@@ -175,8 +177,8 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
     const prior = decision.do === "overwrite" ? decision.current.parts.get(part) : undefined;
     return prior?.typeName === "shape" ? prior : undefined;
   };
-  const partBase = (key: string, part: PartName, prior: TLShape | undefined): ShapeBase => ({
-    id: at(key, part),
+  const partBase = (id: TLShapeId, prior: TLShape | undefined): ShapeBase => ({
+    id,
     typeName: "shape",
     x: 0,
     y: 0,
@@ -205,13 +207,13 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
     .sort((a, b) => a.depth - b.depth);
   for (const { decision, node } of writtenNodes) {
     const box = placement.nodes.get(node.key);
-    const kind = spec.kit.nodeKinds[node.kind];
+    const kind = nodeKindOf(spec.kit, node.kind);
     const places = placement.parts?.get(node.key);
     if (places && (kind?.shape === "lifeline" || kind?.shape === "block")) {
       // In placement order, so a participant's group exists before its head and lifeline.
       for (const [part, place] of places) {
         const prior = priorShape(decision, part);
-        const record = drawPart(kind, node, part, look, partBase(node.key, part, prior));
+        const record = drawPart(kind, node, part, look, partBase(at(node.key, part), prior));
         nodes.push(
           remember(withPartMeta(placePart(record, place, prior), spec.key, epoch, node, part)),
         );
@@ -316,7 +318,7 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
       order = indexBetween(order, null);
       const box = placement.nodes.get(node.key);
       const decision = decided.get(node.key);
-      const kind = CONTENT_KINDS[node.kind];
+      const kind = contentKindOf(node.kind);
       if (!box || !decision || !kind) continue;
       const placed = { x: box.x, y: box.y, parentId, index: order };
       if (decision.do === "create" || decision.do === "overwrite") {
@@ -352,7 +354,7 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
     const bar = places.get("activation");
     if (!bar || (decision.do !== "create" && decision.do !== "overwrite")) continue;
     const prior = priorShape(decision, "activation");
-    const record = activationBar(look, partBase(decision.key, "activation", prior));
+    const record = activationBar(look, partBase(edgeAt(decision.key, "activation"), prior));
     nodes.push(
       remember(
         withPartMeta(
@@ -369,11 +371,11 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
   const placeArrow = arrowPlacer(final);
   const arrows: TLArrowShape[] = [];
   const bindings: TLArrowBinding[] = [];
-  const nodeKinds = new Map(spec.nodes.map((node) => [node.key, spec.kit.nodeKinds[node.kind]]));
+  const nodeKinds = new Map(spec.nodes.map((node) => [node.key, nodeKindOf(spec.kit, node.kind)]));
   /** Messages bind to a participant's lifeline; everything else to a node's main shape. */
   const boundShape = (key: string): TLShape | undefined =>
-    (nodeKinds.get(key)?.shape === "lifeline" ? shapeOf(final, at(key, "lifeline")) : undefined) ??
-    shapeOf(final, at(key, "main"));
+    (nodeKinds.get(key)?.shape === "lifeline" ? live(at(key, "lifeline")) : undefined) ??
+    live(at(key, "main"));
   const ends = (start: TLShape, end: TLShape, placed: ArrowPlace | undefined) => ({
     from: placed ? anchorPoint(final, start, placed.start) : center(final, start),
     to: placed ? anchorPoint(final, end, placed.end) : center(final, end),
@@ -385,7 +387,16 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
     const end = boundShape(edge.to);
     const kind = edgeKindOf(spec.kit, edge.kind);
     if (!start || !end || !kind) continue;
-    const id = at(edge.key, "main");
+    // tldraw unbinds an arrow from a shape on another page.
+    if (pageIdOf(final, start) !== pageIdOf(final, end)) {
+      throw invalidSpec([
+        {
+          path: "spec.edges",
+          message: `"${edge.key}" connects "${edge.from}" and "${edge.to}", which are on different pages; move them onto one page or leave the edge out`,
+        },
+      ]);
+    }
+    const id = edgeAt(edge.key, "main");
     const base = decision.do === "overwrite" ? mainShape(decision.current) : undefined;
     const drawing = kind.draw && edge.body ? kind.draw(edge.label, edge.body) : null;
     const parentId = arrowParent(final, start, end);
@@ -508,7 +519,58 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
     }
   }
 
-  return { puts: [frame, ...nodes, ...arrows, ...bindings], deletes };
+  // A node whose `ref` alone changed keeps its record and takes the new stored spec, wherever it is.
+  const restamps = new Map<string, StoredMember>(
+    decisions.flatMap((decision) =>
+      decision.do === "keep" && decision.restamp && decision.current
+        ? [[at(decision.key, "main"), decision.restamp] as const]
+        : [],
+    ),
+  );
+  const stamp = <T extends TLRecord>(record: T): T => {
+    const spec = restamps.get(record.id);
+    const meta = spec && readPartMeta(record);
+    return meta
+      ? { ...record, meta: { ...record.meta, [META_KEY]: encodeMeta({ ...meta, spec }) } }
+      : record;
+  };
+  const puts = [frame, ...nodes, ...arrows, ...bindings];
+  const carried = input.carried.filter((shape) => final.get(shape.id) === shape);
+  const put = new Set<string>([...puts, ...carried].map((record) => record.id));
+  const unmoved = Array.from(restamps.keys()).flatMap((id) => {
+    const main = put.has(id) ? undefined : shapeOf(final, id);
+    return main ? [main] : [];
+  });
+  return { puts: [...puts, ...unmoved].map(stamp), carried: carried.map(stamp) };
+}
+
+/**
+ * Records the decisions delete: removed members' parts, and records a member's new drawing does
+ * not write over, such as a block's dropped section, or everything of a key that changed role.
+ */
+export function deletesOf(
+  kit: Kit,
+  c: string,
+  e: number,
+  decisions: readonly Decision[],
+): string[] {
+  return decisions.flatMap((decision) => {
+    switch (decision.do) {
+      case "create":
+      case "overwrite": {
+        const spec = decision.draft.spec;
+        const written = new Set(partsOf(kit, spec).map((part) => memberPartId(c, e, spec, part)));
+        const parts = decision.do === "create" ? decision.clears : decision.current.parts;
+        return partsInDeleteOrder(parts).flatMap((record) =>
+          written.has(record.id) ? [] : [record.id],
+        );
+      }
+      case "remove":
+        return partsInDeleteOrder(decision.parts).map((record) => record.id);
+      default:
+        return [];
+    }
+  });
 }
 
 /**
@@ -521,13 +583,11 @@ export function emitRelease(
   decisions: readonly Decision[],
 ): { puts: TLRecord[]; deletes: string[] } {
   if (kind === "remove") {
-    const parts = decisions.flatMap((decision) =>
-      decision.do === "remove" ? partsInDeleteOrder(decision.current) : [],
-    );
-    return { puts: [], deletes: [...parts.map((record) => record.id), current.frame.id] };
+    const parts = deletesOf(KITS[current.meta.kit], current.key, current.epoch, decisions);
+    return { puts: [], deletes: [...parts, current.frame.id] };
   }
   const parts = decisions.flatMap((decision) =>
-    decision.do === "detach" ? Array.from(decision.current.parts.values()) : [],
+    decision.do === "detach" ? Array.from(decision.parts.values()) : [],
   );
   return { puts: [current.frame, ...parts].map(withoutCompositionMeta), deletes: [] };
 }
@@ -788,10 +848,10 @@ function mainShape(member: CurrentMember): TLShape | undefined {
   return main?.typeName === "shape" ? main : undefined;
 }
 
-/** Bindings before arrows before nodes, so nothing is isolated by a delete still to come. */
-function partsInDeleteOrder(member: CurrentMember): TLRecord[] {
+/** Bindings before shapes, so nothing is isolated by a delete still to come. */
+function partsInDeleteOrder(parts: ReadonlyMap<PartName, TLRecord>): TLRecord[] {
   const rank = (record: TLRecord) => (record.typeName === "binding" ? 0 : 1);
-  return Array.from(member.parts.values()).sort((a, b) => rank(a) - rank(b));
+  return Array.from(parts.values()).sort((a, b) => rank(a) - rank(b));
 }
 
 function minChildIndex(final: RecordIndex, parentId: string): string | null {

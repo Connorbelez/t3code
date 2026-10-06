@@ -10,6 +10,7 @@ import {
   type EdgeKind,
   type Kit,
   type LifelineKind,
+  nodeKindOf,
 } from "../kit.ts";
 import { listOf, type SpecIssue } from "../spec.ts";
 
@@ -176,12 +177,13 @@ function checkReferences({
   edges,
   outside,
 }: Parameters<NonNullable<Kit["check"]>>[0]): SpecIssue[] {
-  const kinds = sequence.nodeKinds;
   const issues: SpecIssue[] = [];
   const isLifeline = (key: string) => {
-    const node = nodes.find((candidate) => candidate.key === key);
-    if (!node) return outside === null || outside.has(key);
-    return kinds[node.kind]?.shape === "lifeline";
+    const node = nodes.find((candidate) => candidate.key === key) ?? outside?.nodes.get(key);
+    // Unknown on the server, and a participant a human deleted may come back.
+    if (node === undefined) return outside === null;
+    if (node === null) return true;
+    return nodeKindOf(sequence, node.kind)?.shape === "lifeline";
   };
   const messages = edges.filter((edge) => edge.kind !== ATTACH_EDGE_KIND);
   const order = new Map(messages.map((edge, i) => [edge.key, i]));
@@ -198,9 +200,9 @@ function checkReferences({
 
   const keys = messages.map((edge) => edge.key);
   // A patch's messages may sit anywhere in the composition's order, so only a whole spec is ordered.
-  const ordered = outside !== null && outside.size === 0;
+  const ordered = outside !== null && outside.nodes.size === 0 && outside.edges.size === 0;
   nodes.forEach((node, i) => {
-    const kind = kinds[node.kind];
+    const kind = nodeKindOf(sequence, node.kind);
     const body = node.body;
     if (kind?.shape !== "block" || !body) return;
     const path = `spec.nodes[${i}].body`;
@@ -215,7 +217,7 @@ function checkReferences({
       key: section.from,
     }));
     const unknown = [...ends, ...sections].filter(
-      (ref) => !order.has(ref.key) && outside !== null && !outside.has(ref.key),
+      (ref) => !order.has(ref.key) && outside !== null && !outside.edges.has(ref.key),
     );
     for (const ref of unknown) {
       issues.push({

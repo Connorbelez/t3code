@@ -3,7 +3,14 @@ import type { TLDefaultSizeStyle } from "@tldraw/tlschema";
 import * as Schema from "effect/Schema";
 
 import { hashOf, isContent, type StoredNode } from "./identity.ts";
-import type { GeoKind, LineKind, ScreenKind, Size, TextKind } from "./kit.ts";
+import {
+  type GeoKind,
+  type LineKind,
+  rowOf,
+  type ScreenKind,
+  type Size,
+  type TextKind,
+} from "./kit.ts";
 import type { MeasureText, TextFont } from "./layout.ts";
 import type { SpecIssue } from "./spec.ts";
 import {
@@ -194,7 +201,11 @@ export function isElement(member: StoredNode): boolean {
 }
 
 /** Every kind a screen's members can have. */
-export const CONTENT_KINDS: Readonly<Record<string, ElementKind>> = { ...ELEMENTS, ...FIXTURES };
+const CONTENT_KINDS: Readonly<Record<string, ElementKind>> = { ...ELEMENTS, ...FIXTURES };
+
+export function contentKindOf(kind: string): ElementKind | undefined {
+  return rowOf(CONTENT_KINDS, kind);
+}
 
 const CONTAINERS = ["stack", "row"] as const;
 type ContainerKind = (typeof CONTAINERS)[number] | "card" | "screen";
@@ -379,7 +390,6 @@ function settingsOf(screen: StoredNode): ScreenSettings {
     : { device: "phone", landscape: false, chrome: false, modal: false };
 }
 
-/** The device frame's size. */
 export function screenSize(screen: StoredNode): Size {
   const { device, landscape } = settingsOf(screen);
   const size = DEVICES[device];
@@ -423,7 +433,8 @@ function leafSize(
     }
     case "text": {
       const fontSize = TEXT_FONT_SIZES[kind.size];
-      const measured = measure(text, { family, fontSize, maxWidth });
+      // A row can squeeze a fill child to nothing; text still wraps in at least a pixel.
+      const measured = measure(text, { family, fontSize, maxWidth: Math.max(1, maxWidth) });
       // tldraw sizes text one pixel wider than measured so it does not wrap.
       return {
         w: Math.min(maxWidth, Math.ceil(measured.w) + 1),
@@ -458,7 +469,7 @@ export function arrangeScreen(input: {
   const sizer = {
     size: (key: string, maxWidth: number): Size => {
       const member = members.get(key);
-      const kind = member && CONTENT_KINDS[member.kind];
+      const kind = member && contentKindOf(member.kind);
       if (!member || !kind) return { w: 0, h: 0 };
       return leafSize(kind, input.textOf(member), maxWidth, family, measure);
     },

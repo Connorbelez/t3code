@@ -1,5 +1,10 @@
-import type { DiagramHostComposeResult, DiagramSpec } from "@t3tools/contracts";
+import {
+  type DiagramHostComposeResult,
+  type DiagramSpec,
+  DiagramSpecEdge,
+} from "@t3tools/contracts";
 import { toRichText, type TLRecord, type TLShape } from "@tldraw/tlschema";
+import * as Schema from "effect/Schema";
 import { assert, describe, expect, it } from "vite-plus/test";
 
 import { compose, type ComposePorts } from "./compose.ts";
@@ -880,6 +885,17 @@ describe("compose request fields", () => {
     return undefined;
   };
 
+  it("publishes shorthand edges as plain string arrays that decode like the tuple", () => {
+    const schema = JSON.stringify(Schema.toJsonSchemaDocument(DiagramSpecEdge));
+    expect(schema).not.toContain("prefixItems");
+    const decode = Schema.decodeUnknownSync(DiagramSpecEdge);
+    expect(decode([" a ", "b"])).toEqual(["a", "b"]);
+    expect(decode(["a", "b", " yes "])).toEqual(["a", "b", " yes "]);
+    for (const invalid of [["a"], ["a", " "], ["a", "b", "c", "d"]]) {
+      expect(() => decode(invalid)).toThrow();
+    }
+  });
+
   it("teaches which fields go with which operation", () => {
     expect(issuesOf({ operation: "remove", spec: CHECKOUT, capture: true })).toEqual({
       issues: [
@@ -1678,5 +1694,323 @@ describe("class and ER kits", () => {
         ],
       },
     });
+  });
+});
+
+describe("ownership edge cases", () => {
+  const records = (result: DiagramHostComposeResult, before: readonly TLRecord[] = BASE) =>
+    applied(before, result);
+  const errorOf = async (pending: Promise<unknown>) => {
+    try {
+      await pending;
+    } catch (cause) {
+      return cause;
+    }
+    return undefined;
+  };
+  const parts = (all: readonly TLRecord[], key: string) =>
+    all.flatMap((record) => (memberKey(record) === key ? [part(record)] : []));
+
+  it("never adopts records left with a composition's meta after its frame is deleted", async () => {
+    let all = records(
+      await run({
+        kit: "flow",
+        key: "k",
+        nodes: [{ key: "kept" }, { key: "x" }],
+        edges: [["kept", "x"]],
+      }),
+    );
+    // A human drags "kept" out of the frame, then deletes the frame with everything still in it.
+    const kept = mainOf(all, "kept");
+    all = all.flatMap((record): TLRecord[] => {
+      if (record.id === kept.id) return [{ ...kept, parentId: "page:main" } as TLShape];
+      return record.typeName === "document" || record.typeName === "page" ? [record] : [];
+    });
+    const fresh: DiagramSpec = { kit: "flow", key: "k", nodes: [{ key: "fresh" }] };
+    all = records(await run(fresh, all), all);
+    const view = readCompositions(all);
+    expect(view.summaries.map(({ key, memberCount }) => ({ key, memberCount }))).toEqual([
+      { key: "k", memberCount: 1 },
+    ]);
+    expect(view.isMember(kept.id)).toBe(false);
+    const renamed = await run({ ...fresh, title: "Renamed" }, all);
+    expect(renamed.counts).toEqual({ created: 0, updated: 0, kept: 1, removed: 0 });
+    expect(renamed.changes?.deletes).toEqual([]);
+  });
+
+  it("rejects kind names inherited from Object.prototype", () => {
+    for (const kind of ["constructor", "toString", "__proto__"]) {
+      expect(() =>
+        validateComposeRequest({ spec: { kit: "flow", key: "k", nodes: [{ key: "a", kind }] } }),
+      ).toThrow(
+        expect.objectContaining({
+          code: "invalid-spec",
+          details: {
+            issues: [
+              {
+                path: "spec.nodes[0].kind",
+                message: `unknown kind "${kind}" for kit flow; valid kinds: start, end, process, decision, io, subprocess, group, note`,
+              },
+            ],
+          },
+        }),
+      );
+    }
+    expect(() =>
+      validateComposeRequest({
+        spec: {
+          kit: "flow",
+          key: "k",
+          nodes: [{ key: "a" }, { key: "b" }],
+          edges: [{ from: "a", to: "b", kind: "constructor" }],
+        },
+      }),
+    ).toThrow(
+      expect.objectContaining({
+        details: {
+          issues: [
+            {
+              path: "spec.edges[0].kind",
+              message: 'unknown edge kind "constructor" for kit flow; valid edge kinds: flow',
+            },
+          ],
+        },
+      }),
+    );
+  });
+
+  it("checks a patched message's endpoints against the composition's own nodes", async () => {
+    const login: DiagramSpec = {
+      kit: "sequence",
+      key: "login",
+      nodes: [
+        { key: "web" },
+        { key: "api" },
+        { key: "retry", kind: "loop", body: { from: "call" } },
+      ],
+      edges: [{ key: "call", from: "web", to: "api" }],
+    };
+    const all = records(await run(login));
+    const patched = compose(
+      {
+        mode: "patch",
+        spec: { kit: "sequence", key: "login", nodes: [], edges: [["web", "retry", "x"]] },
+      },
+      all,
+      portsFor(all),
+    );
+    expect(await errorOf(patched)).toMatchObject({
+      code: "invalid-spec",
+      details: {
+        issues: [
+          {
+            path: "spec.edges[0].to",
+            message:
+              '"retry" is not a participant or actor; messages connect participants and actors',
+          },
+        ],
+      },
+    });
+  });
+
+  it("checks a patch's kit before validating its members against it", async () => {
+    const all = records(await run(CHECKOUT));
+    const patched = compose(
+      {
+        mode: "patch",
+        spec: { kit: "sequence", key: "checkout", nodes: [{ key: "pay", kind: "process" }] },
+      },
+      all,
+      portsFor(all),
+    );
+    expect(await errorOf(patched)).toMatchObject({
+      code: "invalid-spec",
+      details: {
+        issues: [
+          {
+            path: "spec.kit",
+            message:
+              'a patch keeps the composition\'s kit flow; to change kits, compose the whole spec without mode "patch"',
+          },
+        ],
+      },
+    });
+  });
+
+  it("writes the same ledger patching in a node and edge as replacing with the whole spec, notes included", async () => {
+    const noted: DiagramSpec = {
+      kit: "flow",
+      key: "k",
+      nodes: [{ key: "a" }, { key: "b" }, { key: "n", kind: "note", body: { on: "a" } }],
+      edges: [["a", "b"]],
+    };
+    const all = records(await run(noted));
+    const patched = await compose(
+      {
+        mode: "patch",
+        spec: { kit: "flow", key: "k", nodes: [{ key: "c" }], edges: [["b", "c"]] },
+      },
+      all,
+      portsFor(all),
+    );
+    const after = records(patched, all);
+    const ledger = frameOf(after)?.meta["t3Composition"] as { ledger: [string, string][] };
+    expect(ledger.ledger.map(([key]) => key)).toEqual([
+      "a",
+      "b",
+      "n",
+      "c",
+      "a→b:flow",
+      "b→c:flow",
+      "n→a:attach",
+    ]);
+    const whole = {
+      ...noted,
+      nodes: [...noted.nodes, { key: "c" }],
+      edges: [...(noted.edges ?? []), ["b", "c"]],
+    } satisfies DiagramSpec;
+    expect((await run(whole, after)).changes).toBeNull();
+  });
+
+  it("leaves notes' attach lines out of detail, so a spec rebuilt from it composes to no change", async () => {
+    const noted: DiagramSpec = {
+      kit: "flow",
+      key: "k",
+      nodes: [{ key: "a" }, { key: "n", kind: "note", label: "hi", body: { on: "a" } }],
+    };
+    const all = records(await run(noted));
+    const [item] = readCompositions(all).detail({ offset: 0, limit: 20 }).items;
+    assert(item, "the composition has detail");
+    expect(item.members.map((member) => member.spec.key)).toEqual(["a", "n"]);
+    const nodes = item.members.flatMap(({ spec }) => ("from" in spec ? [] : [spec]));
+    const rebuilt = await run({ kit: item.kit, key: item.key, title: item.title, nodes }, all);
+    expect(rebuilt.changes).toBeNull();
+  });
+
+  it("keeps a human's frame name until the spec's title changes", async () => {
+    const spec: DiagramSpec = { kit: "flow", key: "k", title: "Checkout", nodes: [{ key: "a" }] };
+    const first = records(await run(spec));
+    const frame = frameOf(first);
+    assert(frame?.type === "frame", "the composition has a frame");
+    const all = first.map((record) =>
+      record.id === frame.id ? { ...frame, props: { ...frame.props, name: "Mine" } } : record,
+    );
+    const grown = await run({ ...spec, nodes: [{ key: "a" }, { key: "b" }] }, all);
+    expect(frameOf(shapes(grown))?.props).toMatchObject({ name: "Mine" });
+    const retitled = await run({ ...spec, title: "Payments" }, all);
+    expect(frameOf(shapes(retitled))?.props).toMatchObject({ name: "Payments" });
+  });
+
+  it("does not count resizing text or sliding an arrow's label as an edit", async () => {
+    let all = records(await run(CHECKOUT));
+    all = change(all, "pay", (shape) => withProps(shape, { scale: 2 }));
+    all = change(all, "pay→ok:flow", (shape) => withProps(shape, { labelPosition: 0.2 }));
+    expect(readCompositions(all).summaries[0]?.editedCount).toBe(0);
+    const relabeled = await run(
+      {
+        ...CHECKOUT,
+        nodes: CHECKOUT.nodes.map((node) =>
+          node.key === "pay" ? { ...node, label: "Pay" } : node,
+        ),
+      },
+      all,
+    );
+    expect(relabeled.counts).toEqual({ created: 0, updated: 1, kept: 5, removed: 0 });
+  });
+
+  it("restamps an edited node whose ref alone changed, without touching what the human drew", async () => {
+    const withRef = (path: string): DiagramSpec => ({
+      ...CHECKOUT,
+      nodes: CHECKOUT.nodes.map((node) => (node.key === "pay" ? { ...node, ref: { path } } : node)),
+    });
+    let all = records(await run(withRef("pay.ts")));
+    all = change(all, "pay", recolored);
+    const result = await run(withRef("billing/pay.ts"), all);
+    expect(result.counts).toEqual({ created: 0, updated: 0, kept: 6, removed: 0 });
+    expect(writtenMembers(result)).toEqual(["pay"]);
+    all = records(result, all);
+    expect(mainOf(all, "pay").props).toMatchObject({ color: "red" });
+    const pay = readCompositions(all)
+      .detail({ offset: 0, limit: 20 })
+      .items[0]?.members.find((member) => member.spec.key === "pay");
+    expect(pay).toMatchObject({ spec: { ref: { path: "billing/pay.ts" } }, edited: true });
+    expect((await run(withRef("billing/pay.ts"), all)).changes).toBeNull();
+  });
+
+  it("drops the arrow and creates a node when a key changes from edge to node", async () => {
+    const edge: DiagramSpec = {
+      kit: "flow",
+      key: "k",
+      nodes: [{ key: "a" }, { key: "b" }],
+      edges: [{ key: "x", from: "a", to: "b" }],
+    };
+    const all = records(await run(edge));
+    const arrow = mainOf(all, "x");
+    const result = await run(
+      { kit: "flow", key: "k", nodes: [{ key: "a" }, { key: "b" }, { key: "x" }] },
+      all,
+    );
+    expect(result.counts).toEqual({ created: 1, updated: 0, kept: 2, removed: 0 });
+    const after = records(result, all);
+    expect(parts(after, "x")).toEqual(["main"]);
+    const node = mainOf(after, "x");
+    expect(node.type).toBe("geo");
+    // Placed as a new node, not at the arrow's start.
+    expect({ x: node.x, y: node.y }).not.toEqual({ x: arrow.x, y: arrow.y });
+  });
+});
+
+describe("member remnants", () => {
+  // The header box is the class's main part; deleting it leaves the group and compartments.
+  const CLASSES: DiagramSpec = {
+    kit: "uml-class",
+    key: "model",
+    nodes: [
+      { key: "Order", body: { attributes: [{ name: "id", type: "string" }] } },
+      { key: "Item" },
+    ],
+  };
+  const renamed: DiagramSpec = {
+    ...CLASSES,
+    nodes: CLASSES.nodes.map((node) =>
+      node.key === "Order" ? { ...node, label: "Purchase" } : node,
+    ),
+  };
+  const withoutHeader = (all: readonly TLRecord[]) => {
+    const header = mainOf(all, "Order");
+    return all.filter((record) => record.id !== header.id);
+  };
+  const orderParts = (all: readonly TLRecord[]) =>
+    all.flatMap((record) => (memberKey(record) === "Order" ? [part(record)] : []));
+
+  it("fails with a conflict rather than overwrite compartments a human kept and edited", async () => {
+    let all = withoutHeader(applied(BASE, await run(CLASSES)));
+    all = all.map((record) =>
+      record.typeName === "shape" && memberKey(record) === "Order" && part(record) === "c1"
+        ? withProps(record, { richText: toRichText("my notes") })
+        : record,
+    );
+    await expect(run(renamed, all)).rejects.toMatchObject({
+      code: "conflict",
+      details: { members: ["Order"] },
+    });
+  });
+
+  it("redraws over unedited leftovers, and removes or detaches them with the member", async () => {
+    const all = withoutHeader(applied(BASE, await run(CLASSES)));
+    expect(orderParts(all)).toEqual(["group", "c1", "c2"]);
+    const redrawn = await run(renamed, all);
+    expect(redrawn.counts).toEqual({ created: 1, updated: 0, kept: 1, removed: 0 });
+    expect(orderParts(applied(all, redrawn))).toEqual(["group", "c1", "c2", "main"]);
+
+    const dropped = await run({ ...CLASSES, nodes: [{ key: "Item" }] }, all);
+    expect(dropped.counts).toEqual({ created: 0, updated: 0, kept: 1, removed: 1 });
+    expect(orderParts(applied(all, dropped))).toEqual([]);
+
+    const detached = applied(
+      all,
+      await compose({ operation: "detach", key: "model" }, all, portsFor(all)),
+    );
+    expect(detached.filter((record) => metaOf(record) !== undefined)).toEqual([]);
   });
 });

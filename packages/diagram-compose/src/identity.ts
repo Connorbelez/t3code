@@ -75,6 +75,9 @@ export const MEMBER_PARTS = {
   edge: ["main", "start", "end"],
 } as const satisfies Record<StoredMember["role"], readonly PartName[]>;
 
+/** Parts only an edge draws; every other part but `main` is a node's. */
+const EDGE_ONLY_PARTS: ReadonlySet<PartName> = new Set(["start", "end", "activation"]);
+
 const PartMeta = Schema.Struct({
   v: Schema.Literal(1),
   c: Schema.String,
@@ -103,12 +106,29 @@ export type FrameMeta = typeof FrameMeta.Type;
 const isPartMeta = Schema.is(PartMeta);
 const isFrameMeta = Schema.is(FrameMeta);
 
-export function memberShapeId(c: string, e: number, m: string, p: PartName): TLShapeId {
-  return createShapeId(hash(stableStringify([c, e, m, p])));
+/**
+ * Nodes and edges both have a `main` part, so an edge's shapes also hash its role: a key that
+ * changes role names new records, and the old ones are deleted rather than written over.
+ */
+export function memberShapeId(
+  c: string,
+  e: number,
+  m: string,
+  p: PartName,
+  role: StoredMember["role"],
+): TLShapeId {
+  return createShapeId(hash(stableStringify(role === "edge" ? [c, e, m, p, role] : [c, e, m, p])));
 }
 
 export function memberBindingId(c: string, e: number, m: string, p: PartName): TLBindingId {
   return createBindingId(hash(stableStringify([c, e, m, p])));
+}
+
+/** The record a member's part is drawn as: arrow bindings for its terminals, else a shape. */
+export function memberPartId(c: string, e: number, member: StoredMember, p: PartName): string {
+  return p === "start" || p === "end"
+    ? memberBindingId(c, e, member.key, p)
+    : memberShapeId(c, e, member.key, p, member.role);
 }
 
 export function frameShapeId(c: string, e: number): TLShapeId {
@@ -120,8 +140,11 @@ export function readPartMeta(record: TLRecord): PartMeta | null {
   if (record.typeName !== "shape" && record.typeName !== "binding") return null;
   const meta = record.meta[META_KEY];
   if (!isPartMeta(meta)) return null;
-  const derive = record.typeName === "shape" ? memberShapeId : memberBindingId;
-  return record.id === derive(meta.c, meta.e, meta.m, meta.p) ? meta : null;
+  if (record.typeName === "binding") {
+    return record.id === memberBindingId(meta.c, meta.e, meta.m, meta.p) ? meta : null;
+  }
+  const role = meta.spec?.role ?? (EDGE_ONLY_PARTS.has(meta.p) ? "edge" : "node");
+  return record.id === memberShapeId(meta.c, meta.e, meta.m, meta.p, role) ? meta : null;
 }
 
 export function readFrameMeta(record: TLRecord): FrameMeta | null {
@@ -167,14 +190,17 @@ export function hashOf(value: unknown): string {
   return hash(stableStringify(value));
 }
 
+/** Corner-resizing text scales it, and dragging an arrow's label slides it; neither is content. */
 const GEOMETRY_PROPS = new Set([
   "w",
   "h",
   "growY",
+  "scale",
   "start",
   "end",
   "bend",
   "elbowMidPoint",
+  "labelPosition",
   "points",
 ]);
 

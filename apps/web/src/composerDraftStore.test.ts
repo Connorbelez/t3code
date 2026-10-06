@@ -1133,6 +1133,47 @@ describe("composerDraftStore context persistence", () => {
       "t3-context://v1/preview-annotation/preview-annotation_retry-note",
     );
   });
+  it("keeps diagram contexts persisted before diagrams listed compositions", () => {
+    const merge = useComposerDraftStore.persist.getOptions().merge!;
+    const legacy = {
+      version: 1,
+      contextId: "diagram-checkout",
+      kind: "diagram",
+      label: "Checkout",
+      payload: {
+        environmentId: "environment:diagrams",
+        projectId: "project:diagrams",
+        diagramId: "11111111-1111-4111-8111-111111111111",
+        scope: { kind: "diagram", pageId: "page:one" },
+        revision: 3,
+        structure: {
+          revision: 3,
+          pages: [{ id: "page:one", name: "Page", shapeCount: 0 }],
+          shapes: [],
+          bindings: [],
+          totalShapes: 0,
+          truncated: false,
+        },
+      },
+    };
+    const state = merge(
+      {
+        draftsByThreadKey: {
+          [scopedThreadKey(threadRef)]: { prompt: "", attachments: [], diagramContexts: [legacy] },
+        },
+      },
+      useComposerDraftStore.getInitialState(),
+    );
+    expect(state.draftsByThreadKey[scopedThreadKey(threadRef)]?.diagramContexts).toEqual([
+      {
+        ...legacy,
+        payload: {
+          ...legacy.payload,
+          structure: { ...legacy.payload.structure, compositions: [] },
+        },
+      },
+    ]);
+  });
 });
 
 describe("composerDraftStore review comments", () => {

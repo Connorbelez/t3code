@@ -10,12 +10,14 @@ import {
 import type { TLRecord, TLShape } from "@tldraw/tlschema";
 
 import { compareIndex, indexRecords, pageBox, type RecordIndex, shapeOf } from "./canvas.ts";
-import { emit, emitRelease } from "./emit.ts";
+import { deletesOf, emit, emitRelease } from "./emit.ts";
 import {
   frameShapeId,
   isContent,
-  memberBindingId,
+  memberPartId,
   memberShapeId,
+  readFrameMeta,
+  readPartMeta,
   type StoredEdge,
   type StoredMember,
   type StoredNode,
@@ -33,7 +35,7 @@ import {
   releaseRows,
   replaceRows,
 } from "./merge.ts";
-import { type CurrentComposition, scanCompositions } from "./membership.ts";
+import { type CurrentComposition, type CurrentMember, scanCompositions } from "./membership.ts";
 import { type ComposeOperation, type ComposeSpec, parseRequest, parseSpec } from "./spec.ts";
 
 /**
@@ -79,7 +81,7 @@ export async function compose(
     );
     const { puts, deletes } = emitRelease(operation.kind, current, decisions);
     return {
-      changes: finalize(puts, deletes, index, ports.rehearse),
+      changes: finalize(puts, carryOrphans(index, deletes), deletes, index, ports.rehearse),
       counts: countsOf(decisions),
       overlaps: [],
     };
@@ -118,38 +120,56 @@ export async function compose(
     return { changes: null, counts, overlaps: overlapsOf(drawn, epoch, index) };
   }
 
-  const arranged = arrangedScreens(spec, decisions, current, operation.relayout);
+  // The tree as tldraw sees it when the puts land: shapes whose parent the batch deletes are
+  // carried out first, and deleted records are still there, so they still bound index slots.
+  const deletes = deletesOf(spec.kit, spec.key, epoch, decisions);
+  const carried = carryOrphans(index, deletes);
+  const tree = new Map(index);
+  for (const shape of carried) tree.set(shape.id, shape);
+  const rebased = rebase(decisions, tree);
+  const arranged = arrangedScreens(spec, rebased, current, operation.relayout);
   const placement =
     drawn.kit.layout === "sequence"
-      ? placeSequence(drawn, current, index, ports.measureText)
-      : await place(
-          drawn,
-          decisions,
-          current,
-          index,
-          ports.measureText,
-          operation.relayout,
-          arranged,
-        );
-  const { puts, deletes } = emit({
+      ? placeSequence(drawn, current, tree, ports.measureText)
+      : await place(drawn, rebased, current, tree, ports.measureText, operation.relayout, arranged);
+  const emitted = emit({
     spec: drawn,
     epoch,
     current,
-    decisions,
+    decisions: rebased,
     ledger,
     arrangements,
     arranged,
     placement,
-    index,
+    tree,
+    carried,
+    deletes: new Set(deletes),
   });
-  const after = new Map(index);
-  for (const record of puts) after.set(record.id, record);
+  const after = new Map(tree);
+  for (const record of emitted.puts) after.set(record.id, record);
   for (const id of deletes) after.delete(id);
   return {
-    changes: finalize(puts, deletes, index, ports.rehearse),
+    changes: finalize(emitted.puts, emitted.carried, deletes, index, ports.rehearse),
     counts,
     overlaps: overlapsOf(drawn, epoch, after),
   };
+}
+
+/** Decisions reading members' records as carried out of deleted parents. */
+function rebase(decisions: readonly Decision[], tree: RecordIndex): Decision[] {
+  const moved = (member: CurrentMember): CurrentMember => ({
+    ...member,
+    parts: new Map(
+      Array.from(member.parts, ([name, record]) => [name, tree.get(record.id) ?? record]),
+    ),
+  });
+  return decisions.map((decision) => {
+    if (decision.do === "overwrite") return { ...decision, current: moved(decision.current) };
+    if (decision.do === "keep" && decision.current) {
+      return { ...decision, current: moved(decision.current) };
+    }
+    return decision;
+  });
 }
 
 interface Plan {
@@ -182,6 +202,11 @@ function planPatch(
   if (!current) {
     throw invalidSpec("spec.key", [
       `no composition "${key}" on this diagram; a patch changes an existing composition, so compose the whole spec without mode "patch" first`,
+    ]);
+  }
+  if (kit !== current.meta.kit) {
+    throw invalidSpec("spec.kit", [
+      `a patch keeps the composition's kit ${current.meta.kit}; to change kits, compose the whole spec without mode "patch"`,
     ]);
   }
   const removed = new Set(operation.removeKeys);
@@ -218,11 +243,6 @@ function planPatch(
         (node) => `"${node.parent}" still holds "${node.key}"; remove it too, or patch its parent`,
       ),
     );
-  }
-  if (kit !== current.meta.kit) {
-    throw invalidSpec("spec.kit", [
-      `a patch keeps the composition's kit ${current.meta.kit}; to change kits, compose the whole spec without mode "patch"`,
-    ]);
   }
   const both = new Set([...spec.nodes, ...spec.edges].map((member) => member.key));
   const misplaced = operation.removeKeys.flatMap((memberKey, i) => {
@@ -337,7 +357,7 @@ function overlapsOf(spec: ComposeSpec, epoch: number, index: RecordIndex): [stri
     return false;
   };
   const boxes = spec.nodes.flatMap((node) => {
-    const shape = shapeOf(index, memberShapeId(spec.key, epoch, node.key, "main"));
+    const shape = shapeOf(index, memberShapeId(spec.key, epoch, node.key, "main", "node"));
     return shape ? [{ key: node.key, box: pageBox(index, shape) }] : [];
   });
   const pairs: [string, string][] = [];
@@ -369,8 +389,9 @@ function countsOf(decisions: readonly Decision[]): DiagramComposeCounts {
 }
 
 /**
- * The first epoch none of whose IDs exist. Detached shapes keep their IDs, so composing that key
- * again starts fresh rather than writing over them, even after their frame is deleted.
+ * The first epoch no record claims and none of whose IDs exist. Records keep their composition
+ * meta after their frame is deleted, and detached shapes keep their IDs, so composing that key
+ * again starts fresh rather than adopting or writing over either.
  */
 function freeEpoch(
   kit: Kit,
@@ -378,17 +399,17 @@ function freeEpoch(
   members: readonly StoredMember[],
   index: RecordIndex,
 ): number {
+  const claimed = new Set<number>();
+  for (const record of index.values()) {
+    const meta = readPartMeta(record) ?? readFrameMeta(record);
+    if (meta?.c === key) claimed.add(meta.e);
+  }
   for (let epoch = 0; ; epoch++) {
     const taken =
+      claimed.has(epoch) ||
       index.has(frameShapeId(key, epoch)) ||
       members.some((member) =>
-        partsOf(kit, member).some((part) =>
-          index.has(
-            part === "start" || part === "end"
-              ? memberBindingId(key, epoch, member.key, part)
-              : memberShapeId(key, epoch, member.key, part),
-          ),
-        ),
+        partsOf(kit, member).some((part) => index.has(memberPartId(key, epoch, member, part))),
       );
     if (!taken) return epoch;
   }
@@ -402,6 +423,7 @@ function freeEpoch(
  */
 function finalize(
   emittedPuts: readonly TLRecord[],
+  carried: readonly TLShape[],
   emittedDeletes: readonly string[],
   index: RecordIndex,
   rehearse: ComposePorts["rehearse"],
@@ -410,7 +432,8 @@ function finalize(
   const deletes = emittedDeletes.filter((id) => index.has(id));
   if (puts.length === 0 && deletes.length === 0) return null;
 
-  const after = rehearse([...puts, ...carryOrphans(index, puts, deletes)], deletes);
+  // Carried shapes go in the same put, but where they end up is tldraw's call.
+  const after = rehearse([...puts, ...carried], deletes);
   const written = new Set(puts.map((record) => record.id));
   const removed = new Set(deletes);
   const rewritten =
@@ -490,20 +513,16 @@ function dependenciesOf(
 }
 
 /**
- * Shapes compose did not write whose parent it deletes, such as a note a human drew inside a
- * removed frame. `store.remove` does not delete descendants, so each moves to its nearest
- * surviving ancestor at the same page position, stacked where the deleted ancestor was.
+ * Shapes whose parent the batch deletes, such as a note a human drew inside a removed boundary or
+ * a member a human dragged into one. `store.remove` does not delete descendants, so each moves to
+ * its nearest surviving ancestor at the same page position, stacked where the deleted ancestor
+ * was. Emit may still write a carried member shape, from where it was carried.
  */
-function carryOrphans(
-  index: RecordIndex,
-  puts: readonly TLRecord[],
-  deletes: readonly string[],
-): TLShape[] {
+function carryOrphans(index: RecordIndex, deletes: readonly string[]): TLShape[] {
   const gone = new Set(deletes);
-  const written = new Set(puts.map((record) => record.id));
   const orphans: { shape: TLShape; top: TLShape; path: string[] }[] = [];
   for (const record of index.values()) {
-    if (record.typeName !== "shape" || gone.has(record.id) || written.has(record.id)) continue;
+    if (record.typeName !== "shape" || gone.has(record.id)) continue;
     if (!gone.has(record.parentId)) continue;
     let { x, y, rotation, parentId } = record;
     let top = record;
@@ -533,8 +552,6 @@ function carryOrphans(
   };
   orphans.sort((a, b) => compareIndex(a.top.id, b.top.id) || byPath(a, b));
 
-  const final = new Map(index);
-  for (const record of puts) final.set(record.id, record);
   const carried: TLShape[] = [];
   let low: string | null = null;
   let previousTop: string | null = null;
@@ -545,7 +562,7 @@ function carryOrphans(
     }
     // Deleted siblings bound the slot too, so two removed neighbors never hand out one key twice.
     let high: string | null = null;
-    for (const sibling of final.values()) {
+    for (const sibling of index.values()) {
       if (
         sibling.typeName === "shape" &&
         sibling.parentId === top.parentId &&

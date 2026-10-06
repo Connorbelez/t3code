@@ -1,8 +1,10 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import * as SchemaTransformation from "effect/SchemaTransformation";
 
 import {
   EnvironmentId,
+  ForwardCompatibleArray,
   IsoDateTime,
   NonNegativeInt,
   PositiveInt,
@@ -246,31 +248,34 @@ export const DiagramOperationErrorDetails = Schema.Struct({
 });
 export type DiagramOperationErrorDetails = typeof DiagramOperationErrorDetails.Type;
 
+export const DiagramOperationErrorCode = Schema.Literals([
+  "not-found",
+  "project-unavailable",
+  "archived",
+  "stale",
+  "locked",
+  "invalid-records",
+  "invalid-schema",
+  "request-collision",
+  "no-editor",
+  "busy",
+  "unsaved",
+  "disconnected",
+  "cancelled",
+  "storage",
+  "scope-unavailable",
+  "assets-unavailable",
+  "conflict",
+  "invalid-spec",
+  "too-large",
+  "unsupported-mermaid",
+]);
+export type DiagramOperationErrorCode = typeof DiagramOperationErrorCode.Type;
+
 export class DiagramOperationError extends Schema.TaggedError<DiagramOperationError>()(
   "DiagramOperationError",
   {
-    code: Schema.Literals([
-      "not-found",
-      "project-unavailable",
-      "archived",
-      "stale",
-      "locked",
-      "invalid-records",
-      "invalid-schema",
-      "request-collision",
-      "no-editor",
-      "busy",
-      "unsaved",
-      "disconnected",
-      "cancelled",
-      "storage",
-      "scope-unavailable",
-      "assets-unavailable",
-      "conflict",
-      "invalid-spec",
-      "too-large",
-      "unsupported-mermaid",
-    ]),
+    code: DiagramOperationErrorCode,
     diagramId: Schema.optional(DiagramId),
     details: Schema.optional(DiagramOperationErrorDetails),
   },
@@ -317,7 +322,10 @@ export const DiagramHostConnectInput = Schema.Struct({
   sdkVersion: Schema.Literal(DIAGRAM_SDK_VERSION),
   focused: Schema.Boolean,
   mountedDiagramIds: Schema.optional(Schema.Array(DiagramId).check(Schema.isMaxLength(100))),
-  operations: Schema.optional(Schema.Array(DiagramHostOperation).check(Schema.isMaxLength(20))),
+  /** Operations a newer client knows and this server does not are dropped, not rejected. */
+  operations: Schema.optional(
+    ForwardCompatibleArray(DiagramHostOperation).check(Schema.isMaxLength(20)),
+  ),
 });
 export const DiagramHostRequest = Schema.Union([
   Schema.Struct({
@@ -456,15 +464,29 @@ export const DiagramSpecEdgeObject = Schema.Struct({
   /** Validated per kit edge kind, such as multiplicities on a UML association. */
   body: Schema.optional(boundedJson(4 * 1024)),
 });
-/** Edges accept `[from, to, label?]` with the kit's default edge kind. */
+const DiagramEdgeLabel = Schema.String.check(Schema.isMaxLength(500));
+const DiagramEdgeTuple = Schema.Union([
+  Schema.Tuple([DiagramEdgeEndpoint, DiagramEdgeEndpoint]),
+  Schema.Tuple([DiagramEdgeEndpoint, DiagramEdgeEndpoint, DiagramEdgeLabel]),
+]);
+/**
+ * Edges accept `[from, to, label?]` with the kit's default edge kind. The tuple is published as a
+ * plain array of strings, because MCP clients that predate JSON Schema 2020-12 reject
+ * `prefixItems`; it still decodes, and trims its endpoints, as the tuple.
+ */
 export const DiagramSpecEdge = Schema.Union([
   DiagramSpecEdgeObject,
-  Schema.Tuple([DiagramEdgeEndpoint, DiagramEdgeEndpoint]),
-  Schema.Tuple([
-    DiagramEdgeEndpoint,
-    DiagramEdgeEndpoint,
-    Schema.String.check(Schema.isMaxLength(500)),
-  ]),
+  Schema.Array(DiagramEdgeLabel)
+    .check(Schema.isMinLength(2), Schema.isMaxLength(3))
+    .pipe(
+      Schema.decodeTo(
+        DiagramEdgeTuple,
+        SchemaTransformation.passthroughSupertype<
+          typeof DiagramEdgeTuple.Encoded,
+          ReadonlyArray<string>
+        >(),
+      ),
+    ),
 ]);
 export type DiagramSpecEdge = typeof DiagramSpecEdge.Type;
 
@@ -547,7 +569,10 @@ export const DiagramComposeOverlaps = Schema.Array(
   Schema.Tuple([DiagramMemberKey, DiagramMemberKey]),
 ).check(Schema.isMaxLength(50));
 
-/** A no-op compose commits nothing, so it has no request ID. */
+/**
+ * A no-op compose commits nothing, so it has no request ID. Counts describe what this call wrote:
+ * a retry of a committed request ID is answered from its receipt, so its counts are all zero.
+ */
 export const DiagramComposeResult = Schema.Struct({
   requestId: Schema.NullOr(DiagramRequestId),
   revision: DiagramRevision,
@@ -557,6 +582,8 @@ export const DiagramComposeResult = Schema.Struct({
   /** Member key to main shape ID, only with `includeMembers`. */
   members: Schema.optional(Schema.Record(Schema.String, DiagramRecordId)),
   capture: Schema.optional(DiagramCapture),
+  /** Why the requested capture is missing; the compose itself succeeded. */
+  captureError: Schema.optional(DiagramOperationErrorCode),
 });
 export type DiagramComposeResult = typeof DiagramComposeResult.Type;
 

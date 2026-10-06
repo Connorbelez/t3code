@@ -22,7 +22,7 @@ import {
   readPartMeta,
   type StoredMember,
 } from "./identity.ts";
-import { partsOf } from "./kit.ts";
+import { ATTACH_EDGE_KIND, partsOf } from "./kit.ts";
 import { KITS } from "./kits/index.ts";
 
 /** A member whose main part is on the canvas. Members a human deleted live only in the ledger. */
@@ -42,6 +42,17 @@ export function topShape(member: CurrentMember): TLShape | undefined {
   return top?.typeName === "shape" ? top : undefined;
 }
 
+/**
+ * What is left of a member whose main part a human deleted, such as a class's compartments. The
+ * member is gone, but these records hold its IDs, so writing it again must account for them.
+ */
+export interface Remnant {
+  readonly key: string;
+  readonly parts: ReadonlyMap<PartName, TLRecord>;
+  /** Some part's content differs from what compose wrote. */
+  readonly edited: boolean;
+}
+
 export interface CurrentComposition {
   readonly key: string;
   readonly epoch: number;
@@ -50,6 +61,7 @@ export interface CurrentComposition {
   readonly pageId: TLParentId;
   readonly ledger: ReadonlyMap<string, string>;
   readonly members: ReadonlyMap<string, CurrentMember>;
+  readonly remnants: ReadonlyMap<string, Remnant>;
 }
 
 interface CompositionScan {
@@ -102,9 +114,20 @@ export function scanCompositions(index: RecordIndex): CompositionScan {
       string,
       { stored: StoredMember; parts: Map<PartName, { record: TLRecord; meta: PartMeta }> }
     >();
+    const remnants = new Map<string, Remnant>();
     for (const [memberKey, memberParts] of grouped.get(key) ?? []) {
       const stored = memberParts.get("main")?.meta.spec;
-      if (stored) present.set(memberKey, { stored, parts: memberParts });
+      if (stored) {
+        present.set(memberKey, { stored, parts: memberParts });
+        continue;
+      }
+      remnants.set(memberKey, {
+        key: memberKey,
+        parts: new Map(Array.from(memberParts, ([name, part]) => [name, part.record])),
+        edited: Array.from(memberParts.values()).some(
+          (part) => fingerprint(part.record) !== part.meta.f,
+        ),
+      });
     }
     const members = new Map<string, CurrentMember>();
     for (const [memberKey, { stored, parts: memberParts }] of present) {
@@ -131,6 +154,7 @@ export function scanCompositions(index: RecordIndex): CompositionScan {
       pageId,
       ledger: new Map(meta.ledger),
       members,
+      remnants,
     });
   }
   return { compositions, owners };
@@ -189,7 +213,10 @@ export function detail(
   for (const summary of summaries) {
     const composition = scan.compositions.get(summary.key);
     if (!composition || (page.key !== undefined && page.key !== summary.key)) continue;
-    const members = memberOrder(composition);
+    // A note's attach line comes from its `body.on`, so a spec rebuilt from detail must not list it.
+    const members = memberOrder(composition).filter(
+      ({ stored }) => stored.role === "node" || stored.kind !== ATTACH_EDGE_KIND,
+    );
     const from = Math.max(page.offset - cursor, 0);
     const to = Math.max(end - cursor, 0);
     const slice = members.slice(from, to);

@@ -1,13 +1,14 @@
-import type {
-  DiagramBatch,
-  DiagramCapture,
-  DiagramComposeRequest,
-  DiagramHostComposeResult,
-  DiagramId,
-  DiagramMetadata,
-  DiagramPageScope,
-  DiagramScope,
-  EnvironmentId,
+import {
+  DiagramOperationError,
+  type DiagramBatch,
+  type DiagramCapture,
+  type DiagramComposeRequest,
+  type DiagramHostComposeResult,
+  type DiagramId,
+  type DiagramMetadata,
+  type DiagramPageScope,
+  type DiagramScope,
+  type EnvironmentId,
 } from "@t3tools/contracts";
 import type { DiagramSaveState } from "./diagramSocket";
 
@@ -109,4 +110,52 @@ export function awaitDiagramHost(
 }
 export async function flushMountedDiagram(environmentId: EnvironmentId, diagramId: DiagramId) {
   await findDiagramHost(environmentId, diagramId)?.flush();
+}
+
+export type TemporaryDiagramLease = {
+  /** Records the editor the lease mounted, so later requests can find it. */
+  bind: (host: MountedDiagramHost) => void;
+  end: () => void;
+};
+/**
+ * The off-screen editor a host mounts for a diagram no window has open. Each request using it
+ * holds a lease and it unmounts when the last lease ends, so the capture that follows a compose
+ * keeps the editor its prepare mounted instead of losing it mid-capture.
+ */
+export function createTemporaryDiagramEditor(show: (diagram: DiagramMetadata | null) => void) {
+  type Entry = { diagram: DiagramMetadata; host: MountedDiagramHost | null; leases: number };
+  let current: Entry | null = null;
+  const lease = (entry: Entry): TemporaryDiagramLease => {
+    entry.leases += 1;
+    if (entry.leases === 1) show(entry.diagram);
+    let ended = false;
+    return {
+      bind: (host) => {
+        entry.host = host;
+      },
+      end: () => {
+        if (ended || current !== entry) return;
+        ended = true;
+        entry.leases -= 1;
+        if (entry.leases === 0) show(null);
+      },
+    };
+  };
+  return {
+    /** Leases the temporary editor when `host` is it, even while it is unmounting. */
+    adopt: (host: MountedDiagramHost) =>
+      current !== null && current.host === host ? lease(current) : null,
+    /** Mounts `diagram` off-screen, or shares the editor already mounted for it. */
+    open: (diagram: DiagramMetadata) => {
+      if (current && current.leases > 0 && current.diagram.id !== diagram.id)
+        throw new DiagramOperationError({ code: "busy", diagramId: diagram.id });
+      if (current?.diagram.id !== diagram.id) current = { diagram, host: null, leases: 0 };
+      return lease(current);
+    },
+    /** Unmounts at once and voids outstanding leases, as when the host connection drops. */
+    reset: () => {
+      current = null;
+      show(null);
+    },
+  };
 }

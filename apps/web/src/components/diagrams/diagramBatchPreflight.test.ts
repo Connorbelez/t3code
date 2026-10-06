@@ -15,6 +15,7 @@ import {
   createShapeId,
   createBindingId,
   defaultAddFontsFromNode,
+  PageRecordType,
   tipTapDefaultExtensions,
   toRichText,
   type TLAnyShapeUtilConstructor,
@@ -1123,5 +1124,178 @@ describe("removing boundaries", () => {
     applyComposed(editor, removed.changes);
     expect(compositionShapes(editor)).toEqual([]);
     expectKept(editor, deep, editor.getCurrentPageId());
+  });
+});
+
+describe("dropping members while connecting others", () => {
+  /** Composes, passes the preflight, applies, and checks the same request is then a no-op. */
+  async function composeApplied(editor: Editor, request: DiagramComposeRequest) {
+    const result = await composeInto(editor, request);
+    assert(result.changes, "the request must produce changes");
+    applyComposed(editor, result.changes);
+    expect((await composeInto(editor, request)).changes).toBeNull();
+    return result.counts;
+  }
+  const keyed = (kit: "flow" | "state" | "sequence", keys: string[], edges: DiagramSpecEdge[]) =>
+    ({
+      spec: { kit, key: "k", nodes: keys.map((key) => ({ key })), edges },
+    }) satisfies DiagramComposeRequest;
+
+  it.each([
+    ["a flowchart", "flow"],
+    ["a state machine", "state"],
+    ["a sequence", "sequence"],
+  ] as const)("drops a node and adds an edge between the others in %s", async (_, kit) => {
+    const editor = mount();
+    await composeApplied(editor, keyed(kit, ["a", "b", "c"], [["a", "b"]]));
+    expect(
+      await composeApplied(
+        editor,
+        keyed(
+          kit,
+          ["a", "b"],
+          [
+            ["a", "b"],
+            ["b", "a"],
+          ],
+        ),
+      ),
+    ).toEqual({ created: 1, updated: 0, kept: 3, removed: 1 });
+  });
+
+  it("removes a node by patch and adds an edge in the same batch", async () => {
+    const editor = mount();
+    await composeApplied(editor, keyed("flow", ["a", "b", "c"], []));
+    expect(
+      await composeApplied(editor, {
+        mode: "patch",
+        spec: { kit: "flow", key: "k", nodes: [], edges: [["a", "b"]] },
+        removeKeys: ["c"],
+      }),
+    ).toEqual({ created: 1, updated: 0, kept: 2, removed: 1 });
+  });
+
+  it("carries a member a human dragged into a dropped boundary, and connects it there", async () => {
+    const editor = mount();
+    await composeApplied(editor, {
+      spec: {
+        kit: "flow",
+        key: "k",
+        nodes: [{ key: "g", kind: "group" }, { key: "x", parent: "g" }, { key: "a" }, { key: "b" }],
+      },
+    });
+    const b = member(editor, "b");
+    const page = editor.getShapePageBounds(b.id)?.toJson();
+    editor.reparentShapes([b.id], member(editor, "g").id);
+    expect(await composeApplied(editor, keyed("flow", ["a", "b"], [["a", "b"]]))).toEqual({
+      created: 1,
+      updated: 0,
+      kept: 2,
+      removed: 2,
+    });
+    const frame = member(editor, "a").parentId;
+    expect(editor.getShape(b.id)?.parentId).toBe(frame);
+    expect(editor.getShapePageBounds(b.id)?.toJson()).toEqual(page);
+    expect(member(editor, "a→b:flow").parentId).toBe(frame);
+  });
+});
+
+describe("reusing member IDs", () => {
+  async function composeApplied(editor: Editor, request: DiagramComposeRequest) {
+    const result = await composeInto(editor, request);
+    assert(result.changes, "the request must produce changes");
+    applyComposed(editor, result.changes);
+    expect((await composeInto(editor, request)).changes).toBeNull();
+  }
+  const flow = (nodes: string[], edges: DiagramSpecEdge[]) =>
+    ({
+      spec: { kit: "flow", key: "k", nodes: nodes.map((key) => ({ key })), edges },
+    }) satisfies DiagramComposeRequest;
+
+  it("turns an edge's key into a node's, and back", async () => {
+    const editor = mount();
+    await composeApplied(editor, flow(["a", "b"], [{ key: "x", from: "a", to: "b" }]));
+    await composeApplied(editor, flow(["a", "b", "x"], [["a", "x"]]));
+    expect(member(editor, "x").type).toBe("geo");
+    await composeApplied(editor, flow(["a", "b"], [{ key: "x", from: "a", to: "b" }]));
+    expect(member(editor, "x").type).toBe("arrow");
+  });
+
+  it("redraws a class over the compartments left when a human deleted its header", async () => {
+    const editor = mount();
+    await composeApplied(editor, library);
+    editor.deleteShapes([member(editor, "Member").id]);
+    await composeApplied(editor, {
+      spec: {
+        ...library.spec,
+        nodes: library.spec.nodes.map((node) =>
+          node.key === "Member" ? { ...node, label: "Patron" } : node,
+        ),
+      },
+    });
+    expect(member(editor, "Member").props).toMatchObject({ richText: toRichText("Patron") });
+  });
+});
+
+describe("over-constrained wireframes", () => {
+  const screen = (body: Record<string, unknown>) =>
+    ({
+      spec: { kit: "wireframe", key: "w", nodes: [{ key: "s", body }] },
+    }) satisfies DiagramComposeRequest;
+  const squeezed = (kind: string) => ({
+    children: [
+      {
+        kind: "row",
+        children: [
+          { key: "q", kind, label: "Search", size: "fill" },
+          { key: "go", kind: "button", label: "Go", size: 400 },
+        ],
+      },
+    ],
+  });
+
+  it.each([
+    ["padding wider than the phone", { padding: 200, children: [{ key: "go", kind: "button" }] }],
+    ["a fill input squeezed out of its row", squeezed("input")],
+    ["fill text squeezed out of its row", squeezed("text")],
+    ["an empty card without padding", { children: [{ key: "c", kind: "card", padding: 0 }] }],
+  ])("draws %s with every box at least a pixel", async (_, body) => {
+    const editor = mount();
+    const { changes } = await composeInto(editor, screen(body));
+    assert(changes, "a new composition must produce changes");
+    applyComposed(editor, changes);
+    for (const shape of compositionShapes(editor)) {
+      const bounds = editor.getShapeGeometry(shape).bounds;
+      if (shape.type !== "line") expect(Math.min(bounds.w, bounds.h)).toBeGreaterThanOrEqual(1);
+    }
+  });
+});
+
+describe("members on other pages", () => {
+  it("names an edge to a member a human moved to another page instead of failing the batch", async () => {
+    const editor = mount();
+    const nodes = [{ key: "a" }, { key: "b" }];
+    const first = await composeInto(editor, { spec: { kit: "flow", key: "k", nodes } });
+    assert(first.changes, "a new composition must produce changes");
+    applyComposed(editor, first.changes);
+    const other = PageRecordType.createId("other");
+    editor.createPage({ id: other, name: "Other" });
+    editor.moveShapesToPage([member(editor, "b").id], other);
+    editor.setCurrentPage(editor.getPages()[0]!.id);
+
+    await expect(
+      composeInto(editor, { spec: { kit: "flow", key: "k", nodes, edges: [["a", "b"]] } }),
+    ).rejects.toMatchObject({
+      code: "invalid-spec",
+      details: {
+        issues: [
+          {
+            path: "spec.edges",
+            message:
+              '"a→b:flow" connects "a" and "b", which are on different pages; move them onto one page or leave the edge out',
+          },
+        ],
+      },
+    });
   });
 });

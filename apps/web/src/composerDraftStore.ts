@@ -37,6 +37,7 @@ import {
 import * as Schema from "effect/Schema";
 import * as Equal from "effect/Equal";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import { DeepMutable } from "effect/Types";
 import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model";
 import { useMemo } from "react";
@@ -86,6 +87,7 @@ const isProviderDriverKind = Schema.is(ProviderDriverKind);
 const isReviewCommentContext = Schema.is(ReviewCommentContextSchema);
 const isThreadContextRecord = Schema.is(ThreadContextRecord);
 const isDiagramContextRecord = Schema.is(DiagramContextRecord);
+const decodeDiagramContextRecord = Schema.decodeUnknownOption(DiagramContextRecord);
 const isSnapShotSource = Schema.is(SnapShotSource);
 const isPreviewAnnotationPayload = Schema.is(PreviewAnnotationPayloadSchema);
 
@@ -2007,8 +2009,11 @@ function normalizePersistedDraftsByThreadId(
     const threadContexts = Array.isArray(draftCandidate.threadContexts)
       ? draftCandidate.threadContexts.filter(isThreadContextRecord)
       : [];
+    // Decoded, not type-checked, so contexts saved before newer fields get their defaults.
     const diagramContexts = Array.isArray(draftCandidate.diagramContexts)
-      ? draftCandidate.diagramContexts.filter(isDiagramContextRecord)
+      ? draftCandidate.diagramContexts.flatMap((entry) =>
+          Option.toArray(decodeDiagramContextRecord(entry)).map(copyDiagramContext),
+        )
       : [];
     const previewAnnotations = Array.isArray(draftCandidate.previewAnnotations)
       ? draftCandidate.previewAnnotations.filter(isPreviewAnnotationPayload)

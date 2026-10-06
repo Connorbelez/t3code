@@ -10,6 +10,7 @@ import {
   type GeoKind,
   geoDrawing,
   LOOKS,
+  nodeKindOf,
   type Size,
 } from "./kit.ts";
 import type { Decision } from "./merge.ts";
@@ -264,7 +265,7 @@ export async function place(
       const node = decision.draft.spec;
       if (node.role !== "node") continue;
       written.add(node.key);
-      const kind = spec.kit.nodeKinds[node.kind];
+      const kind = nodeKindOf(spec.kit, node.kind);
       if (kind?.shape === "geo")
         sizes.set(
           node.key,
@@ -291,7 +292,7 @@ export async function place(
   }
   const sizeOf = (key: string): Size | undefined => sizes.get(key) ?? canvas.get(key);
   const kinds = new Map(spec.nodes.map((node) => [node.key, node.kind]));
-  const isBoundary = (key: string) => spec.kit.nodeKinds[kinds.get(key) ?? ""]?.shape === "frame";
+  const isBoundary = (key: string) => nodeKindOf(spec.kit, kinds.get(key) ?? "")?.shape === "frame";
 
   const present = spec.nodes.flatMap((node) =>
     written.has(node.key) || canvas.has(node.key) ? [node.key] : [],
@@ -378,7 +379,6 @@ export async function place(
       }
     }
   }
-  // Rewritten content keeps its top-left and takes its new size.
   for (const [key, size] of sizes) {
     const at = canvas.get(key);
     if (at && !nodes.has(key)) nodes.set(key, { x: at.x, y: at.y, ...size });

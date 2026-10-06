@@ -203,16 +203,14 @@ export function diagramStructure(
       (a, b) =>
         Number(b.pageId === input.priorityPageId) - Number(a.pageId === input.priorityPageId),
     );
+  const pages = records.filter((item) => item.typeName === "page");
   return {
     revision,
-    pages: records
-      .filter((item) => item.typeName === "page")
-      .slice(0, 100)
-      .map((page) => ({
-        id: page.id,
-        name: page.name.slice(0, 256),
-        shapeCount: shapes.filter((shape) => ancestry.get(shape.id)?.pageId === page.id).length,
-      })),
+    pages: pages.slice(0, 100).map((page) => ({
+      id: page.id,
+      name: page.name.slice(0, 256),
+      shapeCount: shapes.filter((shape) => ancestry.get(shape.id)?.pageId === page.id).length,
+    })),
     compositions: listed.slice(0, 100),
     shapes: selected.slice(offset, offset + limit).map((shape) => ({
       id: shape.id,
@@ -229,6 +227,10 @@ export function diagramStructure(
       .slice(offset, offset + limit)
       .map((item) => ({ id: item.id, type: item.type, fromId: item.fromId, toId: item.toId })),
     totalShapes: shapes.length,
-    truncated: offset + limit < selected.length || offset + limit < bindings.length,
+    truncated:
+      offset + limit < selected.length ||
+      offset + limit < bindings.length ||
+      listed.length > 100 ||
+      pages.length > 100,
   } satisfies DiagramStructure;
 }

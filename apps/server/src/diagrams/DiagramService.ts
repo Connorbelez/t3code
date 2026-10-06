@@ -27,7 +27,6 @@ import {
   type DiagramHostConnectInput,
   type DiagramHostOperation,
   type DiagramComposeInput,
-  type DiagramComposeRequest,
   type DiagramComposeResult,
   type DiagramPageScope,
   type DiagramScope,
@@ -805,6 +804,9 @@ export const make = Effect.gen(function* () {
     );
     if (Option.isNone(response)) {
       release();
+      // An unanswered prepare leaves the host's fence unknown; other operations are just slow.
+      if (input.operation !== "prepare-batch")
+        return yield* new DiagramOperationError({ code: "busy" });
       yield* disconnectHost(host.connectionId);
       return yield* new DiagramOperationError({ code: "disconnected" });
     }
@@ -873,66 +875,80 @@ export const make = Effect.gen(function* () {
       Effect.ensuring(Effect.sync(() => database.releaseIdle(input.diagramId))),
     );
 
-  const compose = Effect.fn("DiagramService.compose")(function* (
-    input: DiagramComposeInput & { namespace: string; threadId?: ThreadId },
-  ) {
-    const diagram = yield* targetMetadata(input);
-    if (diagram.archivedAt) return yield* new DiagramOperationError({ code: "archived" });
-    const { operation, key, spec, mermaid, mode, removeKeys, relayout } = input;
-    const request: DiagramComposeRequest = {
-      ...(operation === undefined ? {} : { operation }),
-      ...(key === undefined ? {} : { key }),
-      ...(spec === undefined ? {} : { spec }),
-      ...(mermaid === undefined ? {} : { mermaid }),
-      ...(mode === undefined ? {} : { mode }),
-      ...(removeKeys === undefined ? {} : { removeKeys }),
-      ...(relayout ? { relayout } : {}),
-    };
+  const compose = Effect.fn("DiagramService.compose")(function* ({
+    projectId,
+    diagramId,
+    namespace,
+    threadId,
+    requestId,
+    includeMembers,
+    capture,
+    ...request
+  }: DiagramComposeInput & { namespace: string; threadId?: ThreadId }) {
+    const target = { projectId, diagramId };
+    const diagram = yield* targetMetadata(target);
     // Mermaid text can only be checked by the host's parser.
     const compositionKey = yield* attempt(() =>
-      validateComposeRequest({
-        ...request,
-        includeMembers: input.includeMembers,
-        capture: input.capture,
-      }),
+      validateComposeRequest({ ...request, includeMembers, capture }),
     );
-    const composed = yield* invoke({ ...input, operation: "compose", value: request });
+    const membersOf = () =>
+      includeMembers
+        ? attempt(
+            () => readCompositions(database.read(diagramId)).memberShapes(compositionKey) ?? {},
+          ).pipe(Effect.map((members) => ({ members })))
+        : Effect.succeed({});
+    const known = requestId
+      ? yield* attempt(() => database.getReceipt(diagramId, namespace, requestId))
+      : null;
+    if (known)
+      return {
+        requestId: known.requestId,
+        revision: known.revision,
+        compositionKey,
+        counts: { created: 0, updated: 0, kept: 0, removed: 0 },
+        overlaps: [],
+        ...(yield* membersOf()),
+      } satisfies DiagramComposeResult;
+    if (diagram.archivedAt) return yield* new DiagramOperationError({ code: "archived" });
+    const composed = yield* invoke({
+      ...target,
+      ...(threadId ? { threadId } : {}),
+      operation: "compose",
+      value: request,
+    });
     const result = yield* attempt(() => decodeHostComposeResult(composed.value));
     // Prepare on the host that composed: it measured against the records it is about to fence.
     const committed = result.changes
       ? yield* applyBatchCore({
-          projectId: input.projectId,
-          diagramId: input.diagramId,
-          namespace: input.namespace,
+          ...target,
+          namespace,
           clientId: composed.host.clientId,
-          ...(input.threadId ? { threadId: input.threadId } : {}),
-          batch: { requestId: input.requestId ?? NodeCrypto.randomUUID(), ...result.changes },
+          ...(threadId ? { threadId } : {}),
+          batch: { requestId: requestId ?? NodeCrypto.randomUUID(), ...result.changes },
         })
       : null;
-    const revision = committed?.revision ?? (yield* attempt(() => metadata(input))).revision;
-    const members = input.includeMembers
-      ? yield* attempt(
-          () => readCompositions(database.read(input.diagramId)).memberShapes(compositionKey) ?? {},
-        )
-      : undefined;
-    const captured = input.capture
+    const revision = committed?.revision ?? (yield* attempt(() => metadata(target))).revision;
+    const members = yield* membersOf();
+    // The batch is durable by now, so a failed capture only leaves the image out.
+    const captured = capture
       ? yield* captureAt(
-          {
-            projectId: input.projectId,
-            diagramId: input.diagramId,
-            scope: { kind: "composition", key: compositionKey },
-          },
+          { ...target, scope: { kind: "composition", key: compositionKey } },
           { clientId: composed.host.clientId, revision },
+        ).pipe(
+          Effect.map((value) => ({ capture: value })),
+          Effect.catchTag("DiagramOperationError", (error) =>
+            Effect.succeed({ captureError: error.code }),
+          ),
         )
-      : undefined;
+      : {};
     return {
       requestId: committed?.requestId ?? null,
       revision,
       compositionKey,
       counts: result.counts,
       overlaps: result.overlaps,
-      ...(members ? { members } : {}),
-      ...(captured ? { capture: captured } : {}),
+      ...members,
+      ...captured,
     } satisfies DiagramComposeResult;
   });
 
@@ -1138,8 +1154,14 @@ export const make = Effect.gen(function* () {
             );
             if (structureBudget < 1024)
               throw new DiagramOperationError({ code: "scope-unavailable" });
+            // Shapes and compositions are sorted focused page first, so popping drops other pages
+            // first; the focused page's shapes outrank other pages' compositions.
+            const elsewhere = (item: { pageId: string } | undefined) =>
+              item !== undefined && item.pageId !== scope.pageId;
             while (Buffer.byteLength(encodeJson(structure)) > structureBudget) {
               if (structure.bindings.length) structure.bindings.pop();
+              else if (elsewhere(structure.shapes.at(-1))) structure.shapes.pop();
+              else if (elsewhere(structure.compositions.at(-1))) structure.compositions.pop();
               else if (structure.shapes.length) structure.shapes.pop();
               else if (structure.pages.length) structure.pages.pop();
               else structure.compositions.pop();

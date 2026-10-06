@@ -11,7 +11,14 @@ import * as SchemaAST from "effect/SchemaAST";
 import * as SchemaIssue from "effect/SchemaIssue";
 
 import { holderOf, type StoredEdge, type StoredNode } from "./identity.ts";
-import { ATTACH_EDGE_KIND, type BodySchema, type Kit, NOTE_KIND } from "./kit.ts";
+import {
+  ATTACH_EDGE_KIND,
+  type BodySchema,
+  type Kit,
+  nodeKindOf,
+  NOTE_KIND,
+  rowOf,
+} from "./kit.ts";
 import { KITS } from "./kits/index.ts";
 import { isElement, lowerScreen, type ScreenContents } from "./screens.ts";
 
@@ -159,7 +166,7 @@ export function parseSpec(
       issues.push({ path: `${path}.key`, message: `duplicate key "${node.key}"` });
     keys.add(node.key);
     const kind = node.kind ?? kit.defaultKind;
-    const row = kit.nodeKinds[kind];
+    const row = nodeKindOf(kit, kind);
     if (!row) {
       issues.push({
         path: `${path}.kind`,
@@ -238,7 +245,7 @@ export function parseSpec(
       if (message) issues.push({ path: full.paths[end], message });
     }
     const kind = full.kind ?? defaultEdgeKind ?? "";
-    const row = kit.edgeKinds[kind];
+    const row = rowOf(kit.edgeKinds, kind);
     if (!row) {
       issues.push({
         path: full.paths.kind,
@@ -283,7 +290,7 @@ export function parseSpec(
       ...kit.check({
         nodes,
         edges,
-        outside: outside === "any" ? null : new Set([...outside.keys(), ...outsideEdges]),
+        outside: outside === "any" ? null : { nodes: outside, edges: outsideEdges },
       }),
     );
   }
@@ -405,7 +412,7 @@ function checkParents(
     row.shape === "frame" ? [kind] : [],
   );
   const containers = Array.from(byKey.values()).flatMap((node) =>
-    node && kit.nodeKinds[node.kind]?.shape === "frame" ? [node.key] : [],
+    node && nodeKindOf(kit, node.kind)?.shape === "frame" ? [node.key] : [],
   );
   nodes.forEach((node, i) => {
     if (node.parent === null) return;
@@ -427,7 +434,7 @@ function checkParents(
       });
       return;
     }
-    if (kit.nodeKinds[parent.kind]?.shape !== "frame") {
+    if (nodeKindOf(kit, parent.kind)?.shape !== "frame") {
       issues.push({
         path,
         message: `"${parent.key}" is a ${parent.kind}, which cannot hold nodes; parents must be ${listOf(containerKinds)} nodes`,

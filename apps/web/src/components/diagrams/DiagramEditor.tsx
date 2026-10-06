@@ -26,6 +26,7 @@ import { createDiagramApi, diagramSyncEvents } from "./diagramApi";
 import { DiagramSocket, parseDocumentRecord, type DiagramSaveState } from "./diagramSocket";
 import { diagramHostClientId, registerDiagramHost, type MountedDiagramHost } from "./diagramHosts";
 import { rehearseDiagramChanges, validateDiagramBatch } from "./diagramBatchPreflight";
+import { composeOnHost } from "./diagramHostCompose";
 import "tldraw/tldraw.css";
 
 const assetUrls = getAssetUrlsByImport();
@@ -384,10 +385,14 @@ function MountedDiagramEditor(props: DiagramEditorProps & { onAdoptionLost: () =
         await socket.waitUntilSaved();
         requireSafe();
         const records = editor.store.serialize("document");
-        // Loaded on first compose so the pipeline and ELK stay out of the editor chunk.
-        const { compose } = await import("@t3tools/diagram-compose/compose");
         const theme = editor.getCurrentTheme();
-        return compose(request, Object.values(records), {
+        return composeOnHost(request, Object.values(records), {
+          fontsReady: async () => {
+            const faces = [theme.fonts.sans?.faces, theme.fonts.draw?.faces].flatMap(
+              (items) => items ?? [],
+            );
+            await Promise.all(faces.map((face) => editor.fonts.ensureFontIsLoaded(face)));
+          },
           measureText: (text, font) => {
             const { w, h } = editor.textMeasure.measureText(text, {
               fontStyle: "normal",
@@ -402,7 +407,6 @@ function MountedDiagramEditor(props: DiagramEditorProps & { onAdoptionLost: () =
           },
           rehearse: (puts, deletes) =>
             new Map(Object.entries(rehearseDiagramChanges(editor, records, puts, deletes))),
-          parseMermaid: async (source) => (await import("./mermaidSpec")).mermaidToSpec(source),
         });
       },
     };
