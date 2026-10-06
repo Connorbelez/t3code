@@ -1,5 +1,16 @@
 import * as Schema from "effect/Schema";
-import { DiagramId, DiagramScope, DiagramStructure, DiagramRevision } from "./diagrams.ts";
+import {
+  DIAGRAM_ANNOTATION_MAX_IMAGES,
+  DiagramAnnotationImage,
+  DiagramAnnotations,
+  DiagramId,
+  DiagramRecordId,
+  DiagramResolvedAnnotation,
+  DiagramRevision,
+  DiagramScope,
+  DiagramStructure,
+  diagramAnnotationCaptureIssues,
+} from "./diagrams.ts";
 
 import {
   EnvironmentId,
@@ -31,6 +42,7 @@ export const COMPOSER_CONTEXT_KINDS = [
   "skill",
   "thread",
   "diagram",
+  "diagram-annotations",
 ] as const;
 export type KnownComposerContextKind = (typeof COMPOSER_CONTEXT_KINDS)[number];
 
@@ -251,6 +263,49 @@ export const DiagramContextRecord = Schema.Struct({
 });
 export type DiagramContextRecord = typeof DiagramContextRecord.Type;
 
+/** The frozen send unit: one revision, where each target was, and the numbered images. */
+export const DiagramAnnotationsCapture = Schema.Struct({
+  revision: DiagramRevision,
+  resolved: Schema.Array(DiagramResolvedAnnotation),
+  /** Each image travels as an image record in the same message, bound by `contextId`. */
+  images: Schema.Array(
+    Schema.Struct({ ...DiagramAnnotationImage.fields, contextId: ComposerContextId }),
+  ).check(Schema.isMinLength(1), Schema.isMaxLength(DIAGRAM_ANNOTATION_MAX_IMAGES)),
+  structure: DiagramStructure,
+});
+export type DiagramAnnotationsCapture = typeof DiagramAnnotationsCapture.Type;
+
+/**
+ * Numbered comments on one diagram page. Drafts hold only `annotations`; preparing a send adds
+ * `capture`, and anything that turns a sent record back into work removes it again.
+ */
+export const DiagramAnnotationsContextRecord = Schema.Struct({
+  ...recordBase,
+  kind: Schema.Literal("diagram-annotations"),
+  payload: Schema.Struct({
+    environmentId: EnvironmentId,
+    projectId: ProjectId,
+    diagramId: DiagramId,
+    pageId: DiagramRecordId,
+    annotations: DiagramAnnotations,
+    capture: Schema.optional(DiagramAnnotationsCapture),
+  }).check(
+    Schema.makeFilter(
+      (payload) =>
+        JSON.stringify(payload).length <= 64_000 &&
+        (payload.capture === undefined ||
+          (diagramAnnotationCaptureIssues({ ...payload.capture, annotations: payload.annotations })
+            .length === 0 &&
+            new Set(payload.capture.images.map((image) => image.contextId)).size ===
+              payload.capture.images.length)),
+    ),
+  ),
+});
+export type DiagramAnnotationsContextRecord = typeof DiagramAnnotationsContextRecord.Type;
+export type CapturedDiagramAnnotationsRecord = DiagramAnnotationsContextRecord & {
+  readonly payload: { readonly capture: DiagramAnnotationsCapture };
+};
+
 /**
  * Catch-all for kinds this build does not know. Known discriminators are excluded so a
  * malformed known record fails its own schema instead of sliding through unchecked.
@@ -283,6 +338,7 @@ export const KnownComposerContextRecord = Schema.Union([
   SkillContextRecord,
   ThreadContextRecord,
   DiagramContextRecord,
+  DiagramAnnotationsContextRecord,
 ]);
 export type KnownComposerContextRecord = typeof KnownComposerContextRecord.Type;
 
@@ -291,6 +347,25 @@ export const ComposerContextRecord = Schema.Union([
   UnknownContextRecord,
 ]);
 export type ComposerContextRecord = typeof ComposerContextRecord.Type;
+
+const KNOWN_KINDS: ReadonlySet<string> = new Set(COMPOSER_CONTEXT_KINDS);
+
+/** Unknown records cannot carry a known kind, so the kind alone tells them apart. */
+export function isKnownComposerContextRecord(
+  record: ComposerContextRecord,
+): record is KnownComposerContextRecord {
+  return KNOWN_KINDS.has(record.kind);
+}
+
+/** Every annotation number in a message names one comment, across all of its pages. */
+function hasDistinctAnnotationNumbers(records: ReadonlyArray<ComposerContextRecord>): boolean {
+  const numbers = records.flatMap((record) =>
+    isKnownComposerContextRecord(record) && record.kind === "diagram-annotations"
+      ? record.payload.annotations.map((annotation) => annotation.number)
+      : [],
+  );
+  return new Set(numbers).size === numbers.length;
+}
 
 export const COMPOSER_CONTEXT_MAX_RECORDS = 200;
 const COMPOSER_CONTEXT_MAX_SERIALIZED_CHARS = 16_000_000;
@@ -314,6 +389,7 @@ export const OrchestrationMessageContext = Schema.Struct({
       Schema.makeFilter(
         (records) => new Set(records.map((record) => record.contextId)).size === records.length,
       ),
+      Schema.makeFilter(hasDistinctAnnotationNumbers),
     ),
 });
 export type OrchestrationMessageContext = typeof OrchestrationMessageContext.Type;

@@ -424,6 +424,7 @@ export const WS_METHODS = {
   diagramsReceipt: "diagrams.receipt",
   diagramsCapture: "diagrams.capture",
   diagramsPrepareContext: "diagrams.prepareContext",
+  diagramsPrepareAnnotations: "diagrams.prepareAnnotations",
   diagramsImport: "diagrams.import",
   diagramsExport: "diagrams.export",
   diagramsCount: "diagrams.count",
@@ -1495,6 +1496,12 @@ const WsDiagramsPrepareContextRpc = Rpc.make(WS_METHODS.diagramsPrepareContext, 
   error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
 });
 
+const WsDiagramsPrepareAnnotationsRpc = Rpc.make(WS_METHODS.diagramsPrepareAnnotations, {
+  payload: Diagram.DiagramPrepareAnnotationsInput,
+  success: Diagram.DiagramPreparedAnnotations,
+  error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
+});
+
 const WsDiagramsImportRpc = Rpc.make(WS_METHODS.diagramsImport, {
   payload: Diagram.DiagramImportInput,
   success: Diagram.DiagramMetadata,
@@ -2035,6 +2042,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsDiagramsReceiptRpc,
   WsDiagramsCaptureRpc,
   WsDiagramsPrepareContextRpc,
+  WsDiagramsPrepareAnnotationsRpc,
   WsDiagramsImportRpc,
   WsDiagramsExportRpc,
   WsDiagramsCountRpc,

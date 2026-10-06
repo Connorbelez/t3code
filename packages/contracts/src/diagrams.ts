@@ -259,9 +259,166 @@ export const DiagramPreparedContext = Schema.Struct({
 });
 export type DiagramPreparedContext = typeof DiagramPreparedContext.Type;
 
+export const DIAGRAM_ANNOTATIONS_MAX_PER_PAGE = 30;
+export const DIAGRAM_ANNOTATION_COMMENT_MAX_CHARS = 2_000;
+export const DIAGRAM_ANNOTATION_MAX_TARGET_SHAPES = DIAGRAM_MAX_SELECTED_MEMBERS;
+/** Comments are never truncated on their way to the agent, so a page's set must fit every budget. */
+export const DIAGRAM_ANNOTATIONS_MAX_JSON_CHARS = 24_000;
+/** One overview plus focused captures for targets the overview shrinks below readable size. */
+export const DIAGRAM_ANNOTATION_MAX_IMAGES = 5;
+
+export const DiagramAnnotationId = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(64),
+  Schema.isPattern(/^[a-z0-9_-]+$/i),
+).pipe(Schema.brand("DiagramAnnotationId"));
+export type DiagramAnnotationId = typeof DiagramAnnotationId.Type;
+
+/** The label drawn on a badge. Allocated per message draft, never derived from an array index. */
+export const DiagramAnnotationNumber = PositiveInt.check(Schema.isLessThanOrEqualTo(999));
+
+export const DiagramPoint = Schema.Struct({
+  x: Schema.Number.check(Schema.isFinite()),
+  y: Schema.Number.check(Schema.isFinite()),
+});
+export type DiagramPoint = typeof DiagramPoint.Type;
+
+/**
+ * Shapes follow their records until capture; a region keeps its page rectangle and may cover
+ * empty space. Regions are normalized before they reach this schema.
+ */
+export const DiagramAnnotationTarget = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("shapes"),
+    shapeIds: Schema.Array(DiagramRecordId).check(
+      Schema.isMinLength(1),
+      Schema.isMaxLength(DIAGRAM_ANNOTATION_MAX_TARGET_SHAPES),
+    ),
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("region"),
+    bounds: DiagramBounds.check(Schema.makeFilter((bounds) => bounds.w > 0 && bounds.h > 0)),
+  }),
+]);
+export type DiagramAnnotationTarget = typeof DiagramAnnotationTarget.Type;
+
+/** What the user wrote. `id` governs edits and deletion; `number` labels the badge. */
+export const DiagramAnnotation = Schema.Struct({
+  id: DiagramAnnotationId,
+  number: DiagramAnnotationNumber,
+  comment: TrimmedNonEmptyString.check(Schema.isMaxLength(DIAGRAM_ANNOTATION_COMMENT_MAX_CHARS)),
+  target: DiagramAnnotationTarget,
+});
+export type DiagramAnnotation = typeof DiagramAnnotation.Type;
+
+const isDistinct = <A>(items: ReadonlyArray<A>, key: (item: A) => unknown) =>
+  new Set(items.map(key)).size === items.length;
+
+/** One page's annotations. */
+export const DiagramAnnotations = Schema.Array(DiagramAnnotation).check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(DIAGRAM_ANNOTATIONS_MAX_PER_PAGE),
+  Schema.makeFilter(
+    (items) =>
+      isDistinct(items, (item) => item.id) &&
+      isDistinct(items, (item) => item.number) &&
+      JSON.stringify(items).length <= DIAGRAM_ANNOTATIONS_MAX_JSON_CHARS,
+  ),
+);
+export type DiagramAnnotations = typeof DiagramAnnotations.Type;
+
+/** Where a target was at the captured revision, and the page point its badge is centered on. */
+export const DiagramResolvedAnnotation = Schema.Struct({
+  id: DiagramAnnotationId,
+  bounds: DiagramBounds,
+  marker: DiagramPoint,
+});
+export type DiagramResolvedAnnotation = typeof DiagramResolvedAnnotation.Type;
+
+/** One rendered image. The overview comes first and shows every annotation. */
+export const DiagramAnnotationImage = Schema.Struct({
+  role: Schema.Literals(["overview", "detail"]),
+  annotationIds: Schema.Array(DiagramAnnotationId).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(DIAGRAM_ANNOTATIONS_MAX_PER_PAGE),
+  ),
+  bounds: DiagramBounds,
+  width: PositiveInt,
+  height: PositiveInt,
+});
+export type DiagramAnnotationImage = typeof DiagramAnnotationImage.Type;
+
+/** Why resolved geometry and images do not describe exactly these annotations; empty when they do. */
+export function diagramAnnotationCaptureIssues(input: {
+  readonly annotations: ReadonlyArray<{ readonly id: string }>;
+  readonly resolved: ReadonlyArray<{ readonly id: string }>;
+  readonly images: ReadonlyArray<{
+    readonly role: "overview" | "detail";
+    readonly annotationIds: ReadonlyArray<string>;
+  }>;
+}): string[] {
+  const ids = input.annotations.map((annotation) => annotation.id);
+  const known = new Set(ids);
+  const issues: string[] = [];
+  if (input.resolved.map((entry) => entry.id).join("\n") !== ids.join("\n")) {
+    issues.push("resolved geometry does not match the annotations");
+  }
+  const [overview, ...details] = input.images;
+  if (!overview || overview.role !== "overview") issues.push("the first image is not the overview");
+  else if (!ids.every((id) => overview.annotationIds.includes(id))) {
+    issues.push("the overview does not show every annotation");
+  }
+  if (details.some((image) => image.role !== "detail")) issues.push("only one overview is allowed");
+  if (input.images.some((image) => image.annotationIds.some((id) => !known.has(id)))) {
+    issues.push("an image names an unknown annotation");
+  }
+  return issues;
+}
+
+/** What the server sends a host with operation `annotate`. */
+export const DiagramHostAnnotateInput = Schema.Struct({
+  pageId: DiagramRecordId,
+  revision: DiagramRevision,
+  annotations: DiagramAnnotations,
+});
+export type DiagramHostAnnotateInput = typeof DiagramHostAnnotateInput.Type;
+
+/** One snapshot: the echoed annotations, their geometry and every image describe `revision`. */
+export const DiagramAnnotatedCapture = Schema.Struct({
+  diagramId: DiagramId,
+  revision: DiagramRevision,
+  pageId: DiagramRecordId,
+  annotations: DiagramAnnotations,
+  resolved: Schema.Array(DiagramResolvedAnnotation),
+  images: Schema.Array(
+    Schema.Struct({
+      ...DiagramAnnotationImage.fields,
+      mimeType: Schema.Literal("image/png"),
+      base64: Schema.String.check(Schema.isMaxLength(16 * 1024 * 1024)),
+    }),
+  ).check(Schema.isMinLength(1), Schema.isMaxLength(DIAGRAM_ANNOTATION_MAX_IMAGES)),
+}).check(Schema.makeFilter((capture) => diagramAnnotationCaptureIssues(capture).length === 0));
+export type DiagramAnnotatedCapture = typeof DiagramAnnotatedCapture.Type;
+
+export const DiagramPrepareAnnotationsInput = Schema.Struct({
+  ...DiagramTarget.fields,
+  pageId: DiagramRecordId,
+  annotations: DiagramAnnotations,
+});
+export type DiagramPrepareAnnotationsInput = typeof DiagramPrepareAnnotationsInput.Type;
+
+/** There is no unavailable variant: an annotated send without its numbered image is never valid. */
+export const DiagramPreparedAnnotations = Schema.Struct({
+  diagram: DiagramMetadata,
+  structure: DiagramStructure,
+  capture: DiagramAnnotatedCapture,
+});
+export type DiagramPreparedAnnotations = typeof DiagramPreparedAnnotations.Type;
+
 export const DiagramCapabilities = Schema.Struct({
   protocolVersion: Schema.Literal(DIAGRAM_PROTOCOL_VERSION),
   sdkVersion: Schema.Literal(DIAGRAM_SDK_VERSION),
+  /** The server prepares annotated context. Older servers omit it and clients hide annotating. */
+  annotations: Schema.optionalKey(Schema.Boolean),
 });
 
 /** Bounded detail an agent can act on: path-addressed spec issues or conflicting member keys. */
@@ -340,7 +497,12 @@ export const DiagramSyncSendInput = Schema.Struct({
 });
 export type DiagramSyncSendInput = typeof DiagramSyncSendInput.Type;
 
-export const DiagramHostOperation = Schema.Literals(["prepare-batch", "capture", "compose"]);
+export const DiagramHostOperation = Schema.Literals([
+  "prepare-batch",
+  "capture",
+  "compose",
+  "annotate",
+]);
 export type DiagramHostOperation = typeof DiagramHostOperation.Type;
 /** Operations a host supports when it advertises none, as clients before advertisement did. */
 export const DIAGRAM_LEGACY_HOST_OPERATIONS: readonly DiagramHostOperation[] = [

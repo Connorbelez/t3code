@@ -6,6 +6,7 @@ import {
   COMPOSER_CONTEXT_KINDS,
   ComposerContextRecord,
   OrchestrationMessageContext,
+  isKnownComposerContextRecord,
 } from "./composerContext.ts";
 import {
   OrchestrationV2Command,
@@ -18,6 +19,57 @@ const decodeMessage = Schema.decodeUnknownSync(OrchestrationV2ConversationMessag
 const decodeCommand = Schema.decodeUnknownSync(OrchestrationV2Command);
 
 const base = { version: 1, contextId: "ctx_1" } as const;
+
+const annotationsPayload = {
+  environmentId: "environment-1",
+  projectId: "project-1",
+  diagramId: "00000000-0000-4000-8000-000000000001",
+  pageId: "page:one",
+  annotations: [
+    {
+      id: "ann_1",
+      number: 1,
+      comment: "Rename this to API Gateway",
+      target: { kind: "shapes", shapeIds: ["shape:gateway"] },
+    },
+    {
+      id: "ann_3",
+      number: 3,
+      comment: "Leave room here",
+      target: { kind: "region", bounds: { x: -200, y: -100, w: 180, h: 120 } },
+    },
+  ],
+  capture: {
+    revision: 42,
+    resolved: [
+      { id: "ann_1", bounds: { x: 0, y: 0, w: 160, h: 80 }, marker: { x: 0, y: 0 } },
+      {
+        id: "ann_3",
+        bounds: { x: -200, y: -100, w: 180, h: 120 },
+        marker: { x: -200, y: -100 },
+      },
+    ],
+    images: [
+      {
+        contextId: "image_overview",
+        role: "overview",
+        annotationIds: ["ann_1", "ann_3"],
+        bounds: { x: -248, y: -148, w: 456, h: 276 },
+        width: 456,
+        height: 276,
+      },
+    ],
+    structure: {
+      revision: 42,
+      pages: [{ id: "page:one", name: "Page 1", shapeCount: 1 }],
+      compositions: [],
+      shapes: [],
+      bindings: [],
+      totalShapes: 1,
+      truncated: false,
+    },
+  },
+};
 
 const knownRecords: Record<(typeof COMPOSER_CONTEXT_KINDS)[number], Record<string, unknown>> = {
   image: {
@@ -129,7 +181,18 @@ const knownRecords: Record<(typeof COMPOSER_CONTEXT_KINDS)[number], Record<strin
       scope: { kind: "diagram", pageId: "page:one" },
     },
   },
+  "diagram-annotations": {
+    ...base,
+    kind: "diagram-annotations",
+    label: "Architecture comments",
+    payload: annotationsPayload,
+  },
 };
+
+const withPayload = (patch: Record<string, unknown>) => ({
+  ...knownRecords["diagram-annotations"],
+  payload: { ...annotationsPayload, ...patch },
+});
 
 describe("ComposerContextRecord", () => {
   it.each(COMPOSER_CONTEXT_KINDS)("round-trips a %s record", (kind) => {
@@ -183,6 +246,111 @@ describe("ComposerContextRecord", () => {
     );
     expect(Option.isNone(decodeRecord({ ...knownRecords.skill, version: 2 }))).toBe(true);
     expect(Option.isNone(decodeRecord({ ...knownRecords.skill, kind: "Bad Kind" }))).toBe(true);
+  });
+});
+
+describe("DiagramAnnotationsContextRecord", () => {
+  const decodes = (record: Record<string, unknown>) => Option.isSome(decodeRecord(record));
+  const [first, second] = annotationsPayload.annotations;
+
+  it("keeps a draft without a capture", () => {
+    const { capture: _capture, ...draft } = annotationsPayload;
+    const record = { ...knownRecords["diagram-annotations"], payload: draft };
+    expect(Option.getOrThrow(decodeRecord(record))).toEqual(record);
+  });
+
+  it("rejects ambiguous or empty comments", () => {
+    expect(decodes(withPayload({ annotations: [first, { ...second, number: 1 }] }))).toBe(false);
+    expect(decodes(withPayload({ annotations: [first, { ...second, id: "ann_1" }] }))).toBe(false);
+    expect(decodes(withPayload({ annotations: [] }))).toBe(false);
+    expect(decodes(withPayload({ annotations: [{ ...first, comment: "   " }] }))).toBe(false);
+  });
+
+  it("rejects a region without area", () => {
+    const flat = { ...second, target: { kind: "region", bounds: { x: 0, y: 0, w: 40, h: 0 } } };
+    expect(decodes(withPayload({ annotations: [first, flat] }))).toBe(false);
+  });
+
+  it("bounds a page's comments so none is ever truncated", () => {
+    const annotation = (index: number, comment: string) => ({
+      id: `ann_${index}`,
+      number: index + 1,
+      comment,
+      target: { kind: "shapes", shapeIds: ["shape:gateway"] },
+    });
+    const { capture: _capture, ...draft } = annotationsPayload;
+    const set = (comment: string) =>
+      Array.from({ length: 12 }, (_, index) => annotation(index, comment));
+    expect(
+      decodes({ ...withPayload({}), payload: { ...draft, annotations: set("é".repeat(1_900)) } }),
+    ).toBe(true);
+    expect(
+      decodes({ ...withPayload({}), payload: { ...draft, annotations: set("é".repeat(2_000)) } }),
+    ).toBe(false);
+    expect(decodes(withPayload({ annotations: [annotation(0, "x".repeat(2_001))] }))).toBe(false);
+  });
+
+  it("rejects a capture that does not describe exactly these comments", () => {
+    const capture = annotationsPayload.capture;
+    const [overview] = capture.images;
+    expect(
+      decodes(withPayload({ capture: { ...capture, resolved: capture.resolved.slice(0, 1) } })),
+    ).toBe(false);
+    expect(
+      decodes(
+        withPayload({
+          capture: { ...capture, images: [{ ...overview, annotationIds: ["ann_1"] }] },
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      decodes(withPayload({ capture: { ...capture, images: [{ ...overview, role: "detail" }] } })),
+    ).toBe(false);
+    const detail = {
+      ...overview,
+      role: "detail",
+      annotationIds: ["ann_9"],
+      contextId: "image_detail",
+    };
+    expect(decodes(withPayload({ capture: { ...capture, images: [overview, detail] } }))).toBe(
+      false,
+    );
+    const duplicate = { ...overview, role: "detail", annotationIds: ["ann_3"] };
+    expect(decodes(withPayload({ capture: { ...capture, images: [overview, duplicate] } }))).toBe(
+      false,
+    );
+  });
+
+  it("tells known payload kinds apart from unknown ones", () => {
+    const known = Option.getOrThrow(decodeRecord(knownRecords["diagram-annotations"]));
+    const unknown = Option.getOrThrow(
+      decodeRecord({ ...base, kind: "future-thing", label: "Future", payload: {} }),
+    );
+    expect([isKnownComposerContextRecord(known), isKnownComposerContextRecord(unknown)]).toEqual([
+      true,
+      false,
+    ]);
+  });
+
+  it("never lets one number name two comments in a message", () => {
+    const otherPage = {
+      ...knownRecords["diagram-annotations"],
+      contextId: "ctx_2",
+      payload: { ...annotationsPayload, pageId: "page:two", capture: undefined },
+    };
+    const renumbered = {
+      ...otherPage,
+      payload: {
+        ...otherPage.payload,
+        annotations: [{ ...first, id: "ann_5", number: 5 }],
+      },
+    };
+    const { capture: _capture, ...draft } = annotationsPayload;
+    const records = [{ ...knownRecords["diagram-annotations"], payload: draft }];
+    expect(() => decodeContext({ version: 1, records: [...records, otherPage] })).toThrow();
+    expect(decodeContext({ version: 1, records: [...records, renumbered] }).records).toHaveLength(
+      2,
+    );
   });
 });
 
