@@ -406,7 +406,15 @@ export const DiagramMetadataChange = Schema.Struct({
 });
 export type DiagramMetadataChange = typeof DiagramMetadataChange.Type;
 
-export const DIAGRAM_KITS = ["flow", "state", "uml-class", "er", "c4", "architecture"] as const;
+export const DIAGRAM_KITS = [
+  "flow",
+  "state",
+  "uml-class",
+  "er",
+  "c4",
+  "architecture",
+  "wireframe",
+] as const;
 export const DiagramKit = Schema.Literals(DIAGRAM_KITS);
 export type DiagramKit = typeof DiagramKit.Type;
 
@@ -566,16 +574,23 @@ export const DiagramKitReference = Schema.Struct({
   kit: DiagramKit,
   defaultKind: Schema.String,
   nodeKinds: Schema.Array(Schema.Struct({ kind: Schema.String, description: Schema.String })),
-  defaultEdgeKind: Schema.String,
+  /** Null for kits without edges, such as wireframes. */
+  defaultEdgeKind: Schema.NullOr(Schema.String),
   edgeKinds: Schema.Array(Schema.Struct({ kind: Schema.String, description: Schema.String })),
   guidance: Schema.String,
   example: DiagramSpec,
 });
 export type DiagramKitReference = typeof DiagramKitReference.Type;
 
-/** A member as compose last wrote it, in full spec form. `text` is its current text once edited. */
+/**
+ * A member as compose last wrote it, in full spec form. Members inside a node, such as wireframe
+ * elements, read back keyed `node.element`. `text` is its current text once edited.
+ */
 export const DiagramCompositionMember = Schema.Struct({
-  spec: Schema.Union([DiagramSpecEdgeObject, DiagramSpecNode]),
+  spec: Schema.Union([
+    DiagramSpecEdgeObject,
+    Schema.Struct({ ...DiagramSpecNode.fields, key: DiagramEdgeEndpoint }),
+  ]),
   edited: Schema.Boolean,
   text: Schema.optional(Schema.String.check(Schema.isMaxLength(2000))),
 });

@@ -13,6 +13,7 @@ import { compareIndex, indexRecords, pageBox, type RecordIndex, shapeOf } from "
 import { emit, emitRelease } from "./emit.ts";
 import {
   frameShapeId,
+  isContent,
   memberBindingId,
   memberShapeId,
   type StoredEdge,
@@ -20,7 +21,7 @@ import {
   type StoredNode,
 } from "./identity.ts";
 import { indexBetween } from "./indexKeys.ts";
-import { partsOf } from "./kit.ts";
+import { type Kit, partsOf } from "./kit.ts";
 import { type MeasureText, place } from "./layout.ts";
 import {
   type Decision,
@@ -93,10 +94,16 @@ export async function compose(
         )
       : planPatch(operation, compositions);
   const drawn = resulting(spec, decisions);
-  if (operation.kind === "patch") checkSize(drawn);
+  if (operation.kind === "patch") checkSize(spec.kit, presentMembers(decisions));
   const counts = countsOf(decisions);
   const ledger = nextLedger(decisions);
-  const epoch = current?.epoch ?? freeEpoch(drawn, index);
+  const stored = new Map(current?.meta.arrangements ?? []);
+  // A patch leaves unlisted screens' arrangements as they were.
+  const arrangements = ledger.flatMap(([key]): [string, string][] => {
+    const arrangement = spec.contents.get(key)?.arrangement ?? stored.get(key);
+    return arrangement === undefined ? [] : [[key, arrangement]];
+  });
+  const epoch = current?.epoch ?? freeEpoch(spec.kit, spec.key, presentMembers(decisions), index);
   if (
     current &&
     !operation.relayout &&
@@ -104,11 +111,13 @@ export async function compose(
     current.meta.kit === spec.kit.name &&
     current.meta.title === spec.title &&
     current.meta.direction === spec.direction &&
-    isEqualJson(current.meta.ledger, ledger)
+    isEqualJson(current.meta.ledger, ledger) &&
+    isEqualJson(current.meta.arrangements ?? [], arrangements)
   ) {
     return { changes: null, counts, overlaps: overlapsOf(drawn, epoch, index) };
   }
 
+  const arranged = arrangedScreens(spec, decisions, current, operation.relayout);
   const placement = await place(
     drawn,
     decisions,
@@ -116,6 +125,7 @@ export async function compose(
     index,
     ports.measureText,
     operation.relayout,
+    arranged,
   );
   const { puts, deletes } = emit({
     spec: drawn,
@@ -123,6 +133,8 @@ export async function compose(
     current,
     decisions,
     ledger,
+    arrangements,
+    arranged,
     placement,
     index,
   });
@@ -147,7 +159,11 @@ function planReplace(
   compositions: ReadonlyMap<string, CurrentComposition>,
 ): Plan {
   const spec = parseSpec(request);
-  checkSize(spec);
+  checkSize(spec.kit, [
+    ...spec.nodes,
+    ...Array.from(spec.contents.values()).flatMap(({ members }) => members),
+    ...spec.edges,
+  ]);
   const current = compositions.get(spec.key) ?? null;
   return { spec, current, decisions: decideRows(replaceRows(draftsOf(spec), current)) };
 }
@@ -175,10 +191,16 @@ function planPatch(
     else if (stored.role === "node") remaining.set(memberKey, stored);
   }
   for (const memberKey of [...removed, ...listed.keys()]) remaining.delete(memberKey);
+  // A listed node brings its whole contents and a removed one takes them along.
+  for (const [memberKey, node] of remaining) {
+    if (node && isContent(node) && (removed.has(node.parent) || listed.has(node.parent))) {
+      remaining.delete(memberKey);
+    }
+  }
   const spec = parseSpec(operation.spec, remaining);
   // A removed boundary must not leave children behind, as a replace spec could not either.
   const orphaned = Array.from(remaining.values()).flatMap((node) =>
-    node?.parent != null && removed.has(node.parent) ? [node] : [],
+    node?.parent != null && removed.has(node.parent) && !isContent(node) ? [node] : [],
   );
   if (orphaned.length > 0) {
     throw invalidSpec(
@@ -213,25 +235,32 @@ function planPatch(
   };
 }
 
-/** The members on the canvas once the decisions apply, in member order. Layout, emit and overlaps see only these. */
-function resulting(spec: ComposeSpec, decisions: readonly Decision[]): ComposeSpec {
-  const members = decisions.flatMap((decision): StoredMember[] => {
+/** The members on the canvas once the decisions apply, in member order. */
+function presentMembers(decisions: readonly Decision[]): StoredMember[] {
+  return decisions.flatMap((decision): StoredMember[] => {
     if (decision.do === "create" || decision.do === "overwrite") return [decision.draft.spec];
     return decision.do === "keep" && decision.current ? [decision.current.stored] : [];
   });
+}
+
+/**
+ * The nodes and edges on the canvas once the decisions apply. Layout, emit and overlaps see only
+ * these; screen contents stay in `contents`.
+ */
+function resulting(spec: ComposeSpec, decisions: readonly Decision[]): ComposeSpec {
+  const members = presentMembers(decisions);
   return {
     ...spec,
-    nodes: members.filter((member): member is StoredNode => member.role === "node"),
+    nodes: members.filter(
+      (member): member is StoredNode => member.role === "node" && !isContent(member),
+    ),
     edges: members.filter((member): member is StoredEdge => member.role === "edge"),
   };
 }
 
 /** The frame plus every part of every member, before anything is measured or laid out. */
-function checkSize(spec: ComposeSpec): void {
-  const recordCount = [...spec.nodes, ...spec.edges].reduce(
-    (count, member) => count + partsOf(spec.kit, member).length,
-    1,
-  );
+function checkSize(kit: Kit, members: readonly StoredMember[]): void {
+  const recordCount = members.reduce((count, member) => count + partsOf(kit, member).length, 1);
   if (recordCount > DIAGRAM_MAX_BATCH_RECORDS) throw tooLarge(recordCount);
 }
 
@@ -240,6 +269,40 @@ function invalidSpec(path: string, messages: readonly string[]): DiagramOperatio
     code: "invalid-spec",
     details: { issues: messages.map((message) => ({ path, message })) },
   });
+}
+
+/**
+ * Screens whose contents lay out again: order is meaning, so any change inside a screen, or to how
+ * it is arranged, relays out all of it. Screens nothing touched keep what humans did inside them.
+ */
+function arrangedScreens(
+  spec: ComposeSpec,
+  decisions: readonly Decision[],
+  current: CurrentComposition | null,
+  relayout: boolean,
+): Set<string> {
+  const byKey = new Map(decisions.map((decision) => [decision.key, decision]));
+  const stored = new Map(current?.meta.arrangements ?? []);
+  const written = (key: string) => {
+    const decision = byKey.get(key);
+    return decision?.do === "create" || decision?.do === "overwrite";
+  };
+  const arranged = new Set<string>();
+  for (const [key, contents] of spec.contents) {
+    const screen = byKey.get(key);
+    const present = written(key) || (screen?.do === "keep" && screen.current !== null);
+    // A dropped element changes the arrangement, and dropped screen parts change the screen.
+    if (
+      present &&
+      (relayout ||
+        written(key) ||
+        stored.get(key) !== contents.arrangement ||
+        contents.members.some((member) => written(member.key)))
+    ) {
+      arranged.add(key);
+    }
+  }
+  return arranged;
 }
 
 const MAX_OVERLAPS = 50;
@@ -290,17 +353,21 @@ function countsOf(decisions: readonly Decision[]): DiagramComposeCounts {
  * The first epoch none of whose IDs exist. Detached shapes keep their IDs, so composing that key
  * again starts fresh rather than writing over them, even after their frame is deleted.
  */
-function freeEpoch(spec: ComposeSpec, index: RecordIndex): number {
-  const members = [...spec.nodes, ...spec.edges];
+function freeEpoch(
+  kit: Kit,
+  key: string,
+  members: readonly StoredMember[],
+  index: RecordIndex,
+): number {
   for (let epoch = 0; ; epoch++) {
     const taken =
-      index.has(frameShapeId(spec.key, epoch)) ||
+      index.has(frameShapeId(key, epoch)) ||
       members.some((member) =>
-        partsOf(spec.kit, member).some((part) =>
+        partsOf(kit, member).some((part) =>
           index.has(
             part === "start" || part === "end"
-              ? memberBindingId(spec.key, epoch, member.key, part)
-              : memberShapeId(spec.key, epoch, member.key, part),
+              ? memberBindingId(key, epoch, member.key, part)
+              : memberShapeId(key, epoch, member.key, part),
           ),
         ),
       );

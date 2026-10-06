@@ -418,6 +418,75 @@ const system = {
     ],
   },
 } satisfies DiagramComposeRequest;
+// Every element, a phone with chrome, a web page with a browser bar, and a modal.
+const feed = [
+  { key: "top", kind: "navBar", label: "Feed" },
+  {
+    kind: "stack",
+    size: "fill",
+    padding: 16,
+    children: [
+      { key: "title", kind: "heading", label: "Today" },
+      { key: "search", kind: "input", label: "Search" },
+      {
+        key: "post",
+        kind: "card",
+        children: [
+          {
+            kind: "row",
+            children: [
+              { key: "me", kind: "avatar" },
+              { key: "name", kind: "text", label: "Ada wrote", size: "fill" },
+              { key: "follow", kind: "toggle" },
+            ],
+          },
+          { key: "photo", kind: "image", label: "Photo" },
+          { key: "rule", kind: "divider" },
+          { key: "like", kind: "button", label: "Like" },
+        ],
+      },
+      { key: "older", kind: "listItem", label: "Yesterday" },
+    ],
+  },
+  { key: "tabs", kind: "tabBar", label: "Home · Search · Me" },
+];
+const wireframes = (children: readonly unknown[]) =>
+  ({
+    spec: {
+      kit: "wireframe",
+      key: "screens",
+      title: "Screens",
+      nodes: [
+        {
+          key: "feed",
+          label: "Feed",
+          body: {
+            chrome: true,
+            padding: 0,
+            gap: 0,
+            children,
+          },
+        },
+        {
+          key: "site",
+          body: { device: "web", chrome: true, children: [{ key: "hi", kind: "text" }] },
+        },
+        {
+          key: "delete",
+          label: "Delete post?",
+          body: {
+            modal: true,
+            children: [
+              { key: "warning", kind: "text", label: "This cannot be undone." },
+              { key: "confirm", kind: "button", label: "Delete" },
+            ],
+          },
+        },
+        { key: "why", kind: "note", label: "Swipe to refresh", body: { on: "feed" } },
+      ],
+    },
+  }) satisfies DiagramComposeRequest;
+const screens = wireframes(feed);
 function composeInto(editor: Editor, request: DiagramComposeRequest = checkout) {
   const records = editor.store.serialize("document");
   return compose(request, Object.values(records), {
@@ -500,6 +569,7 @@ describe("composed batches", () => {
     ["an ER diagram with notes", shop, "Shop"],
     ["a C4 component view with nested boundaries", containers, "Banking components"],
     ["an architecture diagram with nested zones", system, "System"],
+    ["wireframes with chrome and a modal", screens, "Screens"],
   ])("pass the preflight for %s and recompose to no change", async (_, request, title) => {
     const editor = mount();
     addLooseShapes(editor);
@@ -517,6 +587,19 @@ describe("composed batches", () => {
         ),
     ).toEqual([title]);
     expect((await composeInto(editor, request)).changes).toBeNull();
+  });
+
+  it("pushes a screen's elements down for an inserted one and passes the preflight", async () => {
+    const editor = mount();
+    const first = await composeInto(editor, screens);
+    assert(first.changes, "a new composition must produce changes");
+    applyChanges(editor, first.changes);
+    const inserted = wireframes([{ key: "banner", kind: "image", label: "Banner" }, ...feed]);
+    const { changes } = await composeInto(editor, inserted);
+    assert(changes, "an insertion must produce changes");
+    expect(() => validateDiagramBatch(editor, { requestId: "insert", ...changes })).not.toThrow();
+    applyChanges(editor, changes);
+    expect((await composeInto(editor, inserted)).changes).toBeNull();
   });
 
   it("moves a node between boundaries and absorbs tldraw's reparenting of a human arrow", async () => {

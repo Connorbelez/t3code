@@ -3,7 +3,7 @@ import type { TLParentId } from "@tldraw/tlschema";
 import type { ELK, ElkNode } from "elkjs/lib/elk-api.js";
 
 import { localBox, pageBox, pagesInOrder, type RecordIndex, unionOf } from "./canvas.ts";
-import type { StoredNode } from "./identity.ts";
+import { isContent, type StoredNode } from "./identity.ts";
 import {
   type CompartmentsKind,
   compartmentTexts,
@@ -13,7 +13,8 @@ import {
   type Size,
 } from "./kit.ts";
 import type { Decision } from "./merge.ts";
-import { type CurrentComposition, topShape } from "./membership.ts";
+import { type CurrentComposition, plainText, topShape } from "./membership.ts";
+import { arrangeScreen, screenSize } from "./screens.ts";
 import { listOf, type ComposeSpec } from "./spec.ts";
 
 /** Geometry the pipeline owns: node sizes from measured labels and layered positions from ELK. */
@@ -140,6 +141,9 @@ async function layoutLayered(
     "elk.algorithm": "layered",
     "elk.direction": ELK_DIRECTIONS[direction],
     "elk.randomSeed": "1",
+    // Unconnected nodes share one layer in spec order, so wireframe screens form a row instead
+    // of being packed into rows by aspect ratio.
+    "elk.separateConnectedComponents": "false",
     "elk.edgeRouting": "ORTHOGONAL",
     "elk.spacing.nodeNode": "48",
     "elk.layered.spacing.nodeNodeBetweenLayers": "72",
@@ -208,7 +212,7 @@ export interface Placement {
  * `relayout` lays out every node from scratch, back inside the boundary its spec names. Nodes the
  * spec moves to another boundary are placed like new ones. Each boundary, and the frame, works in
  * its own coordinates and grows to hold what is inside it. ELK loads only when something needs
- * placing.
+ * placing. The contents of each `arranged` screen are laid out again inside it.
  */
 export async function place(
   spec: ComposeSpec,
@@ -217,6 +221,7 @@ export async function place(
   index: RecordIndex,
   measure: MeasureText,
   relayout: boolean,
+  arranged: ReadonlySet<string>,
 ): Promise<Placement> {
   const family = LOOKS[spec.kit.look].font;
   const sizes = new Map<string, Size>();
@@ -226,6 +231,14 @@ export async function place(
   const written = new Set<string>();
   const moved = new Set<string>();
   for (const decision of decisions) {
+    const subject =
+      decision.do === "create" || decision.do === "overwrite"
+        ? decision.draft.spec
+        : decision.do === "keep"
+          ? decision.current?.stored
+          : undefined;
+    // Screen contents are placed by their screen below.
+    if (subject && isContent(subject)) continue;
     if (decision.do === "create" || decision.do === "overwrite") {
       const node = decision.draft.spec;
       if (node.role !== "node") continue;
@@ -242,6 +255,7 @@ export async function place(
         sizes.set(node.key, measured.size);
         rows.set(node.key, measured.rows);
       }
+      if (kind?.shape === "screen") sizes.set(node.key, screenSize(node));
       const stored = decision.do === "overwrite" ? decision.current.stored : null;
       if (stored?.role === "node" && stored.parent !== node.parent) moved.add(node.key);
     }
@@ -375,6 +389,30 @@ export async function place(
     const fit = fitAround(key, BOUNDARY_PADDING);
     if (fit.w > box.w || fit.h > box.h || nodes.has(key) || written.has(key)) {
       nodes.set(key, { ...box, w: Math.max(box.w, fit.w), h: Math.max(box.h, fit.h) });
+    }
+  }
+
+  // Screen contents relay out inside the screen as it will be, wherever a human dragged them.
+  const rewritten = new Set(
+    decisions.flatMap((decision) =>
+      decision.do === "create" || decision.do === "overwrite" ? [decision.key] : [],
+    ),
+  );
+  const textOf = (member: StoredNode) => {
+    if (rewritten.has(member.key)) return member.label;
+    const main = current?.members.get(member.key)?.parts.get("main");
+    return main?.typeName === "shape" && "richText" in main.props
+      ? plainText(main.props.richText)
+      : member.label;
+  };
+  for (const node of spec.nodes) {
+    const contents = spec.contents.get(node.key);
+    const box = boxOf(node.key);
+    if (!contents || !box || !arranged.has(node.key)) continue;
+    const boxes = arrangeScreen({ screen: node, contents, size: box, family, measure, textOf });
+    for (const [key, content] of boxes) {
+      nodes.set(key, content);
+      parents.set(key, node.key);
     }
   }
 

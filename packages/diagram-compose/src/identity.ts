@@ -42,6 +42,18 @@ export type StoredEdge = typeof StoredEdge.Type;
 export type StoredMember = typeof StoredMember.Type;
 
 /**
+ * Contents of a node, such as a wireframe element, keyed `node.element`. Spec keys cannot contain
+ * dots, so only lowering makes these.
+ */
+export function isContent(
+  member: StoredMember,
+): member is StoredNode & { readonly parent: string } {
+  return (
+    member.role === "node" && member.parent !== null && member.key.startsWith(`${member.parent}.`)
+  );
+}
+
+/**
  * Record roles within a member. `main` carries the stored spec and decides whether the member
  * exists. A compartments node adds its `group` and one `c1`, `c2`, … geo per compartment.
  */
@@ -75,6 +87,8 @@ const FrameMeta = Schema.Struct({
   title: Schema.String,
   direction: DiagramLayoutDirection,
   ledger: Schema.Array(Schema.Tuple([Schema.String, Schema.String])),
+  /** Arrangement hash per node with laid-out contents, such as a screen; absent when none. */
+  arrangements: Schema.optional(Schema.Array(Schema.Tuple([Schema.String, Schema.String]))),
 });
 export type FrameMeta = typeof FrameMeta.Type;
 
@@ -138,7 +152,11 @@ function isReadonlyArray(value: object): value is readonly ReadonlyJson[] {
 }
 
 export function specHash(member: StoredMember): string {
-  return hash(stableStringify(member));
+  return hashOf(member);
+}
+
+export function hashOf(value: unknown): string {
+  return hash(stableStringify(value));
 }
 
 const GEOMETRY_PROPS = new Set([

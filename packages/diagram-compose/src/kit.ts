@@ -11,6 +11,8 @@ import type {
   TLDefaultDashStyle,
   TLDefaultFillStyle,
   TLDefaultFontStyle,
+  TLDefaultHorizontalAlignStyle,
+  TLDefaultSizeStyle,
   TLGeoShapeGeoStyle,
 } from "@tldraw/tlschema";
 import * as Schema from "effect/Schema";
@@ -47,6 +49,11 @@ export interface GeoKind extends KindBase {
   readonly labelRoom?: number;
   /** Markers such as initial and final states draw no label. */
   readonly hideLabel?: true;
+  /** Label size, `m` unless set. */
+  readonly size?: TLDefaultSizeStyle;
+  /** Label alignment, centered unless set. */
+  readonly align?: TLDefaultHorizontalAlignStyle;
+  readonly labelColor?: TLDefaultColorStyle;
   /** Draws the body: extra label lines and, for an external element, its style. */
   readonly draw?: (label: string, body: Schema.JsonObject) => GeoDrawing;
 }
@@ -100,7 +107,33 @@ export interface CompartmentsKind extends KindBase {
   readonly compartments: readonly [CompartmentLines, ...CompartmentLines[]];
 }
 
-export type NodeKind = GeoKind | FrameKind | NoteKind | CompartmentsKind;
+/** A device frame titled by the label, holding the elements its body lays out. */
+export interface ScreenKind extends KindBase {
+  readonly shape: "screen";
+  readonly body: BodySchema;
+}
+
+/** A tldraw text shape; it wraps at the width layout gives it. */
+export interface TextKind extends KindBase {
+  readonly shape: "text";
+  readonly size: TLDefaultSizeStyle;
+  readonly color: TLDefaultColorStyle;
+}
+
+/** A straight horizontal tldraw line across the width layout gives it. */
+export interface LineKind extends KindBase {
+  readonly shape: "line";
+  readonly color: TLDefaultColorStyle;
+}
+
+export type NodeKind =
+  | GeoKind
+  | FrameKind
+  | NoteKind
+  | CompartmentsKind
+  | ScreenKind
+  | TextKind
+  | LineKind;
 
 export interface EdgeKind {
   readonly description: string;
@@ -144,7 +177,8 @@ export interface Kit<N extends string = string, E extends string = string> {
   readonly nodeKinds: Readonly<Record<N, NodeKind>>;
   readonly defaultKind: NoInfer<N>;
   readonly edgeKinds: Readonly<Record<E, EdgeKind>>;
-  readonly defaultEdgeKind: NoInfer<E>;
+  /** Null for a kit without edges. */
+  readonly defaultEdgeKind: NoInfer<E> | null;
   readonly example: DiagramSpec;
 }
 

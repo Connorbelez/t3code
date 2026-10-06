@@ -5,15 +5,20 @@ import {
   type TLFrameShape,
   type TLGeoShape,
   type TLGroupShape,
+  type TLLineShape,
   type TLNoteShape,
   type TLParentId,
   type TLRecord,
   type TLShape,
+  type TLTextShape,
 } from "@tldraw/tlschema";
+
+import type * as Schema from "effect/Schema";
 
 import { compareIndex, originOf, pageBox, pageIdOf, type RecordIndex, shapeOf } from "./canvas.ts";
 import {
   encodeMeta,
+  isContent,
   fingerprint,
   type FrameMeta,
   frameShapeId,
@@ -24,10 +29,19 @@ import {
   type StoredMember,
 } from "./identity.ts";
 import { indexBetween, type IndexKey } from "./indexKeys.ts";
-import { compartmentTexts, edgeKindOf, geoDrawing, LOOKS } from "./kit.ts";
+import {
+  compartmentTexts,
+  type CompartmentsKind,
+  edgeKindOf,
+  geoDrawing,
+  LOOKS,
+  type NodeKind,
+  type Size,
+} from "./kit.ts";
 import { NOTE_SIZE, type Placement } from "./layout.ts";
 import type { Decision } from "./merge.ts";
 import { type CurrentComposition, type CurrentMember, topShape } from "./membership.ts";
+import { CONTENT_KINDS } from "./screens.ts";
 import type { ComposeSpec } from "./spec.ts";
 
 /**
@@ -41,6 +55,9 @@ interface EmitInput {
   readonly current: CurrentComposition | null;
   readonly decisions: readonly Decision[];
   readonly ledger: ReadonlyArray<readonly [string, string]>;
+  readonly arrangements: ReadonlyArray<readonly [string, string]>;
+  /** Screens whose contents were laid out again. */
+  readonly arranged: ReadonlySet<string>;
   readonly placement: Placement;
   readonly index: RecordIndex;
 }
@@ -64,6 +81,7 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
     title: spec.title,
     direction: spec.direction,
     ledger: input.ledger,
+    ...(input.arrangements.length > 0 ? { arrangements: input.arrangements } : {}),
   };
   const frameSize = { w: placement.frame.w, h: placement.frame.h, name: spec.title };
   const frame = remember<TLFrameShape>(
@@ -120,7 +138,9 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
   const writtenNodes = written
     .flatMap((decision) => {
       const node = decision.draft.spec;
-      return node.role === "node" ? [{ decision, node, depth: depthOf(node.key) }] : [];
+      return node.role === "node" && !isContent(node)
+        ? [{ decision, node, depth: depthOf(node.key) }]
+        : [];
     })
     .sort((a, b) => a.depth - b.depth);
   for (const { decision, node } of writtenNodes) {
@@ -190,65 +210,7 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
       }
       continue;
     }
-    const record = ((): TLShape => {
-      switch (kind.shape) {
-        case "geo": {
-          const drawing = geoDrawing(kind, node.label, node.body);
-          return {
-            ...shape,
-            type: "geo",
-            props: {
-              geo: kind.geo,
-              dash: drawing.dash ?? look.dash,
-              url: "",
-              w: box.w,
-              h: box.h,
-              growY: 0,
-              scale: 1,
-              flipX: false,
-              flipY: false,
-              labelColor: "black",
-              color: drawing.color,
-              fill: kind.fill ?? look.fill,
-              size: "m",
-              font: look.font,
-              align: "middle",
-              verticalAlign: "middle",
-              richText: toRichText(drawing.label),
-            },
-          } satisfies TLGeoShape;
-        }
-        case "frame":
-          return {
-            ...shape,
-            type: "frame",
-            props: { w: box.w, h: box.h, name: node.label, color: "black" },
-          } satisfies TLFrameShape;
-        case "note":
-          return {
-            ...shape,
-            type: "note",
-            props: {
-              color: kind.color,
-              richText: toRichText(node.label),
-              size: "m",
-              font: look.font,
-              align: "middle",
-              verticalAlign: "middle",
-              labelColor: "black",
-              growY: box.h - NOTE_SIZE,
-              fontSizeAdjustment: 1,
-              url: "",
-              scale: 1,
-              textLastEditedBy: null,
-            },
-          } satisfies TLNoteShape;
-        default: {
-          const _exhaustive: never = kind;
-          return _exhaustive;
-        }
-      }
-    })();
+    const record = drawNode(kind, node.label, node.body, box, look, shape);
     nodes.push(remember(withPartMeta(record, spec.key, epoch, node, "main")));
   }
   // Relayout moves kept nodes, back into their boundary; a kept boundary also takes its new size
@@ -256,18 +218,51 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
   for (const decision of decisions) {
     const box = placement.nodes.get(decision.key);
     const top = decision.do === "keep" && decision.current ? topShape(decision.current) : undefined;
-    if (!box || !top) continue;
+    if (
+      !box ||
+      !top ||
+      (decision.do === "keep" && decision.current && isContent(decision.current.stored))
+    )
+      continue;
     const moved = placement.parents.get(decision.key);
     const parentId = moved === undefined ? top.parentId : shapeIdOf(moved);
     const index = parentId === top.parentId ? top.index : nextIndex(parentId);
     const record = { ...top, x: box.x, y: box.y, parentId, index };
-    nodes.push(
-      remember(
-        record.type === "frame"
-          ? { ...record, props: { ...record.props, w: box.w, h: box.h } }
-          : record,
-      ),
-    );
+    nodes.push(remember(record.type === "frame" ? resized(record, box) : record));
+  }
+
+  // An arranged screen's contents take new boxes, and indexes in member order so stacking follows
+  // the spec: screen parts under elements, a card under what it holds.
+  const decided = new Map(decisions.map((decision) => [decision.key, decision]));
+  for (const screen of input.arranged) {
+    const contents = spec.contents.get(screen);
+    if (!contents) continue;
+    const parentId = at(screen, "main");
+    let order: IndexKey | null = null;
+    for (const node of contents.members) {
+      order = indexBetween(order, null);
+      const box = placement.nodes.get(node.key);
+      const decision = decided.get(node.key);
+      const kind = CONTENT_KINDS[node.kind];
+      if (!box || !decision || !kind) continue;
+      const placed = { x: box.x, y: box.y, parentId, index: order };
+      if (decision.do === "create" || decision.do === "overwrite") {
+        const base = decision.do === "overwrite" ? mainShape(decision.current) : undefined;
+        const record = drawNode(kind, node.label, null, box, look, {
+          id: at(node.key, "main"),
+          typeName: "shape",
+          rotation: base?.rotation ?? 0,
+          isLocked: base?.isLocked ?? false,
+          opacity: base?.opacity ?? 1,
+          meta: base?.meta ?? {},
+          ...placed,
+        });
+        nodes.push(remember(withPartMeta(record, spec.key, epoch, node, "main")));
+      } else if (decision.do === "keep" && decision.current) {
+        const main = mainShape(decision.current);
+        if (main) nodes.push(remember(resized({ ...main, ...placed }, box)));
+      }
+    }
   }
 
   const placeArrow = arrowPlacer(final);
@@ -373,6 +368,132 @@ export function emitRelease(
 function withoutCompositionMeta<T extends TLRecord>(record: T): T {
   const { [META_KEY]: _dropped, ...meta } = record.meta;
   return { ...record, meta };
+}
+
+type ShapeBase = Omit<TLGeoShape, "type" | "props">;
+type Look = (typeof LOOKS)[keyof typeof LOOKS];
+
+/** The complete record tldraw stores for a node of this kind. */
+function drawNode(
+  kind: Exclude<NodeKind, CompartmentsKind>,
+  label: string,
+  body: Schema.JsonObject | null,
+  box: Size,
+  look: Look,
+  base: ShapeBase,
+): TLShape {
+  switch (kind.shape) {
+    case "geo": {
+      const drawing = geoDrawing(kind, label, body);
+      return {
+        ...base,
+        type: "geo",
+        props: {
+          geo: kind.geo,
+          dash: drawing.dash ?? look.dash,
+          url: "",
+          w: box.w,
+          h: box.h,
+          growY: 0,
+          scale: 1,
+          flipX: false,
+          flipY: false,
+          labelColor: kind.labelColor ?? "black",
+          color: drawing.color,
+          fill: kind.fill ?? look.fill,
+          size: kind.size ?? "m",
+          font: look.font,
+          align: kind.align ?? "middle",
+          verticalAlign: "middle",
+          richText: toRichText(drawing.label),
+        },
+      } satisfies TLGeoShape;
+    }
+    case "frame":
+    case "screen":
+      return {
+        ...base,
+        type: "frame",
+        props: { w: box.w, h: box.h, name: label, color: "black" },
+      } satisfies TLFrameShape;
+    case "note":
+      return {
+        ...base,
+        type: "note",
+        props: {
+          color: kind.color,
+          richText: toRichText(label),
+          size: "m",
+          font: look.font,
+          align: "middle",
+          verticalAlign: "middle",
+          labelColor: "black",
+          growY: box.h - NOTE_SIZE,
+          fontSizeAdjustment: 1,
+          url: "",
+          scale: 1,
+          textLastEditedBy: null,
+        },
+      } satisfies TLNoteShape;
+    case "text":
+      return {
+        ...base,
+        type: "text",
+        props: {
+          color: kind.color,
+          size: kind.size,
+          w: box.w,
+          font: look.font,
+          textAlign: "start",
+          autoSize: false,
+          scale: 1,
+          richText: toRichText(label),
+        },
+      } satisfies TLTextShape;
+    case "line":
+      return {
+        ...base,
+        type: "line",
+        props: {
+          color: kind.color,
+          dash: look.dash,
+          size: "s",
+          spline: "line",
+          scale: 1,
+          points: linePoints(box.w),
+        },
+      } satisfies TLLineShape;
+    default: {
+      const _exhaustive: never = kind;
+      return _exhaustive;
+    }
+  }
+}
+
+/** A horizontal line from the shape's origin, `w` long. */
+function linePoints(w: number): TLLineShape["props"]["points"] {
+  const start = indexBetween(null, null);
+  const end = indexBetween(start, null);
+  return {
+    [start]: { id: start, index: start, x: 0, y: 0 },
+    [end]: { id: end, index: end, x: w, y: 0 },
+  };
+}
+
+/** The shape with its geometry props set to fill `box`; size is layout, not content. */
+function resized(shape: TLShape, box: Size): TLShape {
+  switch (shape.type) {
+    case "geo":
+      return { ...shape, props: { ...shape.props, w: box.w, h: box.h, growY: 0 } };
+    case "frame":
+      return { ...shape, props: { ...shape.props, w: box.w, h: box.h } };
+    case "text":
+      return { ...shape, props: { ...shape.props, w: box.w } };
+    case "line":
+      return { ...shape, props: { ...shape.props, points: linePoints(box.w) } };
+    default:
+      return shape;
+  }
 }
 
 function withPartMeta<T extends TLRecord>(

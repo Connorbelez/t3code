@@ -56,7 +56,8 @@ permanently deletes its active and archived diagrams; export them first to keep 
 ### Ask the agent for a diagram
 
 Ask the agent for a flowchart, a state machine, a class diagram of your models,
-an ER diagram of your database schema, a C4 view or a system architecture diagram,
+an ER diagram of your database schema, a C4 view, a system architecture diagram,
+or low-fidelity phone, tablet, or web screens,
 for example "draw the checkout flow in the architecture diagram". The agent describes what the diagram contains, and T3 Code
 lays it out and draws it as ordinary shapes inside a named frame, placed to the
 right of what is already on the first page. Everything stays editable, and the
@@ -71,6 +72,8 @@ to change that same shape. In that case it stops without changing anything,
 reads your edits, and tries again with them merged in. Shapes you draw inside a
 generated drawing's frame are never touched. To tidy up, ask the agent to lay
 the drawing out again. That moves every generated shape but keeps your edits.
+Screens are the exception to keeping positions: when the agent changes a screen,
+its elements are laid out again in order, so an inserted button pushes the rest down.
 
 Groups such as flowchart subgraphs and composite states are drawn as frames inside
 the drawing, so you can drag a whole group. Moving a shape into or out of a group

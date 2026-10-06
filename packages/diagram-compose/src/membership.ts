@@ -254,7 +254,7 @@ function bodyOf(body: StoredMember["body"] | null): { body?: StoredMember["body"
 const INLINE_BLOCKS = new Set(["paragraph", "heading"]);
 
 /** Rich text as plain text: blocks on their own lines, the inverse of `toRichText` for labels. */
-function plainText(node: unknown): string {
+export function plainText(node: unknown): string {
   if (typeof node !== "object" || node === null) return "";
   if ("text" in node && typeof node.text === "string") return node.text;
   const type = "type" in node ? node.type : null;

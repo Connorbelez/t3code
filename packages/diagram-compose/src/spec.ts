@@ -13,6 +13,7 @@ import * as SchemaIssue from "effect/SchemaIssue";
 import type { StoredEdge, StoredNode } from "./identity.ts";
 import { ATTACH_EDGE_KIND, type BodySchema, type Kit, NOTE_KIND } from "./kit.ts";
 import { KITS } from "./kits/index.ts";
+import { lowerScreen, type ScreenContents } from "./screens.ts";
 
 /** The spec in full form: every default applied and every edge keyed. Nothing downstream sees shorthand. */
 export interface ComposeSpec {
@@ -24,6 +25,8 @@ export interface ComposeSpec {
   readonly position: { readonly x: number; readonly y: number } | null;
   readonly nodes: readonly StoredNode[];
   readonly edges: readonly StoredEdge[];
+  /** What each screen node holds, keyed by the screen's key. */
+  readonly contents: ReadonlyMap<string, ScreenContents>;
 }
 
 export interface SpecIssue {
@@ -143,6 +146,7 @@ export function parseSpec(spec: DiagramSpec, outside: OutsideNodes = new Map()):
   const kit = KITS[spec.kit];
   const issues: SpecIssue[] = [];
   const keys = new Set<string>();
+  const contents = new Map<string, ScreenContents>();
 
   const nodes = spec.nodes.map((node, i): StoredNode => {
     const path = `spec.nodes[${i}]`;
@@ -157,6 +161,14 @@ export function parseSpec(spec: DiagramSpec, outside: OutsideNodes = new Map()):
         message: `unknown kind "${kind}" for kit ${kit.name}; valid kinds: ${listOf(Object.keys(kit.nodeKinds))}`,
       });
     }
+    let body = row
+      ? parseBody(row.body, `kind "${kind}"`, node.body, `${path}.body`, issues)
+      : null;
+    if (row?.shape === "screen" && body) {
+      const lowered = lowerScreen(node.key, body, `${path}.body`, issues);
+      body = lowered.body;
+      contents.set(node.key, lowered.contents);
+    }
     return {
       role: "node",
       key: node.key,
@@ -164,7 +176,7 @@ export function parseSpec(spec: DiagramSpec, outside: OutsideNodes = new Map()):
       label: node.label ?? node.key,
       parent: node.parent ?? null,
       ref: node.ref ?? null,
-      body: row ? parseBody(row.body, `kind "${kind}"`, node.body, `${path}.body`, issues) : null,
+      body,
     };
   });
 
@@ -174,7 +186,12 @@ export function parseSpec(spec: DiagramSpec, outside: OutsideNodes = new Map()):
   checkParents(kit, nodes, outside, issues);
 
   const derivedCounts = new Map<string, number>();
-  const edges = (spec.edges ?? []).map((edge, i): StoredEdge => {
+  const { defaultEdgeKind } = kit;
+  if (defaultEdgeKind === null && (spec.edges ?? []).length > 0) {
+    issues.push({ path: "spec.edges", message: `kit ${kit.name} has no edges` });
+  }
+  // A kit without edges takes none, so the default below is never missing.
+  const edges = (defaultEdgeKind === null ? [] : (spec.edges ?? [])).map((edge, i): StoredEdge => {
     const path = `spec.edges[${i}]`;
     const full =
       "from" in edge
@@ -196,7 +213,7 @@ export function parseSpec(spec: DiagramSpec, outside: OutsideNodes = new Map()):
         });
       }
     }
-    const kind = full.kind ?? kit.defaultEdgeKind;
+    const kind = full.kind ?? defaultEdgeKind ?? "";
     const row = kit.edgeKinds[kind];
     if (!row) {
       issues.push({
@@ -246,6 +263,7 @@ export function parseSpec(spec: DiagramSpec, outside: OutsideNodes = new Map()):
     position: spec.position ?? null,
     nodes,
     edges,
+    contents,
   };
 }
 
@@ -314,6 +332,7 @@ function unknownFields(
   path: string,
   kind: string,
 ): SpecIssue[] {
+  if (SchemaAST.isSuspend(ast)) return unknownFields(ast.thunk(), value, path, kind);
   // Optional fields are unions with undefined; nothing else in a body schema is a union.
   if (SchemaAST.isUnion(ast)) {
     return ast.types.flatMap((member) => unknownFields(member, value, path, kind));

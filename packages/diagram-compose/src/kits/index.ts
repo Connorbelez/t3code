@@ -7,6 +7,7 @@ import { er } from "./er.ts";
 import { flow } from "./flow.ts";
 import { state } from "./state.ts";
 import { umlClass } from "./uml-class.ts";
+import { wireframe } from "./wireframe.ts";
 
 export const KITS: { readonly [K in DiagramKit]: Kit } = {
   flow,
@@ -15,4 +16,5 @@ export const KITS: { readonly [K in DiagramKit]: Kit } = {
   er,
   c4,
   architecture,
+  wireframe,
 };
