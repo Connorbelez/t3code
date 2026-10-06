@@ -55,6 +55,28 @@ Wait for **Saved** before closing or refreshing an editor with offline changes.
 Export editable diagrams or PNG/SVG images when you need files. Removing a project
 permanently deletes its active and archived diagrams; export them first to keep them.
 
+### Comment on a diagram
+
+To give feedback on specific parts of a diagram, click **Annotate** in the Canvas
+toolbar or choose **Annotate Canvas** in the command palette. Click a shape or drag
+a rectangle around any area, including empty space, then write your comment and
+save it. To comment on shapes you already selected, right-click them and choose
+**Annotate selection**, or press Ctrl+Alt+P (Cmd+Option+P on macOS). Annotating
+never moves or changes shapes.
+
+Each saved comment gets a numbered bubble. Numbers count up across the whole
+message and never change, so deleting a comment leaves a gap. Click a bubble to
+edit, retarget, or delete its comment. Press Escape to cancel the comment you are
+writing, and again to leave annotation mode; saved comments stay.
+
+Each annotated page appears as one item in your message; remove it to drop that
+page's comments. Sending captures each annotated page again and gives the agent
+images with the same numbers drawn in, plus the matching comments. Comments on
+shapes follow those shapes if you move them first. If a commented shape was
+deleted or moved to another page, sending stops and names the comments to fix.
+Sent messages keep their images and comments even after the diagram changes.
+Mobile shows sent comments but can't create them.
+
 ### Ask the agent for a diagram
 
 Ask the agent for a flowchart, a state machine, a class diagram of your models,
