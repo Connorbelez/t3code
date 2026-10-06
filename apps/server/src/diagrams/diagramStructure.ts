@@ -1,4 +1,10 @@
-import type { DiagramBounds, DiagramReadInput, DiagramStructure } from "@t3tools/contracts";
+import {
+  DIAGRAM_MAX_SELECTED_MEMBERS,
+  type DiagramBounds,
+  type DiagramReadInput,
+  type DiagramSelectedMember,
+  type DiagramStructure,
+} from "@t3tools/contracts";
 import { readCompositions } from "@t3tools/diagram-compose/model";
 import type { TLRecord, TLShape } from "@tldraw/tlschema";
 
@@ -66,7 +72,7 @@ function intersects(a: DiagramBounds, b: DiagramBounds) {
 /**
  * Compositions are listed once each in place of their members, so they never consume the shape
  * limit. A selected member or frame selects its composition; a viewport selects compositions
- * whose bounds it intersects.
+ * whose bounds it intersects. Selected members are listed by key unless the frame is selected too.
  */
 export function diagramStructure(
   records: readonly TLRecord[],
@@ -192,12 +198,33 @@ export function diagramStructure(
   const selectedKeys =
     input.recordIds &&
     new Set(input.recordIds.flatMap((id) => compositions.compositionOf(id)?.key ?? []));
-  const listed = compositions.summaries.filter(
-    (item) =>
-      (!input.pageId || item.pageId === input.pageId) &&
-      (!selectedKeys || selectedKeys.has(item.key)) &&
-      (!input.viewport || (item.bounds !== null && intersects(item.bounds, input.viewport))),
+  const wholeKeys = new Set(
+    input.recordIds?.flatMap((id) => compositions.compositionOfFrame(id)?.key ?? []),
   );
+  const selectedMembers = new Map<string, Map<string, DiagramSelectedMember>>();
+  for (const id of input.recordIds ?? []) {
+    const found = compositions.memberOf(id);
+    if (!found || wholeKeys.has(found.compositionKey)) continue;
+    const members = selectedMembers.get(found.compositionKey) ?? new Map();
+    selectedMembers.set(found.compositionKey, members);
+    members.set(found.member.key, found.member);
+  }
+  const listed = compositions.summaries
+    .filter(
+      (item) =>
+        (!input.pageId || item.pageId === input.pageId) &&
+        (!selectedKeys || selectedKeys.has(item.key)) &&
+        (!input.viewport || (item.bounds !== null && intersects(item.bounds, input.viewport))),
+    )
+    .map((item) => {
+      const members = selectedMembers.get(item.key);
+      return members
+        ? {
+            ...item,
+            selectedMembers: Array.from(members.values()).slice(0, DIAGRAM_MAX_SELECTED_MEMBERS),
+          }
+        : item;
+    });
   if (input.priorityPageId)
     listed.sort(
       (a, b) =>
@@ -231,6 +258,9 @@ export function diagramStructure(
       offset + limit < selected.length ||
       offset + limit < bindings.length ||
       listed.length > 100 ||
-      pages.length > 100,
+      pages.length > 100 ||
+      Array.from(selectedMembers.values()).some(
+        (members) => members.size > DIAGRAM_MAX_SELECTED_MEMBERS,
+      ),
   } satisfies DiagramStructure;
 }

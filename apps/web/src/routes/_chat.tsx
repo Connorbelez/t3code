@@ -12,6 +12,10 @@ import { usePrimaryEnvironmentId } from "../state/environments";
 import { selectProjectGroupingSettings } from "../logicalProject";
 import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
 import { dispatchPreviewAction } from "../components/preview/previewActionBus";
+import {
+  addCanvasSelectionToChat,
+  canvasSelectionChatState,
+} from "../components/diagrams/canvasSelectionChat";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useScratchProject } from "../hooks/useScratchProject";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
@@ -151,6 +155,15 @@ function ChatRouteGlobalShortcuts() {
       ) {
         event.preventDefault();
         useRightPanelStore.getState().openCanvas(routeThreadRef);
+        return;
+      }
+
+      // Unhandled without a selection, so the browser keeps the shortcut.
+      if (command === "canvas.addSelectionToChat") {
+        if (canvasSelectionChatState() !== "selected") return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (!event.repeat) addCanvasSelectionToChat();
         return;
       }
 

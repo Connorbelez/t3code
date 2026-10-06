@@ -1155,16 +1155,26 @@ export const make = Effect.gen(function* () {
             if (structureBudget < 1024)
               throw new DiagramOperationError({ code: "scope-unavailable" });
             // Shapes and compositions are sorted focused page first, so popping drops other pages
-            // first; the focused page's shapes outrank other pages' compositions.
+            // first; the focused page's shapes outrank other pages' compositions. Selected
+            // members go before the summaries that name them.
             const elsewhere = (item: { pageId: string } | undefined) =>
               item !== undefined && item.pageId !== scope.pageId;
             while (Buffer.byteLength(encodeJson(structure)) > structureBudget) {
+              const trimmable = structure.compositions.findLastIndex(
+                (item) => item.selectedMembers !== undefined,
+              );
               if (structure.bindings.length) structure.bindings.pop();
               else if (elsewhere(structure.shapes.at(-1))) structure.shapes.pop();
               else if (elsewhere(structure.compositions.at(-1))) structure.compositions.pop();
               else if (structure.shapes.length) structure.shapes.pop();
               else if (structure.pages.length) structure.pages.pop();
-              else structure.compositions.pop();
+              else if (trimmable !== -1) {
+                const { selectedMembers = [], ...summary } = structure.compositions[trimmable]!;
+                structure.compositions[trimmable] =
+                  selectedMembers.length > 1
+                    ? { ...summary, selectedMembers: selectedMembers.slice(0, -1) }
+                    : summary;
+              } else structure.compositions.pop();
               structure.truncated = true;
             }
             return { diagram, structure };

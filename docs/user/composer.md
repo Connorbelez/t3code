@@ -40,6 +40,8 @@ Closing a Canvas or deleting a thread keeps them. Archive a diagram to keep a
 read-only copy, or duplicate it before making a separate version.
 
 Use **Add to context** for the whole diagram, selected shapes, or visible area.
+To add selected shapes faster, right-click them on the canvas or press Ctrl+L (Cmd+L
+on macOS); the selection goes into your message at the cursor.
 Sending reads the saved diagram again and gives the agent a current image and
 matching structure. Attaching a diagram supplies context; tell the agent what
 you want it to change. Deleted selected shapes require a new selection.
@@ -65,6 +67,8 @@ right of what is already on the first page. Everything stays editable, and the
 whole drawing is one Undo step. A diagram can hold several generated drawings
 side by side. When you attach a diagram, the agent sees each generated drawing as
 one summary instead of every shape, so large drawings don't crowd out the rest.
+To point at part of a drawing, select those shapes and add the selection to chat;
+the agent is told exactly which ones you mean.
 
 Ask for changes and the agent updates the same drawing. Shapes you moved or
 resized stay as you left them, new shapes are placed around them, and shapes you

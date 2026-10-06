@@ -193,7 +193,7 @@ function SupportedCanvasPanel(props: CanvasPanelProps) {
       await refresh();
       if (renamed) props.onSelectDiagram(renamed);
     });
-  const attach = () =>
+  const attach = (kind: DiagramPageScope["kind"]) =>
     run(async () => {
       if (!active) return;
       const host = findDiagramHost(props.environmentId, active.id);
@@ -203,7 +203,7 @@ function SupportedCanvasPanel(props: CanvasPanelProps) {
         diagramId: active.id,
         projectId: props.projectId,
         label: active.name,
-        scope: host.scope(scope),
+        scope: host.scope(kind),
       });
     });
   const exportDocument = () =>
@@ -411,7 +411,11 @@ function SupportedCanvasPanel(props: CanvasPanelProps) {
               <option value="selection">Selection</option>
               <option value="viewport">Visible area</option>
             </select>
-            <Button size="compact" disabled={busy || saveState !== "saved"} onClick={attach}>
+            <Button
+              size="compact"
+              disabled={busy || saveState !== "saved"}
+              onClick={() => attach(scope)}
+            >
               Add to context
             </Button>
             <div className="ml-auto flex items-center gap-1">
@@ -446,6 +450,7 @@ function SupportedCanvasPanel(props: CanvasPanelProps) {
                 environmentId={props.environmentId}
                 diagram={active}
                 onSaveState={reportSaveState}
+                onAddSelectionToChat={() => void attach("selection")}
               />
             </Suspense>
           </div>
