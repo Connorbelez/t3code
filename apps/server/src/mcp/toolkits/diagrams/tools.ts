@@ -56,7 +56,7 @@ const apply = Tool.make("t3_diagram_apply", {
   .annotate(Tool.Idempotent, true);
 
 const composeGuidance = [
-  "Compose a structured diagram such as a flowchart, state machine, UML class diagram, ER diagram, C4 view, architecture diagram, sequence diagram or wireframe screens from a spec of nodes and edges. T3 Code lays it out and draws editable stock shapes inside a frame named by the composition key.",
+  "Compose a structured diagram such as a flowchart, state machine, UML class diagram, ER diagram, C4 view, architecture diagram, sequence diagram, wireframe screens or user flow from a spec of nodes and edges. T3 Code lays it out and draws editable stock shapes inside a frame named by the composition key.",
   "Prefer this over t3_diagram_apply for structured diagrams, and describe content, not coordinates: labels default to keys, kinds default per kit, and edges accept [from, to, label?]. t3_diagram_kit lists a kit's vocabulary and an example; invalid specs fail listing the valid options.",
   'Group nodes inside a boundary kind (flow group, state composite, uml-class package, c4 boundary, architecture zone) by setting parent to its key; boundaries nest. Every kit has a note kind; body { "on": "<node key>" } attaches it to that node.',
   "Instead of spec you may pass Mermaid flowchart, stateDiagram, classDiagram, erDiagram or sequenceDiagram text as mermaid: { key, text, title? }. Node IDs become member keys, so composing the same Mermaid again updates in place; subgraphs, composite states and namespaces become boundaries, and styling is ignored. Other Mermaid types fail unsupported-mermaid.",

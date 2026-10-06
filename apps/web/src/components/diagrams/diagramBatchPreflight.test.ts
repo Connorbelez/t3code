@@ -536,6 +536,36 @@ const sequenceOf = (edges: readonly DiagramSpecEdge[]) =>
     },
   }) satisfies DiagramComposeRequest;
 const login = sequenceOf(loginMessages);
+// Three screens, one empty, a decision, and an edge from a button inside a screen frame.
+const onboarding = (welcome: readonly unknown[]) =>
+  ({
+    spec: {
+      kit: "user-flow",
+      key: "onboarding",
+      title: "Onboarding",
+      nodes: [
+        { key: "welcome", label: "Welcome", body: { chrome: true, children: welcome } },
+        { key: "hasAccount", kind: "decision", label: "Has account?" },
+        {
+          key: "login",
+          label: "Log in",
+          body: { children: [{ key: "submit", kind: "button", label: "Log in" }] },
+        },
+        { key: "signup", label: "Sign up" },
+      ],
+      edges: [
+        ["welcome.start", "hasAccount", "tap Get started"],
+        ["hasAccount", "login", "yes"],
+        ["hasAccount", "signup", "no"],
+        ["login.submit", "welcome", "tap Log in"],
+      ],
+    },
+  }) satisfies DiagramComposeRequest;
+const welcome = [
+  { key: "title", kind: "heading", label: "Plan trips together" },
+  { key: "start", kind: "button", label: "Get started" },
+];
+const userFlow = onboarding(welcome);
 function composeInto(editor: Editor, request: DiagramComposeRequest = checkout) {
   const records = editor.store.serialize("document");
   return compose(request, Object.values(records), {
@@ -620,6 +650,7 @@ describe("composed batches", () => {
     ["an architecture diagram with nested zones", system, "System"],
     ["wireframes with chrome and a modal", screens, "Screens"],
     ["a sequence with a self call, an activation and an alt block", login, "Login"],
+    ["a user flow with arrows from buttons inside screens", userFlow, "Onboarding"],
   ])("pass the preflight for %s and recompose to no change", async (_, request, title) => {
     const editor = mount();
     addLooseShapes(editor);
@@ -682,6 +713,31 @@ describe("composed batches", () => {
     expect(editor.getShape(api.parentId as TLShapeId)?.x).toBeLessThan(600);
     expect(editor.getShapePageBounds(member(editor, "check").id)?.y).toBeGreaterThan(before.y);
     expect(member(editor, "ok").props).toMatchObject({ richText: toRichText("200 + token") });
+    expect((await composeInto(editor, inserted)).changes).toBeNull();
+  });
+
+  it("keeps a user flow arrow bound to its button when the button's screen relays out", async () => {
+    const editor = mount();
+    const first = await composeInto(editor, userFlow);
+    assert(first.changes, "a new composition must produce changes");
+    applyChanges(editor, first.changes);
+    const shapeOf = (key: string) => member(editor, key);
+    const arrow = shapeOf("welcome.start→hasAccount:navigate");
+    const start = () =>
+      editor
+        .getBindingsFromShape(arrow.id, "arrow")
+        .find((binding) => binding.props.terminal === "start")?.toId;
+    expect(start()).toBe(shapeOf("welcome.start").id);
+    expect(arrow.parentId).toBe(shapeOf("welcome").parentId);
+    const button = shapeOf("welcome.start");
+
+    const inserted = onboarding([{ key: "hero", kind: "image", label: "Hero" }, ...welcome]);
+    const { changes } = await composeInto(editor, inserted);
+    assert(changes, "an insertion must produce changes");
+    expect(() => validateDiagramBatch(editor, { requestId: "insert", ...changes })).not.toThrow();
+    applyChanges(editor, changes);
+    expect(shapeOf("welcome.start").y).toBeGreaterThan(button.y);
+    expect(start()).toBe(button.id);
     expect((await composeInto(editor, inserted)).changes).toBeNull();
   });
 

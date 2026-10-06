@@ -57,7 +57,8 @@ permanently deletes its active and archived diagrams; export them first to keep 
 
 Ask the agent for a flowchart, a state machine, a class diagram of your models,
 an ER diagram of your database schema, a C4 view, a system architecture diagram,
-a sequence diagram of a request path, or low-fidelity phone, tablet, or web screens,
+a sequence diagram of a request path, low-fidelity phone, tablet, or web
+screens, or a user flow between screens,
 for example "draw the checkout flow in the architecture diagram". The agent describes what the diagram contains, and T3 Code
 lays it out and draws it as ordinary shapes inside a named frame, placed to the
 right of what is already on the first page. Everything stays editable, and the
@@ -78,6 +79,8 @@ button pushes the rest down. Likewise, any change to a sequence diagram lays the
 whole diagram out again, so an inserted message pushes later messages down and a
 participant you dragged goes back to its column. Your text and style edits are
 still kept.
+In a user flow, arrows start at the button that leads on, and screens can be empty
+labelled frames until you design them.
 
 Groups such as flowchart subgraphs and composite states are drawn as frames inside
 the drawing, so you can drag a whole group. Moving a shape into or out of a group

@@ -3,7 +3,7 @@ import type { TLParentId } from "@tldraw/tlschema";
 import type { ELK, ElkNode } from "elkjs/lib/elk-api.js";
 
 import { localBox, pageBox, pagesInOrder, type RecordIndex, unionOf } from "./canvas.ts";
-import { isContent, type PartName, type StoredNode } from "./identity.ts";
+import { holderOf, isContent, type PartName, type StoredNode } from "./identity.ts";
 import {
   type CompartmentsKind,
   compartmentTexts,
@@ -128,6 +128,7 @@ async function layoutLayered(
   nodes: readonly LayeredNode[],
   edges: ReadonlyArray<readonly [string, string]>,
   direction: DiagramLayoutDirection,
+  layerGap: number,
 ): Promise<Map<string, Box>> {
   // CommonJS: Node and Vite both resolve the default import to the constructor, but NodeNext and
   // Bundler type resolution disagree about it.
@@ -146,7 +147,7 @@ async function layoutLayered(
     "elk.separateConnectedComponents": "false",
     "elk.edgeRouting": "ORTHOGONAL",
     "elk.spacing.nodeNode": "48",
-    "elk.layered.spacing.nodeNodeBetweenLayers": "72",
+    "elk.layered.spacing.nodeNodeBetweenLayers": String(layerGap),
     // Edges pointing back in spec order are the loops, as a reader of the spec expects. ELK 0.12
     // crashes on any model-order option across a hierarchy, so nested graphs break cycles
     // depth-first from the first node, which also follows spec order.
@@ -323,9 +324,11 @@ export async function place(
 
   const laid = present.filter((key) => relayout || !canvas.has(key) || moved.has(key));
   if (laid.length > 0) {
-    const links = spec.edges.flatMap((edge): [string, string][] =>
-      presentKeys.has(edge.from) && presentKeys.has(edge.to) ? [[edge.from, edge.to]] : [],
-    );
+    // An edge from a screen's element links that screen.
+    const links = spec.edges.flatMap((edge): [string, string][] => {
+      const [from, to] = [holderOf(edge.from), holderOf(edge.to)];
+      return presentKeys.has(from) && presentKeys.has(to) ? [[from, to]] : [];
+    });
     const holders = new Set(present.map(scopeOf));
     const elk = await layoutLayered(
       present.map((key) => ({
@@ -335,6 +338,7 @@ export async function place(
       })),
       links,
       spec.direction,
+      spec.kit.layerGap ?? 72,
     );
     if (relayout) {
       for (const key of present) {

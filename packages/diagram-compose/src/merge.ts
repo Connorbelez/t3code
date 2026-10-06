@@ -1,7 +1,7 @@
 import { DiagramOperationError } from "@t3tools/contracts";
 
 import { compareIndex } from "./canvas.ts";
-import { isContent, specHash, type StoredMember } from "./identity.ts";
+import { holderOf, isContent, specHash, type StoredMember } from "./identity.ts";
 import type { CurrentComposition, CurrentMember } from "./membership.ts";
 import type { ComposeSpec } from "./spec.ts";
 
@@ -101,9 +101,10 @@ export function replaceRows(
 
 /**
  * Patch mode: the composition's members in member order with listed members swapped in, removed
- * keys and the member edges of removed nodes dropped, and everything else untouched. New nodes go
- * before the first edge and new edges last, which is where replacing with the whole patched spec
- * (nodes, then edges) puts them, so both modes write the same ledger. A listed node brings its
+ * keys and the member edges of removed nodes, or of elements gone from a listed screen, dropped,
+ * and everything else untouched. New nodes go before the first edge and new edges last, which is
+ * where replacing with the whole patched spec (nodes, then edges) puts them, so both modes write
+ * the same ledger. A listed node brings its
  * whole contents, in spec order right after it: contents it no longer lists drop, as do the
  * contents of a removed node.
  */
@@ -114,10 +115,15 @@ export function patchRows(
 ): Row[] {
   const byKey = new Map(drafts.map((draft) => [draft.key, draft]));
   const removed = new Set(removeKeys);
+  /** A removed node, an element of one, or an element its listed screen no longer has. */
+  const gone = (end: string) => {
+    const holder = holderOf(end);
+    return removed.has(holder) || (holder !== end && byKey.has(holder) && !byKey.has(end));
+  };
   const endpointRemoved = (member: CurrentMember | undefined) =>
     member?.stored.role === "edge" &&
     !byKey.has(member.key) &&
-    (removed.has(member.stored.from) || removed.has(member.stored.to));
+    (gone(member.stored.from) || gone(member.stored.to));
   const holderReplaced = (member: CurrentMember | undefined) =>
     member !== undefined &&
     isContent(member.stored) &&

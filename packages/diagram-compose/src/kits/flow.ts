@@ -1,4 +1,14 @@
-import { defineKit } from "../kit.ts";
+import { defineKit, type GeoKind } from "../kit.ts";
+
+/** Shared with user flows, where decisions branch between screens. */
+export const decision: GeoKind = {
+  description: "A question; label its outgoing edges with the answers.",
+  shape: "geo",
+  geo: "diamond",
+  color: "yellow",
+  minSize: { w: 160, h: 112 },
+  labelRoom: 1.5,
+};
 
 export const flow = defineKit({
   name: "flow",
@@ -34,14 +44,7 @@ export const flow = defineKit({
       color: "blue",
       minSize: { w: 160, h: 72 },
     },
-    decision: {
-      description: "A question; label its outgoing edges with the answers.",
-      shape: "geo",
-      geo: "diamond",
-      color: "yellow",
-      minSize: { w: 160, h: 112 },
-      labelRoom: 1.5,
-    },
+    decision,
     io: {
       description: "Input or output, such as reading a file or showing a result.",
       shape: "geo",

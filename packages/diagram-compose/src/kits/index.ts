@@ -8,6 +8,7 @@ import { flow } from "./flow.ts";
 import { sequence } from "./sequence.ts";
 import { state } from "./state.ts";
 import { umlClass } from "./uml-class.ts";
+import { userFlow } from "./user-flow.ts";
 import { wireframe } from "./wireframe.ts";
 
 export const KITS: { readonly [K in DiagramKit]: Kit } = {
@@ -19,4 +20,5 @@ export const KITS: { readonly [K in DiagramKit]: Kit } = {
   architecture,
   wireframe,
   sequence,
+  "user-flow": userFlow,
 };

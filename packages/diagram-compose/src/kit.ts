@@ -219,6 +219,8 @@ export interface Kit<N extends string = string, E extends string = string> {
   readonly look: keyof typeof LOOKS;
   readonly direction: DiagramLayoutDirection;
   readonly arrowKind: "elbow" | "arc";
+  /** Space between layered layers when edge labels need more room than the default 72. */
+  readonly layerGap?: number;
   readonly nodeKinds: Readonly<Record<N, NodeKind>>;
   readonly defaultKind: NoInfer<N>;
   readonly edgeKinds: Readonly<Record<E, EdgeKind>>;

@@ -2,7 +2,7 @@ import { DiagramMemberKey } from "@t3tools/contracts";
 import type { TLDefaultSizeStyle } from "@tldraw/tlschema";
 import * as Schema from "effect/Schema";
 
-import { hashOf, type StoredNode } from "./identity.ts";
+import { hashOf, isContent, type StoredNode } from "./identity.ts";
 import type { GeoKind, LineKind, ScreenKind, Size, TextKind } from "./kit.ts";
 import type { MeasureText, TextFont } from "./layout.ts";
 import type { SpecIssue } from "./spec.ts";
@@ -187,6 +187,11 @@ const CHROME = "chrome";
 const BACKDROP = "backdrop";
 const SHEET = "sheet";
 const RESERVED = [CHROME, BACKDROP, SHEET];
+
+/** An element the spec wrote, which edges can start or end at; the screen's own parts are not. */
+export function isElement(member: StoredNode): boolean {
+  return isContent(member) && isElementName(member.kind);
+}
 
 /** Every kind a screen's members can have. */
 export const CONTENT_KINDS: Readonly<Record<string, ElementKind>> = { ...ELEMENTS, ...FIXTURES };

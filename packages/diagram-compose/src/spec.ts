@@ -10,10 +10,10 @@ import * as Schema from "effect/Schema";
 import * as SchemaAST from "effect/SchemaAST";
 import * as SchemaIssue from "effect/SchemaIssue";
 
-import type { StoredEdge, StoredNode } from "./identity.ts";
+import { holderOf, type StoredEdge, type StoredNode } from "./identity.ts";
 import { ATTACH_EDGE_KIND, type BodySchema, type Kit, NOTE_KIND } from "./kit.ts";
 import { KITS } from "./kits/index.ts";
-import { lowerScreen, type ScreenContents } from "./screens.ts";
+import { isElement, lowerScreen, type ScreenContents } from "./screens.ts";
 
 /** The spec in full form: every default applied and every edge keyed. Nothing downstream sees shorthand. */
 export interface ComposeSpec {
@@ -185,10 +185,33 @@ export function parseSpec(
     };
   });
 
-  const nodeKeys = [...nodes.map((node) => node.key), ...(outside === "any" ? [] : outside.keys())];
+  const canvasNodes = outside === "any" ? [] : Array.from(outside);
+  const nodeKeys = [
+    ...nodes.map((node) => node.key),
+    ...canvasNodes.flatMap(([key]) => (holderOf(key) === key ? [key] : [])),
+  ];
   const nodeKeySet = new Set(nodeKeys);
   const known = (key: string) => outside === "any" || nodeKeySet.has(key);
   checkParents(kit, nodes, outside, issues);
+  // Screen contents are members too, so no other member may take their keys.
+  for (const { members } of contents.values()) for (const member of members) keys.add(member.key);
+  /** Element keys of a node, from its spec or, for a node a patch leaves out, from the canvas. */
+  const elementsOf = (holder: string): string[] => {
+    const members = contents.get(holder)?.members ?? canvasNodes.map(([, node]) => node);
+    return members.flatMap((member) =>
+      member?.parent === holder && isElement(member) ? [member.key] : [],
+    );
+  };
+  /** An edge end is a node, or `node.element` for an element inside a screen. */
+  const endpointIssue = (end: string): string | null => {
+    if (outside === "any") return null;
+    const holder = holderOf(end);
+    if (!nodeKeySet.has(holder)) return `unknown node "${end}"; valid nodes: ${listOf(nodeKeys)}`;
+    const elements = elementsOf(holder);
+    if (holder === end || elements.includes(end)) return null;
+    const names = elements.map((key) => key.slice(holder.length + 1));
+    return `no element "${end.slice(holder.length + 1)}" in "${holder}"; its elements: ${listOf(names)}`;
+  };
 
   const derivedCounts = new Map<string, number>();
   const { defaultEdgeKind } = kit;
@@ -211,12 +234,8 @@ export function parseSpec(
             paths: { from: `${path}[0]`, to: `${path}[1]`, kind: `${path}.kind` },
           };
     for (const end of ["from", "to"] as const) {
-      if (!known(full[end])) {
-        issues.push({
-          path: full.paths[end],
-          message: `unknown node "${full[end]}"; valid nodes: ${listOf(nodeKeys)}`,
-        });
-      }
+      const message = endpointIssue(full[end]);
+      if (message) issues.push({ path: full.paths[end], message });
     }
     const kind = full.kind ?? defaultEdgeKind ?? "";
     const row = kit.edgeKinds[kind];
@@ -227,7 +246,9 @@ export function parseSpec(
       });
     }
     const key = full.key ?? derivedKey(`${full.from}→${full.to}:${kind}`, derivedCounts);
-    if (keys.has(key)) issues.push({ path: `${path}.key`, message: `duplicate key "${key}"` });
+    if (keys.has(key) || (outside !== "any" && outside.get(key))) {
+      issues.push({ path: `${path}.key`, message: `duplicate key "${key}"` });
+    }
     keys.add(key);
     const body =
       row && parseBody(row.body, `edge kind "${kind}"`, full.body, `${path}.body`, issues);

@@ -53,6 +53,12 @@ export function isContent(
   );
 }
 
+/** The node an edge endpoint sits in: the endpoint itself, or `node` for `node.element`. */
+export function holderOf(endpoint: string): string {
+  const dot = endpoint.indexOf(".");
+  return dot === -1 ? endpoint : endpoint.slice(0, dot);
+}
+
 /**
  * Record roles within a member. `main` carries the stored spec and decides whether the member
  * exists. A compartments node adds its `group` and one `c1`, `c2`, … geo per compartment; a

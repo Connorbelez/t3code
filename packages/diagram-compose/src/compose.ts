@@ -225,13 +225,21 @@ function planPatch(
     ]);
   }
   const both = new Set([...spec.nodes, ...spec.edges].map((member) => member.key));
-  const twice = operation.removeKeys.flatMap((memberKey, i) =>
-    both.has(memberKey)
-      ? [{ path: `removeKeys[${i}]`, message: `"${memberKey}" is also in the spec; list it once` }]
-      : [],
-  );
-  if (twice.length > 0) {
-    throw new DiagramOperationError({ code: "invalid-spec", details: { issues: twice } });
+  const misplaced = operation.removeKeys.flatMap((memberKey, i) => {
+    const path = `removeKeys[${i}]`;
+    if (both.has(memberKey)) {
+      return [{ path, message: `"${memberKey}" is also in the spec; list it once` }];
+    }
+    // A screen's arrangement holds its elements, so only the screen's whole body changes them.
+    const stored = current.members.get(memberKey)?.stored;
+    if (stored && isContent(stored)) {
+      const message = `"${memberKey}" is inside "${stored.parent}"; patch "${stored.parent}" with its whole body instead`;
+      return [{ path, message }];
+    }
+    return [];
+  });
+  if (misplaced.length > 0) {
+    throw new DiagramOperationError({ code: "invalid-spec", details: { issues: misplaced } });
   }
   return {
     spec: {

@@ -415,6 +415,7 @@ export const DIAGRAM_KITS = [
   "architecture",
   "wireframe",
   "sequence",
+  "user-flow",
 ] as const;
 export const DiagramKit = Schema.Literals(DIAGRAM_KITS);
 export type DiagramKit = typeof DiagramKit.Type;
@@ -425,6 +426,8 @@ export const DiagramMemberKey = TrimmedNonEmptyString.check(
   Schema.isPattern(/^[^.\s]+$/),
 );
 const DiagramEdgeEndpoint = TrimmedNonEmptyString.check(Schema.isMaxLength(241));
+/** Derived edge keys are `from→to:kind`, so an edge from `node.element` has a "." in its key. */
+const DiagramEdgeKey = TrimmedNonEmptyString.check(Schema.isMaxLength(600));
 
 /** A source location an agent attaches to a node and reads back later. */
 export const DiagramSpecRef = Schema.Struct({
@@ -445,7 +448,7 @@ export const DiagramSpecNode = Schema.Struct({
 export type DiagramSpecNode = typeof DiagramSpecNode.Type;
 
 export const DiagramSpecEdgeObject = Schema.Struct({
-  key: Schema.optional(DiagramMemberKey),
+  key: Schema.optional(DiagramEdgeKey),
   from: DiagramEdgeEndpoint,
   to: DiagramEdgeEndpoint,
   kind: Schema.optional(Schema.String.check(Schema.isMaxLength(64))),
@@ -511,9 +514,9 @@ export const DiagramComposeRequest = Schema.Struct({
   mermaid: Schema.optional(DiagramMermaidSource),
   /** `replace` (default): the spec is the whole composition. `patch`: only the listed members. */
   mode: Schema.optional(Schema.Literals(["replace", "patch"])),
-  /** Patch only: members to delete, with the member edges of any node among them. */
+  /** Patch only: node and edge keys to delete, with the member edges of any node among them. */
   removeKeys: Schema.optional(
-    Schema.Array(DiagramMemberKey).check(Schema.isMaxLength(DIAGRAM_MAX_BATCH_RECORDS)),
+    Schema.Array(DiagramEdgeKey).check(Schema.isMaxLength(DIAGRAM_MAX_BATCH_RECORDS)),
   ),
   /** Repositions every member; otherwise existing members stay where they are. */
   relayout: Schema.optional(Schema.Boolean),
