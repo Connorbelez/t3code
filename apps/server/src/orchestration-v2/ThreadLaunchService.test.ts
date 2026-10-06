@@ -64,6 +64,8 @@ import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as ThreadTitleRegeneration from "./ThreadTitleRegenerationService.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 
+const decodeAnnotationSet = Schema.decodeUnknownEffect(DiagramAnnotationsContextRecord);
+
 const projectId = ProjectId.make("project:launch-test");
 const otherProjectId = ProjectId.make("project:launch-other");
 const encodeThreadProjection = Schema.encodeEffect(OrchestrationV2ThreadProjectionJson);
@@ -2210,7 +2212,7 @@ it.effect("keeps Canvas comments paired with their numbered image through intake
     assert.isNotNull(pendingPath);
     yield* fs.makeDirectory(config.attachmentsDir, { recursive: true });
     yield* fs.writeFile(pendingPath, new Uint8Array([1, 2, 3, 4]));
-    const comments = yield* Schema.decodeUnknownEffect(DiagramAnnotationsContextRecord)({
+    const comments = yield* decodeAnnotationSet({
       version: 1,
       contextId: "diagram-annotations_page",
       kind: "diagram-annotations",
@@ -2336,6 +2338,89 @@ it.effect("keeps Canvas comments paired with their numbered image through intake
       providerText,
       `[Attached image "Architecture comments-overview-image_badges.png" is saved at: ${storedPath}]`,
     );
+
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const claimedFiles = Effect.map(fs.readDirectory(config.attachmentsDir), (files) =>
+      files.filter((name) => !name.startsWith("pending-")),
+    );
+    const { capture: _capture, ...draftPayload } = comments.payload;
+    const uncaptured = {
+      ...input.initialMessage.context,
+      records: [{ ...comments, payload: draftPayload }, input.initialMessage.context.records[1]!],
+    };
+    const rejectedLaunch = yield* ThreadMessageIntake.launchThread({
+      ...input,
+      commandId: CommandId.make("annotation-uncaptured-launch"),
+      threadId: ThreadId.make("annotation-uncaptured-thread"),
+      initialMessage: { ...input.initialMessage, context: uncaptured },
+    }).pipe(Effect.flip);
+    assert.equal(rejectedLaunch._tag, "ThreadLaunchError");
+    assert.equal((yield* claimedFiles).length, 1);
+
+    const messageCommand = {
+      type: "message.dispatch" as const,
+      commandId: CommandId.make("annotation-queued"),
+      threadId: input.threadId,
+      ...input.initialMessage,
+      dispatchMode: { type: "queue_after_active" as const },
+      createdBy: "user" as const,
+      creationSource: "web" as const,
+    };
+    const rejectedMessage = yield* ThreadMessageIntake.dispatchCommand({
+      ...messageCommand,
+      commandId: CommandId.make("annotation-uncaptured-dispatch"),
+      context: uncaptured,
+    }).pipe(Effect.flip);
+    assert.equal(rejectedMessage._tag, "OrchestratorCommandRejectedError");
+    assert.equal((yield* claimedFiles).length, 1);
+    yield* ThreadMessageIntake.dispatchCommand({
+      ...messageCommand,
+      messageId: MessageId.make("annotation-queued-message"),
+    });
+    const queued = yield* threads.getThreadProjection(input.threadId);
+    const run = queued.runs.find((run) => run.userMessageId === "annotation-queued-message");
+    assert.isDefined(run);
+    assert.equal(run.status, "queued");
+    const edit = {
+      type: "queued-run.edit" as const,
+      threadId: input.threadId,
+      runId: run.id,
+      text: "Edited Canvas comments",
+    };
+    const rejectedEdit = yield* ThreadMessageIntake.dispatchCommand({
+      ...edit,
+      commandId: CommandId.make("annotation-missing-images-edit"),
+      attachments: [],
+    }).pipe(Effect.flip);
+    assert.equal(rejectedEdit._tag, "OrchestratorCommandRejectedError");
+    const rejectedCapture = yield* ThreadMessageIntake.dispatchCommand({
+      ...edit,
+      commandId: CommandId.make("annotation-uncaptured-edit"),
+      context: uncaptured,
+      attachments: [image],
+    }).pipe(Effect.flip);
+    assert.equal(rejectedCapture._tag, "OrchestratorCommandRejectedError");
+    assert.equal((yield* claimedFiles).length, 2);
+    const afterRejection = yield* threads.getThreadProjection(input.threadId);
+    assert.deepEqual(afterRejection.messages, queued.messages);
+    yield* ThreadMessageIntake.dispatchCommand({
+      ...edit,
+      commandId: CommandId.make("annotation-retained-images-edit"),
+    });
+    const afterEdit = yield* threads.getThreadProjection(input.threadId);
+    const edited = afterEdit.messages.find((message) => message.id === run.userMessageId);
+    assert.isDefined(edited);
+    assert.equal(edited.text, edit.text);
+    assert.deepEqual(
+      edited.context,
+      queued.messages.find((message) => message.id === run.userMessageId)?.context,
+    );
+    yield* ThreadMessageIntake.dispatchCommand({
+      ...edit,
+      commandId: CommandId.make("annotation-removed-context-edit"),
+      attachments: [],
+      context: { version: 1, records: [] },
+    });
   }).pipe(Effect.provide(Layer.mergeAll(harness.layer, layerFiles)));
 });
 
@@ -2424,4 +2509,108 @@ it.effect.each([0, 1])("releases an async setup before its completion with exit 
       );
     }).pipe(Effect.provide(harness.layer));
   }),
+);
+
+it.effect.each(["capture", "image-record", "attachment", "image-type"] as const)(
+  "rejects Canvas comments with missing %s before persisting a message",
+  (missing) => {
+    const harness = makeHarness();
+    const layerFiles = ServerConfig.layerTest(process.cwd(), {
+      prefix: "t3-invalid-annotation-intake-",
+    }).pipe(Layer.provideMerge(NodeServices.layer));
+    return Effect.gen(function* () {
+      const comments = yield* decodeAnnotationSet({
+        version: 1,
+        contextId: "diagram-annotations_page",
+        kind: "diagram-annotations",
+        label: "Comments",
+        payload: {
+          environmentId: "env-1",
+          projectId,
+          diagramId: "00000000-0000-4000-8000-000000000001",
+          pageId: "page:one",
+          annotations: [
+            {
+              id: "a1",
+              number: 1,
+              comment: "Make this blue",
+              target: { kind: "shapes", shapeIds: ["shape:one"] },
+            },
+          ],
+          ...(missing === "capture"
+            ? {}
+            : {
+                capture: {
+                  revision: 1,
+                  resolved: [
+                    { id: "a1", bounds: { x: 0, y: 0, w: 100, h: 100 }, marker: { x: 0, y: 0 } },
+                  ],
+                  images: [
+                    {
+                      role: "overview",
+                      annotationIds: ["a1"],
+                      bounds: { x: -48, y: -48, w: 196, h: 196 },
+                      width: 196,
+                      height: 196,
+                      contextId: "image_badges",
+                    },
+                  ],
+                  structure: {
+                    revision: 1,
+                    pages: [],
+                    compositions: [],
+                    shapes: [],
+                    bindings: [],
+                    totalShapes: 1,
+                    truncated: false,
+                  },
+                },
+              }),
+        },
+      });
+      const attachment: ChatAttachment = {
+        type: missing === "image-type" ? "file" : "image",
+        id: ChatAttachmentId.make("annotation-image"),
+        name: "comments.png",
+        mimeType: "image/png",
+        sizeBytes: 4,
+      };
+      const input = {
+        ...launchInput({
+          command: `invalid-annotations-${missing}`,
+          thread: `invalid-annotations-${missing}`,
+        }),
+        initialMessage: {
+          messageId: MessageId.make(`invalid-annotations-${missing}`),
+          text: "Fix [Comments](t3-context://v1/diagram-annotations/diagram-annotations_page)",
+          context: {
+            version: 1 as const,
+            records: [
+              comments,
+              ...(missing === "image-record"
+                ? []
+                : [
+                    {
+                      version: 1 as const,
+                      kind: "image" as const,
+                      contextId: ComposerContextId.make("image_badges"),
+                      label: "comments.png",
+                      name: "comments.png",
+                      attachmentId: attachment.id,
+                      mimeType: "image/png",
+                      sizeBytes: 4,
+                    },
+                  ]),
+            ],
+          },
+          attachments: missing === "attachment" ? [] : [attachment],
+        },
+      };
+      const rejected = yield* ThreadMessageIntake.launchThread(input).pipe(Effect.flip);
+      assert.equal(rejected._tag, "ThreadLaunchError");
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const projection = yield* threads.getThreadProjection(input.threadId);
+      assert.deepEqual(projection.messages, []);
+    }).pipe(Effect.provide(Layer.mergeAll(harness.layer, layerFiles)));
+  },
 );

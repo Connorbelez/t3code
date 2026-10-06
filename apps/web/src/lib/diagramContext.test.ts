@@ -231,6 +231,54 @@ describe("Canvas comment sets in the message draft", () => {
     }
   });
 
+  it("keeps numbering after deleting all comments, clearing text, and reloading", () => {
+    const store = useComposerDraftStore.getState();
+    const first = store.saveDiagramAnnotation(ref, page, { comment: "First", target: box });
+    if (!first.ok) throw new Error("comment should save");
+    store.removeDiagramAnnotation(ref, first.annotation.id);
+    expect(draft()?.nextDiagramAnnotationNumber).toBe(2);
+    store.setPrompt(ref, "temporary text");
+    store.setPrompt(ref, "");
+    const reloaded = merge(
+      JSON.parse(
+        JSON.stringify(partializeComposerDraftStoreState(useComposerDraftStore.getState())),
+      ),
+      useComposerDraftStore.getInitialState(),
+    );
+    useComposerDraftStore.setState(reloaded);
+    const second = store.saveDiagramAnnotation(ref, page, { comment: "Second", target: box });
+    expect(second.ok && second.annotation.number).toBe(2);
+    store.clearComposerContent(ref);
+    const fresh = store.saveDiagramAnnotation(ref, page, { comment: "Fresh", target: box });
+    expect(fresh.ok && fresh.annotation.number).toBe(1);
+  });
+
+  it("retains pasted comments when replacing a chip and restores removed comments on undo", () => {
+    const store = useComposerDraftStore.getState();
+    store.saveDiagramAnnotation(ref, page, { comment: "Original", target: box });
+    const original = draft()!.diagramAnnotations[0]!;
+    store.saveDiagramAnnotation(
+      ref,
+      { ...page, pageId: "page:other" },
+      { comment: "Pasted", target: box },
+    );
+    const incoming = draft()!.diagramAnnotations[1]!;
+    store.setDiagramAnnotations(ref, [original]);
+    const imported = store.importDiagramAnnotations(ref, [incoming]);
+    const pastedId = imported.rewritten.get(incoming.contextId)!;
+    const retained = new Map<string, typeof original>();
+    store.reconcileDiagramAnnotations(ref, [pastedId], retained);
+    expect(
+      draft()?.diagramAnnotations.map((r) => r.payload.annotations.map((a) => a.comment)),
+    ).toEqual([["Pasted"]]);
+    expect(retained.get(original.contextId)?.payload.annotations[0]?.comment).toBe("Original");
+    store.reconcileDiagramAnnotations(ref, [original.contextId, original.contextId], retained);
+    expect(
+      draft()?.diagramAnnotations.map((r) => r.payload.annotations.map((a) => a.comment)),
+    ).toEqual([["Original"]]);
+    expect(draft()?.nextDiagramAnnotationNumber).toBe(4);
+  });
+
   it("appends the chip without a mounted composer and clears it with the sets", () => {
     const store = useComposerDraftStore.getState();
     store.setPrompt(ref, "Please fix");

@@ -4,6 +4,7 @@ import {
   ModelSelection as ModelSelectionSchema,
   ComposerContextId,
   ComposerContextRecord,
+  DiagramAnnotationsContextRecord,
   COMPOSER_CONTEXT_MAX_RECORDS,
   ForwardCompatibleArray,
   OrchestrationMessageContext,
@@ -22,6 +23,11 @@ import {
 import * as Schema from "effect/Schema";
 import { useEffect } from "react";
 import { Atom } from "effect/reactivity";
+
+import {
+  mergeDiagramAnnotationDrafts,
+  stripAnnotationCapture,
+} from "@t3tools/client-runtime/diagram-annotations";
 
 import { writeFileAtomically } from "../lib/atomic-file";
 import { createComposerContextHistory, referencedComposerContext } from "../lib/composerContext";
@@ -59,6 +65,8 @@ import {
 } from "./thread-outbox-model";
 import { flushThreadOutbox, threadOutboxManager } from "./thread-outbox";
 import { composerDraftEnvironmentId } from "../lib/composerAttachmentUploadQueue";
+
+const isDiagramAnnotationsRecord = Schema.is(DiagramAnnotationsContextRecord);
 
 const COMPOSER_DRAFTS_SCHEMA_VERSION = 1;
 const COMPOSER_DRAFTS_DIRECTORY = "composer-drafts";
@@ -295,10 +303,39 @@ function draftWithInsertedContext(
   const { start, end } = contextInsertionRange(draftKey, draft, target);
   const before = draft.text.slice(0, start);
   const after = draft.text.slice(end);
-  const insertion = `${before.length > 0 && !/\s$/.test(before) && !/^\s/.test(content.text) ? " " : ""}${content.text}${!/\s$/.test(content.text) && (after.length === 0 || !/^\s/.test(after)) ? " " : ""}`;
+  const annotationSets = (records: ReadonlyArray<ComposerContextRecord>) =>
+    records.filter(isDiagramAnnotationsRecord);
+  const incomingSets = annotationSets(content.context.records);
+  const retainedContext = referencedComposerContext(before + after, draft.context);
+  let insertedText = content.text;
+  let incomingRecords = content.context.records;
+  let nextDiagramAnnotationNumber = draft.nextDiagramAnnotationNumber;
+  if (incomingSets.length > 0) {
+    const nextNumber = Math.max(
+      draft.nextDiagramAnnotationNumber ?? 1,
+      ...annotationSets(draft.context?.records ?? []).flatMap((record) =>
+        record.payload.annotations.map((annotation) => annotation.number + 1),
+      ),
+    );
+    const merged = mergeDiagramAnnotationDrafts(
+      { records: annotationSets(retainedContext?.records ?? []), nextNumber },
+      incomingSets,
+    );
+    if (merged.dropped > 0) return null;
+    nextDiagramAnnotationNumber = merged.state.nextNumber;
+    insertedText = replaceComposerContextReferences(content.text, (ref) => {
+      const contextId = merged.rewritten.get(ref.contextId);
+      return contextId ? formatComposerContextReference({ ...ref, contextId }) : ref.source;
+    });
+    incomingRecords = [
+      ...content.context.records.filter((record) => !isDiagramAnnotationsRecord(record)),
+      ...merged.state.records,
+    ];
+  }
+  const insertion = `${before.length > 0 && !/\s$/.test(before) && !/^\s/.test(insertedText) ? " " : ""}${insertedText}${!/\s$/.test(insertedText) && (after.length === 0 || !/^\s/.test(after)) ? " " : ""}`;
   const text = before + insertion + after;
-  const records = new Map(draft.context?.records.map((record) => [record.contextId, record]));
-  for (const record of content.context.records) records.set(record.contextId, record);
+  const records = new Map(retainedContext?.records.map((record) => [record.contextId, record]));
+  for (const record of incomingRecords) records.set(record.contextId, record);
   const context = referencedComposerContext(text, { version: 1, records: [...records.values()] });
   if ((context?.records.length ?? 0) > COMPOSER_CONTEXT_MAX_RECORDS) return null;
   lastComposerSelection = {
@@ -307,7 +344,14 @@ function draftWithInsertedContext(
     start: start + insertion.length,
     end: start + insertion.length,
   };
-  return withReferencedContextFiles(draft, text, context);
+  return withReferencedContextFiles(
+    {
+      ...draft,
+      ...(nextDiagramAnnotationNumber === undefined ? {} : { nextDiagramAnnotationNumber }),
+    },
+    text,
+    context,
+  );
 }
 
 export class ComposerDraftPersistenceError extends Schema.TaggedError<ComposerDraftPersistenceError>()(
@@ -327,6 +371,7 @@ export class ComposerDraftPersistenceError extends Schema.TaggedError<ComposerDr
 export interface ComposerDraft {
   readonly text: string;
   readonly context?: OrchestrationMessageContext;
+  readonly nextDiagramAnnotationNumber?: number;
   readonly attachments: ReadonlyArray<DraftComposerAttachment>;
   readonly importedShareIds?: ReadonlyArray<string>;
   readonly modelSelection?: ModelSelection;
@@ -389,6 +434,9 @@ const PersistedComposerContextSchema = Schema.Struct({
 const ComposerDraftSchema = Schema.Struct({
   text: Schema.String,
   context: Schema.optional(PersistedComposerContextSchema),
+  nextDiagramAnnotationNumber: Schema.optional(
+    Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 1000 })),
+  ),
   attachments: Schema.Array(DraftComposerAttachmentSchema),
   importedShareIds: Schema.optional(Schema.Array(Schema.String)),
   modelSelection: Schema.optional(ModelSelectionSchema),
@@ -560,6 +608,7 @@ export function isComposerDraftEmpty(draft: ComposerDraft): boolean {
 function isEmptyDraft(draft: ComposerDraft): boolean {
   return (
     draft.text.length === 0 &&
+    (draft.nextDiagramAnnotationNumber ?? 1) <= 1 &&
     draft.attachments.length === 0 &&
     draft.modelSelection === undefined &&
     draft.runtimeMode === undefined &&
@@ -1240,16 +1289,22 @@ export async function restoreCloudComposerDrafts(accountId: string): Promise<voi
       for (const [key, draft] of Object.entries(saved.drafts)) {
         const existing = current[key];
         const attachmentIds = new Set(existing?.attachments.map((attachment) => attachment.id));
+        const merged = existing
+          ? mergeReferencedComposerContext(
+              mergeComposerDraftText(existing.text, draft.text),
+              existing.context,
+              draft.context,
+              Math.max(
+                existing.nextDiagramAnnotationNumber ?? 1,
+                draft.nextDiagramAnnotationNumber ?? 1,
+              ),
+            )
+          : undefined;
         restored[key] = existing
           ? {
               ...draft,
               ...existing,
-              text: mergeComposerDraftText(existing.text, draft.text),
-              context: mergeReferencedComposerContext(
-                mergeComposerDraftText(existing.text, draft.text),
-                draft.context,
-                existing.context,
-              ),
+              ...merged,
               // A concurrent import must not lose files, even above the send limit.
               attachments: [
                 ...existing.attachments,
@@ -1527,6 +1582,7 @@ export function clearComposerDraftContentState(
   const {
     importedShareIds: _importedShareIds,
     context: _context,
+    nextDiagramAnnotationNumber: _nextDiagramAnnotationNumber,
     modelSelection,
     workspaceSelection,
     project: _project,
@@ -1592,11 +1648,43 @@ function mergeReferencedComposerContext(
   text: string,
   first?: OrchestrationMessageContext,
   second?: OrchestrationMessageContext,
+  nextDiagramAnnotationNumber = 1,
 ) {
   const records = new Map((first?.records ?? []).map((record) => [record.contextId, record]));
-  for (const record of second?.records ?? []) records.set(record.contextId, record);
-  if (records.size === 0) return undefined;
-  return referencedComposerContext(text, { version: 1, records: [...records.values()] });
+  const incomingSets = (second?.records ?? []).filter(isDiagramAnnotationsRecord);
+  if (incomingSets.length > 0) {
+    const retained = [...records.values()].filter(isDiagramAnnotationsRecord);
+    const merged = mergeDiagramAnnotationDrafts(
+      {
+        records: retained,
+        nextNumber: Math.max(
+          nextDiagramAnnotationNumber,
+          ...retained.flatMap((record) =>
+            record.payload.annotations.map((annotation) => annotation.number + 1),
+          ),
+        ),
+      },
+      incomingSets,
+    );
+    if (merged.dropped > 0) throw new Error("The draft has no room for these Canvas comments.");
+    nextDiagramAnnotationNumber = merged.state.nextNumber;
+    text = replaceComposerContextReferences(text, (ref) => {
+      const contextId = merged.rewritten.get(ref.contextId);
+      return contextId ? formatComposerContextReference({ ...ref, contextId }) : ref.source;
+    });
+    for (const record of merged.state.records) records.set(record.contextId, record);
+  }
+  for (const record of second?.records ?? []) {
+    if (!isDiagramAnnotationsRecord(record)) records.set(record.contextId, record);
+  }
+  return {
+    text,
+    context:
+      records.size > 0
+        ? referencedComposerContext(text, { version: 1, records: [...records.values()] })
+        : undefined,
+    ...(nextDiagramAnnotationNumber > 1 ? { nextDiagramAnnotationNumber } : {}),
+  };
 }
 
 export function mergeComposerDraftContentState(
@@ -1620,8 +1708,13 @@ export function mergeComposerDraftContentState(
     0,
     PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   );
-  const text = mergeComposerDraftText(existing.text, content.text);
-  const context = mergeReferencedComposerContext(text, existing.context, content.context);
+  const merged = mergeReferencedComposerContext(
+    mergeComposerDraftText(existing.text, content.text),
+    existing.context,
+    content.context,
+    existing.nextDiagramAnnotationNumber,
+  );
+  const { text } = merged;
   const importedShareIds = content.sourceShareId
     ? [...(existing.importedShareIds ?? []), content.sourceShareId]
     : existing.importedShareIds;
@@ -1637,9 +1730,8 @@ export function mergeComposerDraftContentState(
     ...current,
     [draftKey]: {
       ...existing,
-      text,
+      ...merged,
       attachments,
-      context,
       ...(importedShareIds ? { importedShareIds } : {}),
     },
   };
@@ -1714,6 +1806,7 @@ export function sameComposerDraftState(a: ComposerDraft, b: ComposerDraft): bool
     a.text === b.text &&
     a.attachments === b.attachments &&
     a.context === b.context &&
+    a.nextDiagramAnnotationNumber === b.nextDiagramAnnotationNumber &&
     a.importedShareIds === b.importedShareIds &&
     a.modelSelection === b.modelSelection &&
     a.runtimeMode === b.runtimeMode &&
@@ -1761,10 +1854,39 @@ export function undoComposerDraftMergeState(
       : insertedText.length > 0 && existing.text.endsWith(insertedText)
         ? existing.text.slice(0, existing.text.length - insertedText.length)
         : existing.text;
+  const snapshotAnnotationIds = new Set(
+    (snapshot.context?.records ?? [])
+      .filter(isDiagramAnnotationsRecord)
+      .flatMap((record) => record.payload.annotations.map((annotation) => annotation.id)),
+  );
+  const importedAnnotationIds = new Set(
+    (merged.context?.records ?? [])
+      .filter(isDiagramAnnotationsRecord)
+      .flatMap((record) =>
+        record.payload.annotations
+          .filter((annotation) => !snapshotAnnotationIds.has(annotation.id))
+          .map((annotation) => annotation.id),
+      ),
+  );
+  const contextRecords: ComposerContextRecord[] = (existing.context?.records ?? []).flatMap(
+    (record) => {
+      if (!isDiagramAnnotationsRecord(record)) return [record];
+      const annotations = record.payload.annotations.filter(
+        (annotation) => !importedAnnotationIds.has(annotation.id),
+      );
+      if (annotations.length === record.payload.annotations.length) return [record];
+      if (annotations.length === 0) return [];
+      const draft = stripAnnotationCapture(record);
+      return [{ ...draft, payload: { ...draft.payload, annotations } }];
+    },
+  );
   const draft = {
     ...existing,
     text,
-    context: referencedComposerContext(text, existing.context),
+    context: referencedComposerContext(
+      text,
+      existing.context ? { version: 1, records: contextRecords } : undefined,
+    ),
     attachments: existing.attachments.filter(
       (attachment) => !insertedAttachmentIds.has(attachment.id),
     ),

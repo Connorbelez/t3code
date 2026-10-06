@@ -1,3 +1,4 @@
+import { draftDiagramAnnotationsRecord } from "@t3tools/client-runtime/diagram-annotations";
 import { stripInlineContextReferences } from "./lib/composerContextReferences";
 import { elementContextToPreviewAnnotation } from "./lib/elementContext";
 import {
@@ -78,7 +79,6 @@ import {
   diagramAnnotationsContextReference,
 } from "./lib/composerContextRecords";
 import {
-  draftDiagramAnnotationsRecord,
   importDiagramAnnotations as importDiagramAnnotationsIntoDraft,
   removeDiagramAnnotation as removeDiagramAnnotationFromDraft,
   saveDiagramAnnotation as saveDiagramAnnotationInDraft,
@@ -768,6 +768,12 @@ interface ComposerDraftStoreState {
     records: ReadonlyArray<DiagramAnnotationsContextRecord>,
     nextNumber?: number,
   ) => void;
+  /** Reconciles editor links against current records, retaining removed payloads for undo. */
+  reconcileDiagramAnnotations: (
+    threadRef: ComposerThreadTarget,
+    contextIds: ReadonlyArray<string>,
+    retained: Map<string, DiagramAnnotationsContextRecord>,
+  ) => void;
   /** Paste and stash restore. The caller places the links, rewritten through `rewritten`. */
   importDiagramAnnotations: (
     threadRef: ComposerThreadTarget,
@@ -1122,6 +1128,7 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
     draft.threadContexts.length === 0 &&
     draft.diagramContexts.length === 0 &&
     draft.diagramAnnotations.length === 0 &&
+    draft.nextDiagramAnnotationNumber <= 1 &&
     Object.keys(draft.modelSelectionByProvider).length === 0 &&
     draft.activeProvider === null &&
     draft.runtimeMode === null &&
@@ -2238,6 +2245,7 @@ function normalizePersistedDraftsByThreadId(
       threadContexts.length === 0 &&
       diagramContexts.length === 0 &&
       diagramAnnotations.length === 0 &&
+      nextDiagramAnnotationNumber <= 1 &&
       !hasModelData &&
       !runtimeMode &&
       !interactionMode
@@ -2380,6 +2388,7 @@ export function partializeComposerDraftStoreState(
       draft.threadContexts.length === 0 &&
       draft.diagramContexts.length === 0 &&
       draft.diagramAnnotations.length === 0 &&
+      draft.nextDiagramAnnotationNumber <= 1 &&
       !hasModelData &&
       draft.runtimeMode === null &&
       draft.interactionMode === null
@@ -4438,6 +4447,23 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             else nextDraftsByThreadKey[threadKey] = nextDraft;
             return { draftsByThreadKey: nextDraftsByThreadKey };
           });
+        },
+        reconcileDiagramAnnotations: (threadRef, contextIds, retained) => {
+          const current = get().getComposerDraft(threadRef)?.diagramAnnotations ?? [];
+          const referenced = new Set(contextIds);
+          const liveIds = new Set<string>(current.map((record) => record.contextId));
+          const restored = [...referenced].flatMap((contextId) => {
+            if (liveIds.has(contextId)) return [];
+            const record = retained.get(contextId);
+            return record ? [record] : [];
+          });
+          const kept = current.filter((record) => referenced.has(record.contextId));
+          for (const record of current) {
+            if (!referenced.has(record.contextId)) retained.set(record.contextId, record);
+          }
+          if (kept.length !== current.length || restored.length > 0) {
+            get().setDiagramAnnotations(threadRef, [...kept, ...restored]);
+          }
         },
         importDiagramAnnotations: (threadRef, records) => {
           const threadKey = resolveComposerDraftKey(get(), threadRef);

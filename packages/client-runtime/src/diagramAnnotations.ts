@@ -1,5 +1,8 @@
 import {
   ComposerContextId,
+  DIAGRAM_ANNOTATIONS_MAX_PER_PAGE,
+  DiagramAnnotationNumber,
+  type DiagramAnnotation,
   DiagramAnnotations,
   DiagramOperationError,
   type CapturedDiagramAnnotationsRecord,
@@ -7,6 +10,7 @@ import {
   type DiagramPreparedAnnotations,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
+import { sanitizeComposerContextLabel } from "@t3tools/shared/composerContextReferences";
 
 /** One rendered capture, ready to become an attachment plus the image record `contextId` names. */
 export interface DiagramAnnotationImageFile {
@@ -74,4 +78,99 @@ export function stripAnnotationCapture(
 ): DiagramAnnotationsContextRecord {
   const { capture: _capture, ...payload } = record.payload;
   return { ...record, payload };
+}
+
+export function copyDiagramAnnotation(annotation: DiagramAnnotation): DiagramAnnotation {
+  const { target } = annotation;
+  return {
+    ...annotation,
+    target:
+      target.kind === "shapes"
+        ? { kind: "shapes", shapeIds: [...target.shapeIds] }
+        : { kind: "region", bounds: { ...target.bounds } },
+  };
+}
+
+/** A deep copy without `capture`: what a draft holds, sharing nothing with its source. */
+export function draftDiagramAnnotationsRecord(
+  record: DiagramAnnotationsContextRecord,
+): DiagramAnnotationsContextRecord {
+  const draft = stripAnnotationCapture(record);
+  return {
+    ...draft,
+    payload: {
+      ...draft.payload,
+      annotations: draft.payload.annotations.map(copyDiagramAnnotation),
+    },
+  };
+}
+
+const isAnnotationNumber = Schema.is(DiagramAnnotationNumber);
+const isPageAnnotations = Schema.is(DiagramAnnotations);
+const isSamePage = (
+  left: DiagramAnnotationsContextRecord["payload"],
+  right: DiagramAnnotationsContextRecord["payload"],
+) =>
+  left.environmentId === right.environmentId &&
+  left.diagramId === right.diagramId &&
+  left.pageId === right.pageId;
+
+/** Merges imported draft comments by page, preserving identities and allocating unique message-wide numbers. */
+export function mergeDiagramAnnotationDrafts(
+  state: {
+    readonly records: ReadonlyArray<DiagramAnnotationsContextRecord>;
+    readonly nextNumber: number;
+  },
+  incoming: ReadonlyArray<DiagramAnnotationsContextRecord>,
+): {
+  state: { records: DiagramAnnotationsContextRecord[]; nextNumber: number };
+  rewritten: ReadonlyMap<ComposerContextId, ComposerContextId>;
+  dropped: number;
+} {
+  const present = new Set(
+    state.records.flatMap((record) => record.payload.annotations.map(({ id }) => id)),
+  );
+  const pending = incoming
+    .flatMap((record) =>
+      draftDiagramAnnotationsRecord(record).payload.annotations.map((annotation) => ({
+        record,
+        annotation,
+      })),
+    )
+    .sort((left, right) => left.annotation.number - right.annotation.number);
+  let records = [...state.records];
+  let nextNumber = state.nextNumber;
+  let dropped = 0;
+  for (const { record, annotation } of pending) {
+    if (present.has(annotation.id)) continue;
+    present.add(annotation.id);
+    const number = Math.max(annotation.number, nextNumber);
+    const index = records.findIndex((entry) => isSamePage(entry.payload, record.payload));
+    const target = records[index];
+    const annotations = [...(target?.payload.annotations ?? []), { ...annotation, number }];
+    if (
+      !isAnnotationNumber(number) ||
+      annotations.length > DIAGRAM_ANNOTATIONS_MAX_PER_PAGE ||
+      !isPageAnnotations(annotations)
+    ) {
+      dropped += 1;
+      continue;
+    }
+    nextNumber = number + 1;
+    const draft = stripAnnotationCapture(target ?? record);
+    const updated = {
+      ...draft,
+      label: sanitizeComposerContextLabel(draft.label, "diagram-annotations"),
+      payload: { ...draft.payload, annotations },
+    };
+    records = target
+      ? records.map((entry, position) => (position === index ? updated : entry))
+      : [...records, updated];
+  }
+  const rewritten = new Map<ComposerContextId, ComposerContextId>();
+  for (const record of incoming) {
+    const target = records.find((entry) => isSamePage(entry.payload, record.payload));
+    if (target) rewritten.set(record.contextId, target.contextId);
+  }
+  return { state: { records, nextNumber }, rewritten, dropped };
 }

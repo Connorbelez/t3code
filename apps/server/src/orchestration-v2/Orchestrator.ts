@@ -70,6 +70,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as ProjectStore from "./ProjectStore.ts";
+import { diagramAnnotationMessageError } from "./DiagramAnnotationMessage.ts";
 import {
   isCheckpointRestoreIsolated,
   SHARED_WORKSPACE_RESTORE_MESSAGE,
@@ -4388,6 +4389,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
   ) =>
     Effect.gen(function* () {
+      const contextError = diagramAnnotationMessageError(command.context, command.attachments);
+      if (contextError) {
+        return yield* new OrchestratorCommandRejectedError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: contextError,
+        });
+      }
       let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
       if (command.manualContinuationOfRunId !== undefined) {
         const source = projection.runs.find((run) => run.id === command.manualContinuationOfRunId);
@@ -7620,6 +7629,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           commandId: command.commandId,
           commandType: command.type,
           cause: "Automatic completion deliveries cannot be edited.",
+        });
+      }
+      const contextError = diagramAnnotationMessageError(
+        command.context ?? queuedMessage.context,
+        command.attachments ?? queuedMessage.attachments,
+      );
+      if (contextError) {
+        return yield* new OrchestratorCommandRejectedError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: contextError,
         });
       }
       const queuedTurnItem = projection.turnItems.find(

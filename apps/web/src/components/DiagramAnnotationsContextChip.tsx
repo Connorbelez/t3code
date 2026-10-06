@@ -1,13 +1,11 @@
 import type { DiagramAnnotationsContextRecord } from "@t3tools/contracts";
 import { MessageSquareTextIcon } from "lucide-react";
 
-import { ContextChipShell } from "./contextChipParts";
-
-const TOOLTIP_COMMENT_MAX_CHARS = 140;
+import { ContextChipPopover } from "./contextChipParts";
 
 /**
- * Inline chip for one page's Canvas comments, in the composer and in sent messages. The tooltip
- * reads the record only, so a sent message keeps showing what was sent after the diagram changes.
+ * Inline chip for one page's Canvas comments, in the composer and in sent messages. The details
+ * read the record only, so a sent message keeps showing what was sent after the diagram changes.
  */
 export function DiagramAnnotationsContextChip(props: {
   record: DiagramAnnotationsContextRecord;
@@ -18,23 +16,30 @@ export function DiagramAnnotationsContextChip(props: {
   );
   const count = annotations.length;
   const label = `${props.record.label} · ${count} ${count === 1 ? "comment" : "comments"}`;
+  const capture = props.record.payload.capture;
   return (
-    <ContextChipShell
+    <ContextChipPopover
       kind="diagram"
       icon={<MessageSquareTextIcon />}
       label={label}
-      aria-label={`Canvas comments, ${label}`}
-      data-markdown-copy={props.copyMarkdown}
-      tooltip={annotations
-        .map(({ number, comment }) => {
-          const line = comment.replace(/\s+/g, " ");
-          return `#${number} ${
-            line.length > TOOLTIP_COMMENT_MAX_CHARS
-              ? `${line.slice(0, TOOLTIP_COMMENT_MAX_CHARS - 1)}…`
-              : line
-          }`;
-        })
-        .join("\n")}
-    />
+      accessibleLabel={`Canvas comments, ${label}`}
+      {...(props.copyMarkdown === undefined ? {} : { copyMarkdown: props.copyMarkdown })}
+    >
+      <div className="max-h-80 space-y-3 overflow-y-auto">
+        <p className="text-xs text-muted-foreground">
+          {capture
+            ? `Captured revision ${capture.revision} · ${capture.images.length} ${capture.images.length === 1 ? "image" : "images"}`
+            : "These comments will be captured when you send."}
+        </p>
+        <ol className="space-y-3">
+          {annotations.map(({ id, number, comment }) => (
+            <li key={id} className="flex gap-2 text-xs">
+              <span className="shrink-0 font-medium">#{number}</span>
+              <p className="min-w-0 whitespace-pre-wrap break-words">{comment}</p>
+            </li>
+          ))}
+        </ol>
+      </div>
+    </ContextChipPopover>
   );
 }

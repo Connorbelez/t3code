@@ -3774,6 +3774,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       if (promptHistoryPositionRef.current?.recalled !== nextPrompt) {
         promptHistoryPositionRef.current = null;
       }
+      const liveDraft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
+      const composerTerminalContexts = liveDraft?.terminalContexts ?? [];
+      const composerThreadContexts = liveDraft?.threadContexts ?? [];
+      const composerDiagramContexts = liveDraft?.diagramContexts ?? [];
+      const composerReviewComments = liveDraft?.reviewComments ?? [];
+      const composerFiles = liveDraft?.files ?? [];
+      const composerImages = liveDraft?.images ?? [];
+      const composerPreviewAnnotations = liveDraft?.previewAnnotations ?? [];
       const referenced = new Set(contextIds);
       const retained = removedContextPayloadsRef.current;
 
@@ -3839,29 +3847,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       if (nextDiagrams.length !== composerDiagramContexts.length || restoredDiagrams.length > 0) {
         setComposerDraftDiagramContexts(composerDraftTarget, nextDiagrams);
       }
-      const liveAnnotationSetIds = new Set<string>(
-        composerDiagramAnnotations.map((record) => record.contextId),
-      );
-      const restoredAnnotationSets = [...referenced].flatMap((contextId) => {
-        if (liveAnnotationSetIds.has(contextId)) return [];
-        const record = retained.diagramAnnotations.get(contextId);
-        return record ? [record] : [];
-      });
-      const nextAnnotationSets = [
-        ...composerDiagramAnnotations.filter((record) => referenced.has(record.contextId)),
-        ...restoredAnnotationSets,
-      ];
-      for (const record of composerDiagramAnnotations) {
-        if (!referenced.has(record.contextId)) {
-          retained.diagramAnnotations.set(record.contextId, record);
-        }
-      }
-      if (
-        nextAnnotationSets.length !== composerDiagramAnnotations.length ||
-        restoredAnnotationSets.length > 0
-      ) {
-        setComposerDraftDiagramAnnotations(composerDraftTarget, nextAnnotationSets);
-      }
+      useComposerDraftStore
+        .getState()
+        .reconcileDiagramAnnotations(composerDraftTarget, contextIds, retained.diagramAnnotations);
 
       for (const comment of composerReviewComments) {
         const contextId = reviewCommentContextId(comment.id);
@@ -3919,18 +3907,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       setPrompt,
       setComposerTrigger,
       composerDraftTarget,
-      composerTerminalContexts,
       setComposerDraftTerminalContexts,
-      composerThreadContexts,
-      composerDiagramContexts,
-      composerDiagramAnnotations,
       setComposerDraftThreadContexts,
       setComposerDraftDiagramContexts,
-      setComposerDraftDiagramAnnotations,
-      composerReviewComments,
-      composerPreviewAnnotations,
-      composerImages,
-      composerFiles,
       removeComposerDraftReviewComment,
       removeComposerDraftPreviewAnnotation,
       removeComposerDraftFile,
