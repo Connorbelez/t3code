@@ -82,6 +82,7 @@ const CdpMessage = Schema.fromJsonString(
   }),
 );
 const decodeCdpMessage = Schema.decodeUnknownOption(CdpMessage);
+const encodeJavaScriptString = Schema.encodeSync(Schema.fromJsonString(Schema.String));
 const encodeCdpCommand = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const RemoteObject = Schema.Struct({
   type: Schema.String,
@@ -174,6 +175,9 @@ interface PageEvents {
   readonly mainFrameId: string;
   /** The page served for `PAGE_URL`, from `pageBody`. */
   body: Uint8Array | undefined;
+  readonly resolveResource?: (
+    url: string,
+  ) => Effect.Effect<{ bytes: Uint8Array; mimeType: string } | null>;
   loaded: Deferred.Deferred<void, BrowserFailure> | undefined;
   readonly consoleMessages: Array<ConsoleMessage>;
   omittedConsoleMessages: number;
@@ -311,6 +315,28 @@ const launchBrowser = Effect.fnUntraced(function* (input: {
       if (url === PAGE_URL && body !== undefined) {
         return fulfillPage(sessionId, paused.requestId, body);
       }
+      if (url.startsWith(`${PAGE_ORIGIN}/`) && page.resolveResource) {
+        return page.resolveResource(url).pipe(
+          Effect.flatMap((resource) =>
+            resource
+              ? post(
+                  "Fetch.fulfillRequest",
+                  {
+                    requestId: paused.requestId,
+                    responseCode: 200,
+                    responseHeaders: [{ name: "Content-Type", value: resource.mimeType }],
+                    body: Buffer.from(resource.bytes).toString("base64"),
+                  },
+                  sessionId,
+                )
+              : post(
+                  "Fetch.failRequest",
+                  { requestId: paused.requestId, errorReason: "AccessDenied" },
+                  sessionId,
+                ),
+          ),
+        );
+      }
       // A frame inside the page may show another site; Local Network Access
       // still covers it. The main frame and T3's own origin serve nothing else.
       const otherSiteFrame =
@@ -408,7 +434,10 @@ const launchBrowser = Effect.fnUntraced(function* (input: {
     });
 
   /** A fresh page at `width`; each `load` navigates it and measures the settled layout. */
-  const openPage = Effect.fnUntraced(function* (width: number) {
+  const openPage = Effect.fnUntraced(function* (
+    width: number,
+    options?: { height?: number; resolveResource?: PageEvents["resolveResource"] },
+  ) {
     const { targetId } = yield* send(
       "Target.createTarget",
       { url: "about:blank" },
@@ -422,6 +451,7 @@ const launchBrowser = Effect.fnUntraced(function* (input: {
     const events: PageEvents = {
       // A page target's id is its main frame's id.
       mainFrameId: targetId,
+      ...(options?.resolveResource ? { resolveResource: options.resolveResource } : {}),
       body: undefined,
       loaded: undefined,
       consoleMessages: [],
@@ -457,7 +487,7 @@ const launchBrowser = Effect.fnUntraced(function* (input: {
     );
     yield* send(
       "Emulation.setDeviceMetricsOverride",
-      { width, height: VIEWPORT_HEIGHT, deviceScaleFactor: 1, mobile: false },
+      { width, height: options?.height ?? VIEWPORT_HEIGHT, deviceScaleFactor: 1, mobile: false },
       Ignored,
       sessionId,
     );
@@ -521,7 +551,36 @@ const launchBrowser = Effect.fnUntraced(function* (input: {
       Effect.ignore,
     );
 
-    return { load, screenshot, consoleMessages, close };
+    const applyStyles = Effect.fnUntraced(function* (
+      compile: (candidates: readonly string[]) => Effect.Effect<string, HtmlRenderBrowserError>,
+    ) {
+      const classes = yield* send(
+        "Runtime.evaluate",
+        {
+          expression:
+            "Array.from(new Set(Array.from(document.querySelectorAll('[class]')).flatMap(e => Array.from(e.classList))))",
+          returnByValue: true,
+        },
+        Schema.Struct({ result: Schema.Struct({ value: Schema.Array(Schema.String) }) }),
+        sessionId,
+      );
+      const css = yield* compile(classes.result.value);
+      yield* send(
+        "Runtime.evaluate",
+        {
+          expression: `(() => { const style = document.createElement('style'); style.textContent = ${encodeJavaScriptString(css)}; document.head.appendChild(style); })()`,
+        },
+        Ignored,
+        sessionId,
+      );
+      yield* send(
+        "Runtime.evaluate",
+        { expression: SETTLE_EXPRESSION, awaitPromise: true },
+        Ignored,
+        sessionId,
+      );
+    });
+    return { load, screenshot, consoleMessages, close, applyStyles };
   });
 
   return { openPage };
@@ -549,6 +608,11 @@ export const captureHtmlScreenshot = Effect.fn("headlessChrome.captureHtmlScreen
     readonly html: string;
     readonly width: number;
     readonly urlFragment: string;
+    readonly height?: number;
+    readonly resolveResource?: PageEvents["resolveResource"];
+    readonly compileStyles?: (
+      candidates: readonly string[],
+    ) => Effect.Effect<string, HtmlRenderBrowserError>;
   }) {
     const path = yield* Path.Path;
     const directory = yield* scratchDirectory;
@@ -557,9 +621,10 @@ export const captureHtmlScreenshot = Effect.fn("headlessChrome.captureHtmlScreen
       noSandbox: input.noSandbox,
       profileDirectory: path.join(directory, "profile"),
     });
-    const page = yield* browser.openPage(input.width);
+    const page = yield* browser.openPage(input.width, input);
     const contentHeight = yield* page.load(pageBody(input.html), input.urlFragment);
-    const capturedHeight = Math.max(1, Math.min(contentHeight, MAX_CAPTURE_HEIGHT));
+    if (input.compileStyles) yield* page.applyStyles(input.compileStyles);
+    const capturedHeight = Math.max(1, input.height ?? Math.min(contentHeight, MAX_CAPTURE_HEIGHT));
     const png = yield* page.screenshot(capturedHeight);
     return { png, contentHeight, capturedHeight, consoleMessages: page.consoleMessages() };
   },

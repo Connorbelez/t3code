@@ -8,6 +8,7 @@ import {
 } from "./providerSetup.ts";
 import * as Schema from "effect/Schema";
 import * as Diagram from "./diagrams.ts";
+import * as DiagramArtifact from "./diagramArtifacts.ts";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
 import * as RpcMiddleware from "effect/rpc/RpcMiddleware";
@@ -419,6 +420,10 @@ export const WS_METHODS = {
   diagramsChanges: "diagrams.changes",
   diagramsCreate: "diagrams.create",
   diagramsRead: "diagrams.read",
+  diagramsArtifactRead: "diagrams.artifactRead",
+  diagramsArtifactWatch: "diagrams.artifactWatch",
+  diagramsArtifactCss: "diagrams.artifactCss",
+  diagramsArtifactCapture: "diagrams.artifactCapture",
   diagramsLifecycle: "diagrams.lifecycle",
   diagramsApplyBatch: "diagrams.applyBatch",
   diagramsReceipt: "diagrams.receipt",
@@ -1466,6 +1471,31 @@ const WsDiagramsReadRpc = Rpc.make(WS_METHODS.diagramsRead, {
   error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
 });
 
+const WsDiagramsArtifactReadRpc = Rpc.make(WS_METHODS.diagramsArtifactRead, {
+  payload: DiagramArtifact.DiagramArtifactTarget,
+  success: DiagramArtifact.DiagramArtifactDocument,
+  error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
+});
+
+const WsDiagramsArtifactWatchRpc = Rpc.make(WS_METHODS.diagramsArtifactWatch, {
+  payload: DiagramArtifact.DiagramArtifactTarget,
+  success: DiagramArtifact.DiagramArtifactChange,
+  error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
+const WsDiagramsArtifactCssRpc = Rpc.make(WS_METHODS.diagramsArtifactCss, {
+  payload: DiagramArtifact.DiagramArtifactCssInput,
+  success: DiagramArtifact.DiagramArtifactCss,
+  error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
+});
+
+const WsDiagramsArtifactCaptureRpc = Rpc.make(WS_METHODS.diagramsArtifactCapture, {
+  payload: DiagramArtifact.DiagramArtifactTarget,
+  success: DiagramArtifact.DiagramArtifactCapture,
+  error: Schema.Union([Diagram.DiagramOperationError, EnvironmentAuthorizationError]),
+});
+
 const WsDiagramsLifecycleRpc = Rpc.make(WS_METHODS.diagramsLifecycle, {
   payload: Diagram.DiagramLifecycleInput,
   success: Schema.NullOr(Diagram.DiagramMetadata),
@@ -2037,6 +2067,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsDiagramsChangesRpc,
   WsDiagramsCreateRpc,
   WsDiagramsReadRpc,
+  WsDiagramsArtifactReadRpc,
+  WsDiagramsArtifactWatchRpc,
+  WsDiagramsArtifactCssRpc,
+  WsDiagramsArtifactCaptureRpc,
   WsDiagramsLifecycleRpc,
   WsDiagramsApplyBatchRpc,
   WsDiagramsReceiptRpc,

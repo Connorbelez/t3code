@@ -14,6 +14,8 @@ import {
   Box,
   DefaultContextMenu,
   DefaultContextMenuContent,
+  DefaultMainMenu,
+  DefaultMainMenuContent,
   EmbedShapeUtil,
   Tldraw,
   TldrawUiMenuGroup,
@@ -30,6 +32,7 @@ import {
   type TLShapeId,
   type TLStateNodeConstructor,
   type TLUiContextMenuProps,
+  type TLUiMainMenuProps,
 } from "tldraw";
 import * as Schema from "effect/Schema";
 import {
@@ -42,7 +45,27 @@ import {
   useState,
 } from "react";
 import { useTheme } from "~/hooks/useTheme";
-import { createDiagramApi, diagramSyncEvents } from "./diagramApi";
+import { usePreparedConnection } from "~/state/session";
+import { resolveAssetUrl } from "~/assets/assetUrls";
+import {
+  createDiagramApi,
+  createDiagramArtifactApi,
+  diagramArtifactEvents,
+  diagramSyncEvents,
+} from "./diagramApi";
+import {
+  HtmlArtifactShapeUtil,
+  HtmlArtifactScopeContext,
+  registerHtmlArtifactScope,
+  prepareHtmlArtifactCaptures,
+  subscribeWhenDiagramSaved,
+  type HtmlArtifactScope,
+} from "./HtmlArtifactShapeUtil";
+import {
+  HtmlArtifactSourceDialog,
+  type HtmlArtifactSourceAction,
+} from "./HtmlArtifactSourceDialog";
+import { createDiagramSchema } from "./diagramSchema";
 import { DiagramSocket, parseDocumentRecord, type DiagramSaveState } from "./diagramSocket";
 import { diagramHostClientId, registerDiagramHost, type MountedDiagramHost } from "./diagramHosts";
 import { rehearseDiagramChanges, validateDiagramBatch } from "./diagramBatchPreflight";
@@ -61,10 +84,17 @@ import { DiagramAnnotationLayer, DiagramAnnotationScopeContext } from "./Diagram
 import "tldraw/tldraw.css";
 
 const assetUrls = getAssetUrlsByImport();
-const shapeUtils = [EmbedShapeUtil.configure({ embedDefinitions: [] })];
+const shapeUtils = [EmbedShapeUtil.configure({ embedDefinitions: [] }), HtmlArtifactShapeUtil];
+const diagramSchema = createDiagramSchema();
 const decodeScope = Schema.decodeSync(DiagramPageScope);
 function ChatContextMenu(props: TLUiContextMenuProps) {
   const editor = useEditor();
+  const artifacts = useContext(HtmlArtifactScopeContext);
+  const readonly = useValue(
+    "artifact creation readonly",
+    () => editor.getInstanceState().isReadonly,
+    [editor],
+  );
   const annotatable = useContext(DiagramAnnotationScopeContext)?.binding.supported === true;
   const hasSelection = useValue("has selection", () => editor.getSelectedShapeIds().length > 0, [
     editor,
@@ -93,13 +123,60 @@ function ChatContextMenu(props: TLUiContextMenuProps) {
           ) : null}
         </TldrawUiMenuGroup>
       ) : null}
+      {!readonly ? (
+        <TldrawUiMenuGroup id="t3-html-artifacts">
+          <TldrawUiMenuItem
+            id="add-html-artifact"
+            label="Add HTML artifact"
+            onSelect={() => artifacts?.createSource({ kind: "create-inline" })}
+          />
+          <TldrawUiMenuItem
+            id="link-html-artifact"
+            label="Link HTML file"
+            onSelect={() => artifacts?.createSource({ kind: "create-file" })}
+          />
+        </TldrawUiMenuGroup>
+      ) : null}
       <DefaultContextMenuContent />
     </DefaultContextMenu>
   );
 }
-const hiddenComponents: TLComponents = { SharePanel: null };
+function ArtifactMainMenu(props: TLUiMainMenuProps) {
+  const editor = useEditor();
+  const scope = useContext(HtmlArtifactScopeContext);
+  const readonly = useValue(
+    "artifact creation readonly",
+    () => editor.getInstanceState().isReadonly,
+    [editor],
+  );
+  return (
+    <DefaultMainMenu {...props}>
+      <DefaultMainMenuContent />
+      {!readonly ? (
+        <TldrawUiMenuGroup id="html-artifacts">
+          <TldrawUiMenuItem
+            id="add-html-artifact"
+            label="Add HTML artifact"
+            onSelect={() => scope?.createSource({ kind: "create-inline" })}
+          />
+          <TldrawUiMenuItem
+            id="link-html-artifact"
+            label="Link HTML file"
+            onSelect={() => scope?.createSource({ kind: "create-file" })}
+          />
+        </TldrawUiMenuGroup>
+      ) : null}
+    </DefaultMainMenu>
+  );
+}
+const hiddenComponents: TLComponents = {
+  SharePanel: null,
+  ContextMenu: ChatContextMenu,
+  MainMenu: ArtifactMainMenu,
+};
 const panelComponents: TLComponents = {
   SharePanel: null,
+  MainMenu: ArtifactMainMenu,
   ContextMenu: ChatContextMenu,
   InFrontOfTheCanvas: DiagramAnnotationLayer,
 };
@@ -141,6 +218,7 @@ type DiagramEditorProps = {
   /** Set by the Canvas panel when the thread's message draft can hold Canvas comments. */
   annotationBinding?: DiagramAnnotationBinding | undefined;
   visible?: boolean;
+  onOpenArtifactFile?: (path: string) => void;
 };
 export default function DiagramEditor(props: DiagramEditorProps) {
   const [generation, setGeneration] = useState(0);
@@ -161,8 +239,83 @@ function MountedDiagramEditor(props: DiagramEditorProps & { onAdoptionLost: () =
     () => ({ projectId: props.diagram.projectId, diagramId: props.diagram.id }),
     [props.diagram.projectId, props.diagram.id],
   );
-  const [editor, setEditor] = useState<Editor | null>(null);
+  const artifactApi = useMemo(
+    () => createDiagramArtifactApi(registry, props.environmentId),
+    [registry, props.environmentId],
+  );
   const socketRef = useRef<DiagramSocket | null>(null);
+  const preparedConnection = usePreparedConnection(props.environmentId);
+  const httpBaseUrl =
+    preparedConnection._tag === "Some" ? preparedConnection.value.httpBaseUrl : null;
+  const artifactOrigin = useRef(httpBaseUrl);
+  useEffect(() => {
+    artifactOrigin.current = httpBaseUrl;
+  }, [httpBaseUrl]);
+  const openArtifactFile = useRef(props.onOpenArtifactFile);
+  useEffect(() => {
+    openArtifactFile.current = props.onOpenArtifactFile;
+  }, [props.onOpenArtifactFile]);
+  const canOpenArtifactFile = props.onOpenArtifactFile !== undefined;
+  const [sourceAction, setSourceAction] = useState<HtmlArtifactSourceAction | null>(null);
+  const artifactScope = useMemo<HtmlArtifactScope>(
+    () => ({
+      api: {
+        ...artifactApi,
+        read: async (input) => {
+          const socket = socketRef.current;
+          if (!socket) throw new Error("Diagram is not connected.");
+          await socket.waitUntilSaved();
+          const result = await artifactApi.read(input);
+          if (!result.baseUrl) return result;
+          const baseUrl =
+            artifactOrigin.current === null
+              ? null
+              : resolveAssetUrl(artifactOrigin.current, result.baseUrl);
+          if (!baseUrl) throw new Error("HTML artifact environment is not connected.");
+          return { ...result, baseUrl };
+        },
+        capture: async (input) => {
+          const socket = socketRef.current;
+          if (!socket) throw new Error("Diagram is not connected.");
+          await socket.waitUntilSaved();
+          return artifactApi.capture(input);
+        },
+      },
+      target,
+      whenReady: (ready) => {
+        const socket = socketRef.current;
+        if (!socket) return () => {};
+        return subscribeWhenDiagramSaved(socket, () => {
+          ready();
+          return () => {};
+        });
+      },
+      subscribe: (shapeId, changed, failed) => {
+        const socket = socketRef.current;
+        if (!socket) {
+          failed(new Error("Diagram is not connected."));
+          return () => {};
+        }
+        return subscribeWhenDiagramSaved(socket, () =>
+          diagramArtifactEvents(registry, {
+            environmentId: props.environmentId,
+            input: { ...target, shapeId },
+            onEvent: (event) => (event.error ? failed(new Error(event.error)) : changed()),
+            onError: failed,
+          }),
+        );
+      },
+      createSource: setSourceAction,
+      repairSource: (shape) => setSourceAction({ kind: "edit", shape }),
+      editSource: (shape) => {
+        if (shape.props.source.kind === "file" && canOpenArtifactFile)
+          openArtifactFile.current?.(shape.props.source.path);
+        else setSourceAction({ kind: "edit", shape });
+      },
+    }),
+    [artifactApi, canOpenArtifactFile, props.environmentId, registry, target],
+  );
+  const [editor, setEditor] = useState<Editor | null>(null);
   const composing = useRef(false);
   const heldRef = useRef(false);
   const uploads = useRef(0);
@@ -215,7 +368,10 @@ function MountedDiagramEditor(props: DiagramEditorProps & { onAdoptionLost: () =
     socketRef.current = socket;
     return socket;
   }, [api, props.environmentId, props.onAdoptionLost, registry, target]);
-  const synced = useSync({ connect, assets });
+  const synced = useSync({ connect, assets, schema: diagramSchema });
+  useEffect(() => {
+    if (editor) return registerHtmlArtifactScope(editor, artifactScope);
+  }, [editor, artifactScope]);
 
   const mount = useCallback(
     (mountedEditor: Editor) => {
@@ -442,78 +598,83 @@ function MountedDiagramEditor(props: DiagramEditorProps & { onAdoptionLost: () =
           )
             throw new DiagramOperationError({ code: "scope-unavailable" });
           await requireImageAssets(ids);
-          const exportBounds =
-            scope.kind === "diagram"
-              ? ids.length > 0
-                ? Box.Common(
-                    ids.flatMap((id) => {
-                      const box = editor.getShapePageBounds(id);
-                      return box ? [box] : [];
-                    }),
-                  )
-                : new Box(0, 0, 512, 320)
-              : Box.From(scope.bounds);
-          let image:
-            | { blob: Blob; width: number; height: number }
-            | { svg: string; width: number; height: number }
-            | undefined;
-          if (ids.length === 0) {
-            const scale = Math.min(1, 2048 / Math.max(exportBounds.w, exportBounds.h, 1));
-            const width = Math.max(1, Math.round(exportBounds.w * scale));
-            const height = Math.max(1, Math.round(exportBounds.h * scale));
-            if (format === "svg")
-              image = {
-                svg: `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="100%" height="100%" fill="white"/></svg>`,
-                width,
-                height,
-              };
-            else {
-              const canvas = document.createElement("canvas");
-              canvas.width = width;
-              canvas.height = height;
-              const context = canvas.getContext("2d");
-              if (!context) throw new DiagramOperationError({ code: "assets-unavailable" });
-              context.fillStyle = "white";
-              context.fillRect(0, 0, width, height);
-              const blob = await new Promise<Blob>((resolve, reject) =>
-                canvas.toBlob(
-                  (result) =>
-                    result
-                      ? resolve(result)
-                      : reject(new DiagramOperationError({ code: "assets-unavailable" })),
-                  "image/png",
-                ),
-              );
-              image = { blob, width, height };
-            }
-          } else
-            image =
-              format === "svg"
-                ? await editor.getSvgString(ids, {
-                    ...(exportBounds ? { bounds: exportBounds } : {}),
-                    padding: 0,
-                  })
-                : await editor.toImage(ids, {
-                    format: "png",
-                    pixelRatio: 1,
-                    scale: Math.min(1, 2048 / Math.max(exportBounds.w, exportBounds.h, 1)),
-                    bounds: exportBounds,
-                    padding: 0,
-                  });
-          if (!image) throw new DiagramOperationError({ code: "assets-unavailable" });
-          const blob =
-            "blob" in image ? image.blob : new Blob([image.svg], { type: "image/svg+xml" });
-          const base64 = await blobBase64(blob);
-          return {
-            diagramId: target.diagramId,
-            revision,
-            scope,
-            bounds: (exportBounds ?? new Box(0, 0, image.width, image.height)).toJson(),
-            width: Math.round(image.width),
-            height: Math.round(image.height),
-            mimeType: format === "svg" ? "image/svg+xml" : "image/png",
-            base64,
-          } satisfies DiagramCapture;
+          const releaseCaptures = await prepareHtmlArtifactCaptures(editor, ids);
+          try {
+            const exportBounds =
+              scope.kind === "diagram"
+                ? ids.length > 0
+                  ? Box.Common(
+                      ids.flatMap((id) => {
+                        const box = editor.getShapePageBounds(id);
+                        return box ? [box] : [];
+                      }),
+                    )
+                  : new Box(0, 0, 512, 320)
+                : Box.From(scope.bounds);
+            let image:
+              | { blob: Blob; width: number; height: number }
+              | { svg: string; width: number; height: number }
+              | undefined;
+            if (ids.length === 0) {
+              const scale = Math.min(1, 2048 / Math.max(exportBounds.w, exportBounds.h, 1));
+              const width = Math.max(1, Math.round(exportBounds.w * scale));
+              const height = Math.max(1, Math.round(exportBounds.h * scale));
+              if (format === "svg")
+                image = {
+                  svg: `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="100%" height="100%" fill="white"/></svg>`,
+                  width,
+                  height,
+                };
+              else {
+                const canvas = document.createElement("canvas");
+                canvas.width = width;
+                canvas.height = height;
+                const context = canvas.getContext("2d");
+                if (!context) throw new DiagramOperationError({ code: "assets-unavailable" });
+                context.fillStyle = "white";
+                context.fillRect(0, 0, width, height);
+                const blob = await new Promise<Blob>((resolve, reject) =>
+                  canvas.toBlob(
+                    (result) =>
+                      result
+                        ? resolve(result)
+                        : reject(new DiagramOperationError({ code: "assets-unavailable" })),
+                    "image/png",
+                  ),
+                );
+                image = { blob, width, height };
+              }
+            } else
+              image =
+                format === "svg"
+                  ? await editor.getSvgString(ids, {
+                      ...(exportBounds ? { bounds: exportBounds } : {}),
+                      padding: 0,
+                    })
+                  : await editor.toImage(ids, {
+                      format: "png",
+                      pixelRatio: 1,
+                      scale: Math.min(1, 2048 / Math.max(exportBounds.w, exportBounds.h, 1)),
+                      bounds: exportBounds,
+                      padding: 0,
+                    });
+            if (!image) throw new DiagramOperationError({ code: "assets-unavailable" });
+            const blob =
+              "blob" in image ? image.blob : new Blob([image.svg], { type: "image/svg+xml" });
+            const base64 = await blobBase64(blob);
+            return {
+              diagramId: target.diagramId,
+              revision,
+              scope,
+              bounds: (exportBounds ?? new Box(0, 0, image.width, image.height)).toJson(),
+              width: Math.round(image.width),
+              height: Math.round(image.height),
+              mimeType: format === "svg" ? "image/svg+xml" : "image/png",
+              base64,
+            } satisfies DiagramCapture;
+          } finally {
+            releaseCaptures();
+          }
         });
       },
       annotate: (input) =>
@@ -521,34 +682,44 @@ function MountedDiagramEditor(props: DiagramEditorProps & { onAdoptionLost: () =
           const targets = resolveAnnotationTargets(editor, input.pageId, input.annotations);
           const ids = pageShapeIds(input.pageId);
           await requireImageAssets(ids);
-          const rendered = await renderAnnotatedCapture(targets, {
-            exportSvg: async (image) => {
-              // An empty id list would export the current page instead of this one.
-              const exported =
-                ids.length > 0
-                  ? await editor.getSvgString(ids, {
-                      bounds: Box.From(image.bounds),
-                      scale: image.scale,
-                      padding: 0,
-                      background: true,
-                      darkMode: false,
-                    })
-                  : undefined;
-              return exported?.svg ?? blankExportSvg(image.bounds, image.width, image.height);
-            },
-            rasterize: async (svg, width, height) => {
-              const blob = await getSvgAsImage(svg, { type: "png", width, height, pixelRatio: 1 });
-              if (!blob) throw new DiagramOperationError({ code: "assets-unavailable" });
-              return blobBase64(blob);
-            },
-          });
-          return {
-            diagramId: target.diagramId,
-            revision,
-            pageId: input.pageId,
-            annotations: input.annotations,
-            ...rendered,
-          } satisfies DiagramAnnotatedCapture;
+          const releaseCaptures = await prepareHtmlArtifactCaptures(editor, ids);
+          try {
+            const rendered = await renderAnnotatedCapture(targets, {
+              exportSvg: async (image) => {
+                // An empty id list would export the current page instead of this one.
+                const exported =
+                  ids.length > 0
+                    ? await editor.getSvgString(ids, {
+                        bounds: Box.From(image.bounds),
+                        scale: image.scale,
+                        padding: 0,
+                        background: true,
+                        darkMode: false,
+                      })
+                    : undefined;
+                return exported?.svg ?? blankExportSvg(image.bounds, image.width, image.height);
+              },
+              rasterize: async (svg, width, height) => {
+                const blob = await getSvgAsImage(svg, {
+                  type: "png",
+                  width,
+                  height,
+                  pixelRatio: 1,
+                });
+                if (!blob) throw new DiagramOperationError({ code: "assets-unavailable" });
+                return blobBase64(blob);
+              },
+            });
+            return {
+              diagramId: target.diagramId,
+              revision,
+              pageId: input.pageId,
+              annotations: input.annotations,
+              ...rendered,
+            } satisfies DiagramAnnotatedCapture;
+          } finally {
+            releaseCaptures();
+          }
         }),
       compose: async (request) => {
         requireSafe();
@@ -703,18 +874,28 @@ function MountedDiagramEditor(props: DiagramEditorProps & { onAdoptionLost: () =
         }
       }}
     >
-      <DiagramAnnotationScopeContext value={annotationScope}>
-        <Tldraw
-          shapeUtils={shapeUtils}
-          tools={chatAttachable ? panelTools : hiddenTools}
-          store={synced}
-          assetUrls={assetUrls}
-          onMount={mount}
-          licenseKey={import.meta.env.VITE_TLDRAW_LICENSE_KEY}
-          options={{ maxPages: 100 }}
-          components={chatAttachable ? panelComponents : hiddenComponents}
+      <HtmlArtifactScopeContext value={artifactScope}>
+        <DiagramAnnotationScopeContext value={annotationScope}>
+          <Tldraw
+            shapeUtils={shapeUtils}
+            tools={chatAttachable ? panelTools : hiddenTools}
+            store={synced}
+            assetUrls={assetUrls}
+            onMount={mount}
+            licenseKey={import.meta.env.VITE_TLDRAW_LICENSE_KEY}
+            options={{ maxPages: 100 }}
+            components={chatAttachable ? panelComponents : hiddenComponents}
+          />
+        </DiagramAnnotationScopeContext>
+      </HtmlArtifactScopeContext>
+      {sourceAction && editor ? (
+        <HtmlArtifactSourceDialog
+          key={sourceAction.kind === "edit" ? sourceAction.shape.id : sourceAction.kind}
+          action={sourceAction}
+          editor={editor}
+          close={() => setSourceAction(null)}
         />
-      </DiagramAnnotationScopeContext>
+      ) : null}
       {fenced ? (
         <div className="absolute inset-0 z-50 cursor-wait" aria-label="Applying diagram changes" />
       ) : null}

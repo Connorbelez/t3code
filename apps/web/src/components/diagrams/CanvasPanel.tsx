@@ -74,6 +74,7 @@ export type CanvasPanelProps = {
   diagramId: DiagramId | null;
   onSelectDiagram: (diagram: DiagramMetadata) => void;
   onAttach: (reference: DiagramContextReference) => void;
+  onOpenArtifactFile?: (path: string) => void;
   /** The thread's message draft, where Canvas comments are saved. Absent: no annotating. */
   annotationBinding?: DiagramAnnotationBinding;
 };
@@ -485,6 +486,9 @@ function SupportedCanvasPanel(props: CanvasPanelProps) {
                 onSaveState={reportSaveState}
                 onAddSelectionToChat={() => void attach("selection")}
                 annotationBinding={props.annotationBinding}
+                {...(props.onOpenArtifactFile
+                  ? { onOpenArtifactFile: props.onOpenArtifactFile }
+                  : {})}
               />
             </Suspense>
           </div>

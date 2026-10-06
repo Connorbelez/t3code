@@ -30,7 +30,7 @@ const list = Tool.make("t3_diagram_list", {
 const read = Tool.make("t3_diagram_read", {
   ...shared,
   description:
-    "Read current diagram revision and bounded all-page shape/binding summaries. Each composition is listed once instead of its member shapes; pass compositionKey (or includeCompositions) for its detail: each member's last composed spec including ref, whether someone edited it, and its current text when edited, paged by compositionOffset and compositionLimit. Set includeRecords or recordIds for schema-bearing records and paginate with nextOffset. Retain exact target, ancestor, binding and asset records as expected preconditions before editing. Reads work without an editor.",
+    'Read current diagram revision and bounded all-page shape/binding summaries. Each composition is listed once instead of its member shapes; pass compositionKey (or includeCompositions) for its detail: each member\'s last composed spec including ref, whether someone edited it, and its current text when edited, paged by compositionOffset and compositionLimit. Set includeRecords or recordIds for schema-bearing records and paginate with nextOffset. Retain exact target, ancestor, binding and asset records as expected preconditions before editing. HTML artifact summaries include htmlArtifactSource. Read their records for props {w,h,title,source}, where source is {kind: "inline", html} owned by the diagram or {kind: "file", path} relative to its project. Reads work without an editor.',
   parameters: Schema.Struct({ ...Contracts.DiagramReadInput.fields, projectId }),
   success: Contracts.DiagramReadResult,
 })
@@ -48,7 +48,7 @@ const create = Tool.make("t3_diagram_create", {
 const apply = Tool.make("t3_diagram_apply", {
   ...shared,
   description:
-    "Apply one atomic bounded SDK record batch. Read first and pass expected records for every target and required ancestor, parent, binding or asset dependency. Respect the attached selection focus and leave unrelated records unchanged. A connected editor host is required. Success is a durable receipt with one host Undo step. Reuse requestId with the identical batch after an uncertain response. Read the receipt before fresh work. Failed or disconnected work is never replayed later. Prefer t3_diagram_compose for composition members (shapes whose meta has t3Composition); raw edits to them count as human edits.",
+    'Apply one atomic bounded SDK record batch. Read first and pass expected records for every target and required ancestor, parent, binding or asset dependency. Respect the attached selection focus and leave unrelated records unchanged. A connected editor host is required. Success is a durable receipt with one host Undo step. Reuse requestId with the identical batch after an uncertain response. Read the receipt before fresh work. Failed or disconnected work is never replayed later. Prefer t3_diagram_compose for composition members (shapes whose meta has t3Composition); raw edits to them count as human edits. Create or update interactive HTML using type "html-artifact" with props {w,h,title,source}. Source is either {kind: "inline", html} or {kind: "file", path} pointing to an existing project HTML file. Removing its shape never deletes the file. Bind ordinary arrows to the artifact shape.',
   parameters: Schema.Struct({ ...target, batch: Contracts.DiagramBatch }),
   success: Contracts.DiagramMutationReceipt,
 })

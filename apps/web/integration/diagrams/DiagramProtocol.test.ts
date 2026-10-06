@@ -1,10 +1,32 @@
 // @vitest-environment jsdom
+import { createDiagramSchema } from "../../src/components/diagrams/diagramSchema";
+import { HtmlArtifactShapeUtil } from "../../src/components/diagrams/HtmlArtifactShapeUtil";
 import {
   TLSyncClient,
   type TLPersistentClientSocket,
   type TLSocketStatusChangeEvent,
 } from "@tldraw/sync";
-import { Editor, GeoShapeUtil, atom, createShapeId, createTLStore, type TLRecord } from "tldraw";
+import {
+  Editor,
+  atom,
+  createBindingId,
+  createShapeId,
+  createTLStore,
+  defaultShapeUtils,
+  defaultBindingUtils,
+  defaultTools,
+  defaultShapeTools,
+  defaultAddFontsFromNode,
+  tipTapDefaultExtensions,
+  getArrowInfo,
+  isEqual,
+  type TLAnyShapeUtilConstructor,
+  type TLRecord,
+} from "tldraw";
+import {
+  rehearseDiagramChanges,
+  validateDiagramBatch,
+} from "../../src/components/diagrams/diagramBatchPreflight";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   DiagramDatabase,
@@ -165,10 +187,18 @@ function mount(owner: DiagramRoom, sessionId: string, generation: string) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const editor = new Editor({
-    store: createTLStore(),
-    shapeUtils: [GeoShapeUtil],
-    bindingUtils: [],
-    tools: [],
+    store: createTLStore({ schema: createDiagramSchema() }),
+    shapeUtils: [
+      ...defaultShapeUtils,
+      HtmlArtifactShapeUtil,
+    ] as unknown as readonly TLAnyShapeUtilConstructor[],
+    bindingUtils: defaultBindingUtils,
+    tools: [...defaultTools, ...defaultShapeTools],
+    initialState: "select",
+    textOptions: {
+      addFontsFromNode: defaultAddFontsFromNode,
+      tipTapConfig: { extensions: tipTapDefaultExtensions },
+    },
     getContainer: () => container,
   });
   const socket = new MemorySocket(owner, sessionId);
@@ -247,82 +277,194 @@ afterEach(async () => {
 });
 
 describe("SDK diagram commit protocol", () => {
-  it.each([false, true])(
-    "adopts a durable batch as one host Undo step with scheduled SDK frames %s",
-    async (scheduled) => {
-      vi.stubGlobal("__FORCE_RAF_IN_TESTS__", scheduled);
-      const database = new DiagramDatabase(":memory:");
-      dispose.push(() => database.close());
-      const owner = database.create("00000000-0000-4000-8000-000000000001", "project");
-      const host = mount(owner, "host", "generation");
-      const remote = mount(owner, "remote", "remote-generation");
-      dispose.push(host.dispose, remote.dispose);
-      await Promise.all([host.loaded, remote.loaded]);
-      host.editor.markHistoryStoppingPoint("before human");
+  it("rehearses bound HTML artifact move and resize as one synced Undo step and reconnects", async () => {
+    const database = new DiagramDatabase(":memory:");
+    dispose.push(() => database.close());
+    const owner = database.create("00000000-0000-4000-8000-000000000020", "project");
+    const host = mount(owner, "host", "generation");
+    const remote = mount(owner, "remote", "remote-generation");
+    dispose.push(host.dispose, remote.dispose);
+    await Promise.all([host.loaded, remote.loaded]);
+    const artifactId = createShapeId("bound-artifact");
+    const arrowId = createShapeId("artifact-arrow");
+    const bindingId = createBindingId("artifact-binding");
+    host.editor.createShapes([
+      {
+        id: artifactId,
+        type: "html-artifact",
+        x: 10,
+        y: 10,
+        props: {
+          w: 640,
+          h: 480,
+          title: "Bound artifact",
+          source: { kind: "file", path: "mock.html" },
+        },
+      },
+      { id: arrowId, type: "arrow", x: -200, y: 250, props: { end: { x: 100, y: 0 } } },
+    ]);
+    host.editor.createBinding({
+      id: bindingId,
+      type: "arrow",
+      fromId: arrowId,
+      toId: artifactId,
+      props: {
+        terminal: "end",
+        normalizedAnchor: { x: 0.5, y: 0.5 },
+        isExact: true,
+        isPrecise: true,
+        snap: "none",
+      },
+    });
+    host.editor.markHistoryStoppingPoint("bound artifact created");
+    await sdkFrames();
+    await shapeAt(remote.editor, artifactId, 10);
+    const endpoint = (editor: Editor) => {
+      const info = getArrowInfo(editor, arrowId);
+      const transform = editor.getShapePageTransform(arrowId);
+      if (!info || !transform) throw new Error("Missing arrow geometry");
+      const point = transform.applyToPoint(info.end.handle);
+      return { x: point.x, y: point.y };
+    };
+    expect(endpoint(host.editor)).toEqual({ x: 330, y: 250 });
+    const records = host.editor.store.serialize("document");
+    const before = host.editor.getShape(artifactId);
+    if (!before || before.type !== "html-artifact") throw new Error("Missing HTML artifact");
+    const after = rehearseDiagramChanges(
+      host.editor,
+      records,
+      [{ ...before, x: 120, y: 240, props: { ...before.props, w: 800, h: 600 } }],
+      [],
+    );
+    const puts = Object.values(after).filter((record) => !isEqual(records[record.id], record));
+    const batch = {
+      requestId: "bound-artifact-move-resize",
+      expected: Object.values(records).map((record) => ({ id: record.id, record })),
+      puts,
+      deletes: [],
+    };
+    expect(() => validateDiagramBatch(host.editor, batch)).not.toThrow();
+    expect(host.editor.store.serialize("document")).toEqual(records);
+    const fence = owner.fenceHost(
+      "host",
+      "generation",
+      diagramRecordFingerprint(documentRecords(host.editor)),
+    );
+    owner.commit({ ...batch, namespace: "provider" }, fence);
+    await sdkFrames();
+    await host.socket.adoptionAcknowledged.promise;
+    await shapeAt(remote.editor, artifactId, 120);
+    for (const editor of [host.editor, remote.editor]) {
+      expect(editor.getShape(artifactId)).toMatchObject({ props: { w: 800, h: 600 } });
+      expect(editor.getBinding(bindingId)).toMatchObject({ fromId: arrowId, toId: artifactId });
+      expect(endpoint(editor)).toEqual({ x: 520, y: 540 });
+    }
+    remote.socket.restart();
+    await sdkFrames();
+    expect(endpoint(remote.editor)).toEqual({ x: 520, y: 540 });
+    host.editor.undo();
+    await sdkFrames();
+    await shapeAt(remote.editor, artifactId, 10);
+    for (const editor of [host.editor, remote.editor]) {
+      expect(editor.getShape(artifactId)).toEqual(before);
+      expect(editor.getBinding(bindingId)).toMatchObject({ toId: artifactId });
+      expect(endpoint(editor)).toEqual({ x: 330, y: 250 });
+    }
+  });
+
+  it.each([
+    { scheduled: false, artifact: false },
+    { scheduled: true, artifact: false },
+    { scheduled: false, artifact: true },
+    { scheduled: true, artifact: true },
+  ])("adopts a durable batch as one host Undo step %j", async ({ scheduled, artifact }) => {
+    vi.stubGlobal("__FORCE_RAF_IN_TESTS__", scheduled);
+    const database = new DiagramDatabase(":memory:");
+    dispose.push(() => database.close());
+    const owner = database.create("00000000-0000-4000-8000-000000000001", "project");
+    const host = mount(owner, "host", "generation");
+    const remote = mount(owner, "remote", "remote-generation");
+    dispose.push(host.dispose, remote.dispose);
+    await Promise.all([host.loaded, remote.loaded]);
+    host.editor.markHistoryStoppingPoint("before human");
+    if (artifact) {
+      host.editor.createShape({
+        id: createShapeId("human"),
+        type: "html-artifact",
+        x: 10,
+        y: 10,
+        props: {
+          w: 640,
+          h: 480,
+          title: "Interactive plan",
+          source: { kind: "inline", html: "<input value=hello>" },
+        },
+      });
+    } else {
       host.editor.createShape({ id: createShapeId("human"), type: "geo", x: 10, y: 10 });
-      host.editor.markHistoryStoppingPoint("after human");
-      await sdkFrames();
-      await shapeAt(remote.editor, createShapeId("human"), 10);
-      remote.editor.markHistoryStoppingPoint("remote human");
-      remote.editor.createShape({ id: createShapeId("remote-human"), type: "geo", x: 80 });
-      remote.editor.markHistoryStoppingPoint("after remote human");
-      await sdkFrames();
-      await shapeAt(host.editor, createShapeId("remote-human"), 80);
-      const before = host.editor.getShape(createShapeId("human"))!;
-      const page = host.editor.getCurrentPage();
-      const mutation: DiagramMutation = {
-        namespace: "provider",
-        requestId: "agent",
-        expected: [
-          { id: before.id, record: before },
-          { id: page.id, record: page },
-        ],
-        puts: [{ ...before, x: 120, y: 240 }],
-        deletes: [],
-      };
-      const fence = owner.fenceHost(
-        "host",
-        "generation",
-        diagramRecordFingerprint(documentRecords(host.editor)),
-      );
-      const receipt = owner.commit(mutation, fence);
-      await sdkFrames();
-      await host.socket.adoptionAcknowledged.promise;
-      await Promise.all([
-        shapeAt(host.editor, createShapeId("human"), 120),
-        shapeAt(remote.editor, createShapeId("human"), 120),
-      ]);
-      expect(receipt.changedRecordIds).toEqual([createShapeId("human")]);
-      expect(host.editor.getShape(createShapeId("human"))?.x).toBe(120);
-      expect(remote.editor.getShape(createShapeId("human"))?.x).toBe(120);
-      const hostMessages = host.socket.received.map((message) =>
-        message.type === "custom" ? message.data.type : message.type,
-      );
-      expect(hostMessages.indexOf("diagram-commit")).toBeLessThan(
-        hostMessages.indexOf("diagram-adoption-ack"),
-      );
-      host.editor.markHistoryStoppingPoint("later human");
-      host.editor.updateShape({ id: createShapeId("human"), type: "geo", x: 400 });
-      host.editor.markHistoryStoppingPoint("after later human");
-      await sdkFrames();
-      await shapeAt(remote.editor, createShapeId("human"), 400);
-      host.editor.undo();
-      await sdkFrames();
-      await shapeAt(remote.editor, createShapeId("human"), 120);
-      expect(host.editor.getShape(createShapeId("human"))?.x).toBe(120);
-      host.editor.undo();
-      await sdkFrames();
-      await shapeAt(remote.editor, createShapeId("human"), 10);
-      expect(host.editor.getShape(createShapeId("human"))?.x).toBe(10);
-      host.editor.undo();
-      expect(host.editor.getShape(createShapeId("human"))).toBeUndefined();
-      expect(remote.editor.getCanUndo()).toBe(true);
-      remote.editor.undo();
-      expect(remote.editor.getShape(createShapeId("remote-human"))).toBeUndefined();
-      expect(remote.editor.getCanUndo()).toBe(false);
-      expect(remote.editor.getShape(createShapeId("human"))?.x).toBe(10);
-    },
-  );
+    }
+    host.editor.markHistoryStoppingPoint("after human");
+    await sdkFrames();
+    await shapeAt(remote.editor, createShapeId("human"), 10);
+    remote.editor.markHistoryStoppingPoint("remote human");
+    remote.editor.createShape({ id: createShapeId("remote-human"), type: "geo", x: 80 });
+    remote.editor.markHistoryStoppingPoint("after remote human");
+    await sdkFrames();
+    await shapeAt(host.editor, createShapeId("remote-human"), 80);
+    const before = host.editor.getShape(createShapeId("human"))!;
+    const page = host.editor.getCurrentPage();
+    const mutation: DiagramMutation = {
+      namespace: "provider",
+      requestId: "agent",
+      expected: [
+        { id: before.id, record: before },
+        { id: page.id, record: page },
+      ],
+      puts: [{ ...before, x: 120, y: 240 }],
+      deletes: [],
+    };
+    const fence = owner.fenceHost(
+      "host",
+      "generation",
+      diagramRecordFingerprint(documentRecords(host.editor)),
+    );
+    const receipt = owner.commit(mutation, fence);
+    await sdkFrames();
+    await host.socket.adoptionAcknowledged.promise;
+    await Promise.all([
+      shapeAt(host.editor, createShapeId("human"), 120),
+      shapeAt(remote.editor, createShapeId("human"), 120),
+    ]);
+    expect(receipt.changedRecordIds).toEqual([createShapeId("human")]);
+    expect(host.editor.getShape(createShapeId("human"))?.x).toBe(120);
+    expect(remote.editor.getShape(createShapeId("human"))?.x).toBe(120);
+    const hostMessages = host.socket.received.map((message) =>
+      message.type === "custom" ? message.data.type : message.type,
+    );
+    expect(hostMessages.indexOf("diagram-commit")).toBeLessThan(
+      hostMessages.indexOf("diagram-adoption-ack"),
+    );
+    host.editor.markHistoryStoppingPoint("later human");
+    host.editor.updateShape({ id: createShapeId("human"), type: before.type, x: 400 });
+    host.editor.markHistoryStoppingPoint("after later human");
+    await sdkFrames();
+    await shapeAt(remote.editor, createShapeId("human"), 400);
+    host.editor.undo();
+    await sdkFrames();
+    await shapeAt(remote.editor, createShapeId("human"), 120);
+    expect(host.editor.getShape(createShapeId("human"))?.x).toBe(120);
+    host.editor.undo();
+    await sdkFrames();
+    await shapeAt(remote.editor, createShapeId("human"), 10);
+    expect(host.editor.getShape(createShapeId("human"))?.x).toBe(10);
+    host.editor.undo();
+    expect(host.editor.getShape(createShapeId("human"))).toBeUndefined();
+    expect(remote.editor.getCanUndo()).toBe(true);
+    remote.editor.undo();
+    expect(remote.editor.getShape(createShapeId("remote-human"))).toBeUndefined();
+    expect(remote.editor.getCanUndo()).toBe(false);
+    expect(remote.editor.getShape(createShapeId("human"))?.x).toBe(10);
+  });
 
   it("suppresses the adoption echo while a newer remote target edit commits", async () => {
     vi.stubGlobal("__FORCE_RAF_IN_TESTS__", true);

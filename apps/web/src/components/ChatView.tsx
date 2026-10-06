@@ -10841,6 +10841,7 @@ export default function ChatView(props: ChatViewProps) {
     renderedRightPanelSurface?.kind === "canvas" && activeProject ? (
       <Suspense fallback={null}>
         <CanvasPanel
+          onOpenArtifactFile={openFileSurface}
           environmentId={activeThreadRef.environmentId}
           projectId={
             renderedRightPanelSurface.diagramId === null

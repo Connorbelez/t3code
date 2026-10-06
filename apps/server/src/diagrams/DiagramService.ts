@@ -1,5 +1,6 @@
+import { createDiagramSchema } from "@t3tools/diagram-compose/schema";
 import * as NodeCrypto from "node:crypto";
-import { createTLSchema, type TLRecord } from "@tldraw/tlschema";
+import type { TLRecord } from "@tldraw/tlschema";
 import {
   DiagramId,
   DiagramName,
@@ -173,7 +174,7 @@ export class DiagramService extends Context.Service<
   }
 >()("t3/diagrams/DiagramService") {}
 
-const schema = createTLSchema();
+const schema = createDiagramSchema();
 const decodeMetadata = Schema.decodeUnknownSync(DiagramMetadata);
 const recordEnvelope = Schema.Struct({ typeName: Schema.String });
 const prepareResult = Schema.Struct({

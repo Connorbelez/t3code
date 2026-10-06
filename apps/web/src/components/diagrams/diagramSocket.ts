@@ -1,3 +1,4 @@
+import { createDiagramSchema } from "./diagramSchema";
 import {
   DIAGRAM_SDK_VERSION,
   DiagramBatch,
@@ -6,7 +7,7 @@ import {
   type DiagramTarget,
 } from "@t3tools/contracts";
 import { type TLPersistentClientSocket, type TLSocketStatusChangeEvent } from "@tldraw/sync";
-import { type TLRecord, createTLSchema, isEqual } from "tldraw";
+import { type TLRecord, isEqual } from "tldraw";
 import * as Schema from "effect/Schema";
 import type { DiagramApi } from "./diagramApi";
 
@@ -51,7 +52,7 @@ const isPush = Schema.is(pushSchema);
 const isResult = Schema.is(resultSchema);
 const isAck = Schema.is(ackSchema);
 const isCommit = Schema.is(commitSchema);
-const recordSchema = createTLSchema();
+const recordSchema = createDiagramSchema();
 export function parseDocumentRecord(raw: unknown): TLRecord {
   const header = decodeRecordHeader(raw);
   switch (header.typeName) {

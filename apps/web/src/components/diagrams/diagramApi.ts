@@ -124,3 +124,50 @@ export function createDiagramApi(
   };
 }
 export type DiagramApi = ReturnType<typeof createDiagramApi>;
+
+export const diagramArtifactCommands = {
+  read: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "Read HTML artifact",
+    tag: WS_METHODS.diagramsArtifactRead,
+  }),
+  css: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "Style HTML artifact",
+    tag: WS_METHODS.diagramsArtifactCss,
+  }),
+  capture: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "Capture HTML artifact",
+    tag: WS_METHODS.diagramsArtifactCapture,
+  }),
+};
+
+export const diagramArtifactEvents = createEnvironmentEventSubscription(connectionAtomRuntime, {
+  label: "HTML artifact source changes",
+  subscribe: (input: EnvironmentRpcInput<typeof WS_METHODS.diagramsArtifactWatch>) =>
+    subscribe(WS_METHODS.diagramsArtifactWatch, input),
+});
+
+export function createDiagramArtifactApi(
+  registry: AtomRegistry.AtomRegistry,
+  environmentId: EnvironmentId,
+) {
+  const bind =
+    <I, A, E>(
+      command: AtomCommand<{ readonly environmentId: EnvironmentId; readonly input: I }, A, E>,
+    ) =>
+    async (input: I): Promise<A> => {
+      const result = await runAtomCommand(
+        registry,
+        command,
+        { environmentId, input },
+        { reportFailure: false },
+      );
+      if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+      return result.value;
+    };
+  return {
+    read: bind(diagramArtifactCommands.read),
+    css: bind(diagramArtifactCommands.css),
+    capture: bind(diagramArtifactCommands.capture),
+  };
+}
+export type DiagramArtifactApi = ReturnType<typeof createDiagramArtifactApi>;
