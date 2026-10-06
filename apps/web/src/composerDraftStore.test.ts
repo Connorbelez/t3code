@@ -7,6 +7,7 @@ import {
 import * as Schema from "effect/Schema";
 import {
   defaultInstanceIdForDriver,
+  DiagramId,
   EnvironmentId,
   MessageId,
   ProjectId,
@@ -833,6 +834,51 @@ describe("composerDraftStore syncPersistedAttachments", () => {
 
     expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.persistedAttachments).toEqual([]);
     expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.nonPersistedImageIds).toEqual([image.id]);
+  });
+
+  it("still confirms persisted images when the stored draft holds Canvas comments", async () => {
+    const image = makeImage({ id: "img-with-comments", previewUrl: "blob:with-comments" });
+    const attachment = {
+      id: image.id,
+      name: image.name,
+      mimeType: image.mimeType,
+      sizeBytes: image.sizeBytes,
+      dataUrl: "data:image/png;base64,AQEBAQ==",
+    };
+    const store = useComposerDraftStore.getState();
+    store.addImage(threadRef, image);
+    store.saveDiagramAnnotation(
+      threadRef,
+      {
+        environmentId: TEST_ENVIRONMENT_ID,
+        projectId: ProjectId.make("project-1"),
+        diagramId: DiagramId.make("0b6d3f4e-1a2b-4c3d-8e9f-0123456789ab"),
+        pageId: "page:main",
+        label: "Architecture",
+      },
+      { comment: "Make this box blue", target: { kind: "shapes", shapeIds: ["shape:box"] } },
+    );
+    const persisted = partializeComposerDraftStoreState(useComposerDraftStore.getState());
+    const threadKey = threadKeyFor(threadId, TEST_ENVIRONMENT_ID);
+    setLocalStorageItem(
+      COMPOSER_DRAFT_STORAGE_KEY,
+      {
+        version: useComposerDraftStore.persist.getOptions().version,
+        state: {
+          ...persisted,
+          draftsByThreadKey: {
+            [threadKey]: { ...persisted.draftsByThreadKey[threadKey], attachments: [attachment] },
+          },
+        },
+      },
+      Schema.Unknown,
+    );
+
+    store.syncPersistedAttachments(threadRef, [attachment]);
+    await Promise.resolve();
+
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.persistedAttachments).toEqual([attachment]);
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.nonPersistedImageIds).toEqual([]);
   });
 });
 

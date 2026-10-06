@@ -1,24 +1,32 @@
 import {
   ComposerContextId,
+  DiagramAnnotationId,
   DiagramId,
   EnvironmentId,
   ProjectId,
   ThreadId,
+  type DiagramAnnotationTarget,
   type DiagramContextRecord,
 } from "@t3tools/contracts";
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { describe, expect, it } from "vite-plus/test";
+import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { beforeEach, describe, expect, it } from "vite-plus/test";
 import {
   projectComposerContextForProvider,
   formatComposerContextReference,
 } from "@t3tools/shared/composerContextReferences";
 
-import { useComposerDraftStore, composerDraftHasUserContent } from "~/composerDraftStore";
+import {
+  useComposerDraftStore,
+  composerDraftHasUserContent,
+  partializeComposerDraftStoreState,
+} from "~/composerDraftStore";
 import {
   asKnownContextRecord,
   buildMessageContext,
   diagramContextRecord,
 } from "./composerContextRecords";
+import { formatInlineContextReference } from "./composerContextReferences";
+import type { DiagramAnnotationPage } from "./diagramAnnotationDrafts";
 
 const record: DiagramContextRecord = {
   version: 1,
@@ -159,5 +167,192 @@ describe("diagram chat context", () => {
     expect(projection.length).toBeLessThan(64_000);
     expect(projection).toContain("[diagram context truncated]");
     expect(projection).toContain("diagramId: 00000000-0000-4000-8000-000000000001");
+  });
+});
+
+describe("Canvas comment sets in the message draft", () => {
+  const environmentId = EnvironmentId.make("env-1");
+  const page: DiagramAnnotationPage = {
+    environmentId,
+    projectId: ProjectId.make("project-1"),
+    diagramId: DiagramId.make("0b6d3f4e-1a2b-4c3d-8e9f-0123456789ab"),
+    pageId: "page:main",
+    label: "Architecture Main",
+  };
+  const MAIN_ID = "diagram-annotations_env-1-0b6d3f4e-1a2b-4c3d-8e9-7b35400522ad7190";
+  const chip = `[Architecture Main](t3-context://v1/diagram-annotations/${MAIN_ID})`;
+  const box: DiagramAnnotationTarget = { kind: "shapes", shapeIds: ["shape:box"] };
+  const ref = scopeThreadRef(environmentId, ThreadId.make("canvas_comments_test"));
+  const draft = () => useComposerDraftStore.getState().getComposerDraft(ref);
+  const merge = useComposerDraftStore.persist.getOptions().merge!;
+
+  beforeEach(() => {
+    useComposerDraftStore.getState().clearComposerContent(ref);
+  });
+
+  it("places the chip at the caret on the first save and drops it with the last comment", () => {
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(ref, "Please fix");
+    const unregister = store.setContextInsertionHandler(ref, (references) => {
+      store.setPrompt(
+        ref,
+        `${references.map(formatInlineContextReference).join(" ")} ${draft()?.prompt ?? ""}`,
+      );
+      return true;
+    });
+    try {
+      const first = store.saveDiagramAnnotation(ref, page, {
+        comment: "Make this box blue",
+        target: box,
+      });
+      const second = store.saveDiagramAnnotation(ref, page, {
+        comment: "Make it bigger too",
+        target: box,
+      });
+      expect(draft()?.prompt).toBe(`${chip} Please fix`);
+      expect(
+        draft()?.diagramAnnotations.flatMap((record) =>
+          record.payload.annotations.map(({ number, comment }) => [number, comment]),
+        ),
+      ).toEqual([
+        [1, "Make this box blue"],
+        [2, "Make it bigger too"],
+      ]);
+
+      if (!first.ok || !second.ok) throw new Error("both comments should save");
+      store.removeDiagramAnnotation(ref, first.annotation.id);
+      expect(draft()?.prompt).toBe(`${chip} Please fix`);
+      store.removeDiagramAnnotation(ref, second.annotation.id);
+      expect(draft()?.prompt).toBe("Please fix");
+      expect(draft()?.diagramAnnotations).toEqual([]);
+      expect(draft()?.nextDiagramAnnotationNumber).toBe(3);
+    } finally {
+      unregister?.();
+    }
+  });
+
+  it("appends the chip without a mounted composer and clears it with the sets", () => {
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(ref, "Please fix");
+    store.saveDiagramAnnotation(ref, page, { comment: "Make this box blue", target: box });
+    expect(draft()?.prompt).toBe(`Please fix ${chip} `);
+    expect(composerDraftHasUserContent({ ...draft()!, prompt: "" })).toBe(true);
+
+    store.setDiagramAnnotations(ref, []);
+    expect(draft()?.prompt).toBe("Please fix");
+    expect(draft()?.diagramAnnotations).toEqual([]);
+  });
+
+  it("restores sets and their next number across a reload, without any capture", () => {
+    const stored = {
+      version: 1,
+      kind: "diagram-annotations",
+      contextId: MAIN_ID,
+      label: "Architecture Main",
+      payload: {
+        environmentId: "env-1",
+        projectId: "project-1",
+        diagramId: "0b6d3f4e-1a2b-4c3d-8e9f-0123456789ab",
+        pageId: "page:main",
+        annotations: [
+          { id: "a1", number: 1, comment: "Make this box blue", target: box },
+          { id: "a4", number: 4, comment: "Room for a legend", target: box },
+        ],
+        capture: {
+          revision: 3,
+          resolved: [
+            { id: "a1", bounds: { x: 0, y: 0, w: 10, h: 10 }, marker: { x: 0, y: 0 } },
+            { id: "a4", bounds: { x: 0, y: 0, w: 10, h: 10 }, marker: { x: 0, y: 0 } },
+          ],
+          images: [
+            {
+              role: "overview",
+              annotationIds: ["a1", "a4"],
+              bounds: { x: 0, y: 0, w: 10, h: 10 },
+              width: 10,
+              height: 10,
+              contextId: "image_old",
+            },
+          ],
+          structure: {
+            revision: 3,
+            pages: [],
+            compositions: [],
+            shapes: [],
+            bindings: [],
+            totalShapes: 0,
+            truncated: false,
+          },
+        },
+      },
+    };
+    const hydrated = merge(
+      {
+        draftsByThreadKey: {
+          [scopedThreadKey(ref)]: {
+            prompt: "Please fix",
+            attachments: [],
+            diagramAnnotations: [stored],
+            nextDiagramAnnotationNumber: 2,
+          },
+        },
+      },
+      useComposerDraftStore.getInitialState(),
+    );
+    const { capture: _capture, ...draftPayload } = stored.payload;
+    const expected = { ...stored, payload: draftPayload };
+    const restored = hydrated.draftsByThreadKey[scopedThreadKey(ref)];
+    expect(restored?.diagramAnnotations).toEqual([expected]);
+    expect(restored?.nextDiagramAnnotationNumber).toBe(5);
+    expect(restored?.prompt).toBe(`Please fix ${chip} `);
+
+    const reloaded = merge(
+      JSON.parse(JSON.stringify(partializeComposerDraftStoreState(hydrated))),
+      useComposerDraftStore.getInitialState(),
+    ).draftsByThreadKey[scopedThreadKey(ref)];
+    expect(reloaded?.diagramAnnotations).toEqual([expected]);
+    expect(reloaded?.nextDiagramAnnotationNumber).toBe(5);
+  });
+
+  it("never shares comment arrays between the live draft and its copies", () => {
+    const store = useComposerDraftStore.getState();
+    const caller = [
+      {
+        version: 1 as const,
+        kind: "diagram-annotations" as const,
+        contextId: ComposerContextId.make(MAIN_ID),
+        label: "Architecture Main",
+        payload: {
+          environmentId,
+          projectId: page.projectId,
+          diagramId: page.diagramId,
+          pageId: "page:main",
+          annotations: [
+            {
+              id: DiagramAnnotationId.make("a1"),
+              number: 1,
+              comment: "Make this box blue",
+              target: { kind: "shapes" as const, shapeIds: ["shape:box"] },
+            },
+          ],
+        },
+      },
+    ];
+    store.setDiagramAnnotations(ref, caller);
+    const persisted = partializeComposerDraftStoreState(useComposerDraftStore.getState())
+      .draftsByThreadKey[scopedThreadKey(ref)]?.diagramAnnotations?.[0];
+    const hydrated = merge(
+      partializeComposerDraftStoreState(useComposerDraftStore.getState()),
+      useComposerDraftStore.getInitialState(),
+    ).draftsByThreadKey[scopedThreadKey(ref)]?.diagramAnnotations[0];
+    for (const copy of [caller[0], persisted, hydrated]) {
+      const target = copy?.payload.annotations[0]?.target;
+      if (target?.kind === "shapes") (target.shapeIds as string[]).push("shape:intruder");
+    }
+
+    expect(draft()?.diagramAnnotations[0]?.payload.annotations[0]?.target).toEqual({
+      kind: "shapes",
+      shapeIds: ["shape:box"],
+    });
   });
 });

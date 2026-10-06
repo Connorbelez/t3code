@@ -1,13 +1,23 @@
-import { toKindScopedComposerContextId } from "~/lib/composerContextReferences";
+import {
+  formatInlineContextReference,
+  toKindScopedComposerContextId,
+} from "~/lib/composerContextReferences";
 import {
   DIAGRAM_PROTOCOL_VERSION,
   DIAGRAM_SDK_VERSION,
   DiagramContextRecord,
+  isKnownComposerContextRecord,
+  type DiagramAnnotationsContextRecord,
 } from "@t3tools/contracts";
+import {
+  composerContextImageDependencies,
+  replaceComposerContextReferences,
+} from "@t3tools/shared/composerContextReferences";
 import * as DiagramContextSchema from "effect/Schema";
 import { OPEN_DIAGRAM_CONTEXT_EVENT } from "./DiagramContextChip";
 import { diagramContextRecord } from "~/lib/composerContextRecords";
-import { prepareDiagramContexts } from "~/lib/diagramContextPreparation";
+import { prepareDiagramAnnotations, prepareDiagramContexts } from "~/lib/diagramContextPreparation";
+import type { DiagramAnnotationBinding } from "./diagrams/diagramAnnotationBinding";
 import { ChatCanvas } from "./chat/ChatCanvas";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
 import {
@@ -693,6 +703,7 @@ const PreviewPanel = lazy(() =>
   import("./preview/PreviewPanel").then((module) => ({ default: module.PreviewPanel })),
 );
 const CanvasPanel = lazy(() => import("./diagrams/CanvasPanel"));
+const NO_DIAGRAM_ANNOTATIONS: ReadonlyArray<DiagramAnnotationsContextRecord> = [];
 const DiffPanel = lazy(() => import("./DiffPanel"));
 const selectAutoShowFloatingPreview = (settings: { browserAutoShowFloatingPreview: boolean }) =>
   settings.browserAutoShowFloatingPreview;
@@ -1779,6 +1790,16 @@ export default function ChatView(props: ChatViewProps) {
   const setComposerDraftThreadContexts = useComposerDraftStore((store) => store.setThreadContexts);
   const setComposerDraftDiagramContexts = useComposerDraftStore(
     (store) => store.setDiagramContexts,
+  );
+  const setComposerDraftDiagramAnnotations = useComposerDraftStore(
+    (store) => store.setDiagramAnnotations,
+  );
+  const importComposerDraftDiagramAnnotations = useComposerDraftStore(
+    (store) => store.importDiagramAnnotations,
+  );
+  const composerDiagramAnnotations = useComposerDraftStore(
+    (store) =>
+      store.getComposerDraft(composerDraftTarget)?.diagramAnnotations ?? NO_DIAGRAM_ANNOTATIONS,
   );
 
   const setComposerDraftModelSelection = useComposerDraftStore((store) => store.setModelSelection);
@@ -2959,6 +2980,27 @@ export default function ChatView(props: ChatViewProps) {
     ? (activeEnvironment?.serverConfig ?? null)
     : (primaryEnvironment?.serverConfig ?? null);
   const providerStatuses = serverConfig?.providers ?? EMPTY_PROVIDERS;
+  const canvasAnnotationsSupported =
+    serverConfig?.environment.capabilities.diagrams?.annotations === true;
+  const canvasEnvironmentId = activeThreadRef?.environmentId ?? null;
+  const diagramAnnotationBinding = useMemo(
+    (): DiagramAnnotationBinding => ({
+      records: composerDiagramAnnotations.filter(
+        (record) => record.payload.environmentId === canvasEnvironmentId,
+      ),
+      save: (page, edit) =>
+        useComposerDraftStore.getState().saveDiagramAnnotation(composerDraftTarget, page, edit),
+      remove: (annotationId) =>
+        useComposerDraftStore.getState().removeDiagramAnnotation(composerDraftTarget, annotationId),
+      supported: canvasAnnotationsSupported,
+    }),
+    [
+      canvasAnnotationsSupported,
+      canvasEnvironmentId,
+      composerDiagramAnnotations,
+      composerDraftTarget,
+    ],
+  );
   const selectedProviderByThreadId = composerActiveProvider ?? null;
   const threadProvider =
     activeThread?.modelSelection.instanceId ??
@@ -4594,15 +4636,50 @@ export default function ChatView(props: ChatViewProps) {
       }
       const target = queuedEditDraftTargetFor(request.runId);
       clearComposerDraftContent(target);
-      setComposerDraftPrompt(target, request.text);
+      const context = serverProjection?.messages.find(
+        (message) => message.id === request.messageId,
+      )?.context;
+      // Comment sets come back as drafts that saving the edit captures again, so comments added
+      // during the edit share their numbering and the old numbered images never ride along with
+      // changed comments.
+      const annotationSets = (context?.records ?? []).flatMap((record) =>
+        isKnownComposerContextRecord(record) && record.kind === "diagram-annotations"
+          ? [record]
+          : [],
+      );
+      const capturedImageIds = new Set<string>(
+        annotationSets.flatMap(composerContextImageDependencies),
+      );
+      const capturedAttachmentIds = new Set(
+        (context?.records ?? []).flatMap((record) =>
+          capturedImageIds.has(record.contextId) && "attachmentId" in record
+            ? [record.attachmentId]
+            : [],
+        ),
+      );
+      const { rewritten } = importComposerDraftDiagramAnnotations(target, annotationSets);
+      const text = replaceComposerContextReferences(request.text, (reference) => {
+        const contextId = rewritten.get(reference.contextId);
+        return contextId
+          ? formatInlineContextReference({ ...reference, contextId })
+          : reference.source;
+      });
+      setComposerDraftPrompt(target, text);
       setEditingQueuedRun({
         threadId: activeThread.id,
         runId: request.runId,
         messageId: request.messageId,
-        originalText: request.text,
-        existingAttachments: request.attachments,
-        context: serverProjection?.messages.find((message) => message.id === request.messageId)
-          ?.context,
+        originalText: text,
+        existingAttachments: request.attachments.filter(
+          (attachment) => !capturedAttachmentIds.has(attachment.id),
+        ),
+        context: context && {
+          ...context,
+          records: context.records.filter(
+            (record) =>
+              record.kind !== "diagram-annotations" && !capturedImageIds.has(record.contextId),
+          ),
+        },
       });
       scheduleComposerFocus();
     },
@@ -4610,6 +4687,7 @@ export default function ChatView(props: ChatViewProps) {
       activeThread,
       clearComposerDraftContent,
       editingQueuedRun,
+      importComposerDraftDiagramAnnotations,
       queuedEditDraftTargetFor,
       serverProjection,
       scheduleComposerFocus,
@@ -8569,6 +8647,7 @@ export default function ChatView(props: ChatViewProps) {
       reviewComments: composerReviewComments,
       threadContexts: composerThreadContexts,
       diagramContexts: liveComposerDiagramContexts,
+      diagramAnnotations: liveComposerDiagramAnnotations,
       selectedProvider: ctxSelectedProvider,
       selectedModel: ctxSelectedModel,
       selectedProviderModels: ctxSelectedProviderModels,
@@ -8597,16 +8676,28 @@ export default function ChatView(props: ChatViewProps) {
       .getComposerDraft(composerDraftTarget);
     const generationBeforePreparation = composerSendGenerationRef.current;
     const routeGenerationBeforePreparation = diagramSendRouteGenerationRef.current;
-    let preparationGuardHeld = liveComposerDiagramContexts.length > 0;
+    // A failed send restores the comment sets as drafts, never as captured ones.
+    const annotationNumberBeforePreparation = draftBeforePreparation?.nextDiagramAnnotationNumber;
+    let preparationGuardHeld =
+      liveComposerDiagramContexts.length > 0 || liveComposerDiagramAnnotations.length > 0;
     let preparedDiagrams: Awaited<ReturnType<typeof prepareDiagramContexts>> = {
       contexts: [],
+      images: [],
+    };
+    let preparedAnnotations: Awaited<ReturnType<typeof prepareDiagramAnnotations>> = {
+      records: [],
       images: [],
     };
     let preparedImagesRetained = false;
     if (preparationGuardHeld) sendInFlightRef.current = true;
     try {
-      if (liveComposerDiagramContexts.length > 0) {
+      if (preparationGuardHeld) {
         try {
+          preparedAnnotations = await prepareDiagramAnnotations(liveComposerDiagramAnnotations, {
+            annotationsSupported:
+              appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment
+                .capabilities.diagrams?.annotations === true,
+          });
           preparedDiagrams = await prepareDiagramContexts(liveComposerDiagramContexts);
         } catch (error) {
           setThreadError(
@@ -8626,6 +8717,10 @@ export default function ChatView(props: ChatViewProps) {
           return;
       }
       const composerDiagramContexts = preparedDiagrams.contexts;
+      const capturedAnnotationSets = preparedAnnotations.records;
+      const generatedAnnotationImageIds = new Set(
+        preparedAnnotations.images.map((image) => image.id),
+      );
       const previousDiagramImages = new Set(
         liveComposerDiagramContexts.flatMap((record) =>
           record.payload.screenshotContextId ? [record.payload.screenshotContextId] : [],
@@ -8636,6 +8731,7 @@ export default function ChatView(props: ChatViewProps) {
           (image) => !previousDiagramImages.has(toKindScopedComposerContextId("image", image.id)),
         ),
         ...preparedDiagrams.images,
+        ...preparedAnnotations.images,
       ];
       if (freshSendImages.length + composerFiles.length > PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
         setThreadError(
@@ -8759,6 +8855,7 @@ export default function ChatView(props: ChatViewProps) {
                           previewAnnotations: composerPreviewAnnotations,
                           threadContexts: composerThreadContexts,
                           diagramContexts: composerDiagramContexts,
+                          diagramAnnotations: capturedAnnotationSets,
                           attachments: newEditAttachments.map((attachment, index) => ({
                             attachment,
                             attachmentId:
@@ -8817,7 +8914,8 @@ export default function ChatView(props: ChatViewProps) {
         composerPreviewAnnotations.length === 0 &&
         composerReviewComments.length === 0 &&
         composerThreadContexts.length === 0 &&
-        composerDiagramContexts.length === 0
+        composerDiagramContexts.length === 0 &&
+        capturedAnnotationSets.length === 0
           ? parseCodexFeedbackCommand(trimmed)
           : null;
       if (feedbackCommand && multipleModelSelections === null) {
@@ -8951,7 +9049,8 @@ export default function ChatView(props: ChatViewProps) {
         composerPreviewAnnotations.length === 0 &&
         composerReviewComments.length === 0 &&
         composerThreadContexts.length === 0 &&
-        composerDiagramContexts.length === 0
+        composerDiagramContexts.length === 0 &&
+        capturedAnnotationSets.length === 0
           ? parseStandaloneComposerSlashCommand(trimmed)
           : null;
       if (standaloneSlashCommand && multipleModelSelections === null) {
@@ -9014,6 +9113,11 @@ export default function ChatView(props: ChatViewProps) {
       const composerReviewCommentsSnapshot: ReviewCommentContext[] = [...composerReviewComments];
       const composerThreadContextsSnapshot = [...composerThreadContexts];
       const composerDiagramContextsSnapshot = [...composerDiagramContexts];
+      const composerAnnotationSetsSnapshot = [...capturedAnnotationSets];
+      // Retries capture the comments again, so their numbered images do not come back.
+      const retryImagesSnapshot = composerImagesSnapshot.filter(
+        (image) => !generatedAnnotationImageIds.has(image.id),
+      );
       // Expired terminal excerpts are not sent; their chips leave the text with them.
       const messageTextForSend = composerTerminalContexts
         .filter((context) => !composerTerminalContextsSnapshot.includes(context))
@@ -9033,6 +9137,7 @@ export default function ChatView(props: ChatViewProps) {
           previewAnnotations: composerPreviewAnnotationsSnapshot,
           threadContexts: composerThreadContextsSnapshot,
           diagramContexts: composerDiagramContextsSnapshot,
+          diagramAnnotations: composerAnnotationSetsSnapshot,
           attachments: composerAttachmentsSnapshot.map((attachment, index) => ({
             attachment,
             attachmentId: attachmentIds[index] ?? attachment.id,
@@ -9422,7 +9527,7 @@ export default function ChatView(props: ChatViewProps) {
               setComposerDraftPrompt(composerDraftTarget, messageTextForSend);
               addComposerDraftImages(
                 composerDraftTarget,
-                composerImagesSnapshot.map(cloneComposerImageForRetry),
+                retryImagesSnapshot.map(cloneComposerImageForRetry),
               );
               addComposerDraftFiles(composerDraftTarget, composerFilesSnapshot);
               setComposerDraftTerminalContexts(
@@ -9436,6 +9541,11 @@ export default function ChatView(props: ChatViewProps) {
               setComposerDraftReviewComments(composerDraftTarget, composerReviewCommentsSnapshot);
               setComposerDraftThreadContexts(composerDraftTarget, composerThreadContextsSnapshot);
               setComposerDraftDiagramContexts(composerDraftTarget, composerDiagramContextsSnapshot);
+              setComposerDraftDiagramAnnotations(
+                composerDraftTarget,
+                liveComposerDiagramAnnotations,
+                annotationNumberBeforePreparation,
+              );
               if (composerRef.current && currentRouteThreadKeyRef.current === routeThreadKey) {
                 promptRef.current = messageTextForSend;
                 composerRef.current.resetCursorState({
@@ -9808,7 +9918,9 @@ export default function ChatView(props: ChatViewProps) {
               (useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)
                 ?.threadContexts.length ?? 0) === 0 &&
               (useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)
-                ?.diagramContexts.length ?? 0) === 0
+                ?.diagramContexts.length ?? 0) === 0 &&
+              (useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)
+                ?.diagramAnnotations.length ?? 0) === 0
         ) {
           setOptimisticUserMessages((existing) => {
             const removed = existing.filter((message) => message.id === messageIdForSend);
@@ -9819,7 +9931,7 @@ export default function ChatView(props: ChatViewProps) {
             return next.length === existing.length ? existing : next;
           });
           promptRef.current = messageTextForSend;
-          const retryComposerImages = composerImagesSnapshot.map(cloneComposerImageForRetry);
+          const retryComposerImages = retryImagesSnapshot.map(cloneComposerImageForRetry);
           composerImagesRef.current = retryComposerImages;
           composerFilesRef.current = composerFilesSnapshot;
           composerTerminalContextsRef.current = composerTerminalContextsSnapshot;
@@ -9834,6 +9946,11 @@ export default function ChatView(props: ChatViewProps) {
           setComposerDraftReviewComments(composerDraftTarget, composerReviewCommentsSnapshot);
           setComposerDraftThreadContexts(composerDraftTarget, composerThreadContextsSnapshot);
           setComposerDraftDiagramContexts(composerDraftTarget, composerDiagramContextsSnapshot);
+          setComposerDraftDiagramAnnotations(
+            composerDraftTarget,
+            liveComposerDiagramAnnotations,
+            annotationNumberBeforePreparation,
+          );
           composerRef.current?.resetCursorState({
             cursor: collapseExpandedComposerCursor(messageTextForSend, messageTextForSend.length),
             prompt: messageTextForSend,
@@ -9875,7 +9992,9 @@ export default function ChatView(props: ChatViewProps) {
         sendInFlightRef.current = false;
       }
       if (!preparedImagesRetained) {
-        for (const image of preparedDiagrams.images) URL.revokeObjectURL(image.previewUrl);
+        for (const image of [...preparedDiagrams.images, ...preparedAnnotations.images]) {
+          URL.revokeObjectURL(image.previewUrl);
+        }
       }
     }
   };
@@ -10749,6 +10868,7 @@ export default function ChatView(props: ChatViewProps) {
               }),
             ])
           }
+          annotationBinding={diagramAnnotationBinding}
         />
       </Suspense>
     ) : renderedRightPanelSurface?.kind === "preview" ? (

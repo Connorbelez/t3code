@@ -115,6 +115,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Root, RootContent } from "mdast";
 import { T3Wordmark } from "../T3Wordmark";
+import { DiagramAnnotationsContextChip } from "../DiagramAnnotationsContextChip";
 import { DiagramContextChip } from "../DiagramContextChip";
 import { ThreadContextChip } from "../ThreadContextChip";
 import {
@@ -4145,6 +4146,16 @@ const userMessageContextPresentationRegistry = createContextPresentationRegistry
       render: (record, context) =>
         record.kind === "diagram" ? (
           <DiagramContextChip record={record} copyMarkdown={context.copyMarkdown} />
+        ) : (
+          <UnavailableUserMessageContextChip {...context} />
+        ),
+    },
+    {
+      kind: "diagram-annotations",
+      canRender: (record) => record.kind === "diagram-annotations",
+      render: (record, context) =>
+        record.kind === "diagram-annotations" ? (
+          <DiagramAnnotationsContextChip record={record} copyMarkdown={context.copyMarkdown} />
         ) : (
           <UnavailableUserMessageContextChip {...context} />
         ),

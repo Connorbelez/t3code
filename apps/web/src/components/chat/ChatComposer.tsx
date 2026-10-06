@@ -29,6 +29,7 @@ import type {
   ProviderApprovalDecision,
   ThreadContextRecord,
   DiagramContextRecord,
+  DiagramAnnotationsContextRecord,
   ProviderInteractionMode,
   ResolvedKeybindingsConfig,
   RuntimeMode,
@@ -190,7 +191,10 @@ import {
   type TerminalContextSelection,
 } from "../../lib/terminalContext";
 import { useComposerPathSearch } from "../../lib/composerPathSearchState";
-import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
+import {
+  composerContextImageDependencies,
+  replaceComposerContextReferences,
+} from "@t3tools/shared/composerContextReferences";
 import {
   getRestingComposerImagePreviewCounts,
   resolveRestingComposerControlsLayout,
@@ -1479,6 +1483,7 @@ export interface ChatComposerHandle {
     reviewComments: ReviewCommentContext[];
     threadContexts: ThreadContextRecord[];
     diagramContexts: DiagramContextRecord[];
+    diagramAnnotations: DiagramAnnotationsContextRecord[];
     selectedPromptEffort: string | null;
     selectedModelOptionsForDispatch: unknown;
     selectedModelSelection: ModelSelection;
@@ -1847,6 +1852,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const composerReviewComments = composerDraft.reviewComments;
   const composerThreadContexts = composerDraft.threadContexts;
   const composerDiagramContexts = composerDraft.diagramContexts;
+  const composerDiagramAnnotations = composerDraft.diagramAnnotations;
   const pendingSnapShotAnimations = useSyncExternalStore(
     subscribeToPendingSnapShotAnimations,
     getPendingSnapShotAnimations,
@@ -1914,6 +1920,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         previewAnnotations: composerPreviewAnnotations,
         threadContexts: composerThreadContexts,
         diagramContexts: composerDiagramContexts,
+        diagramAnnotations: composerDiagramAnnotations,
         images: composerImages,
         files: composerFiles,
         uploadsByImageId,
@@ -1926,6 +1933,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       composerTerminalContexts,
       composerThreadContexts,
       composerDiagramContexts,
+      composerDiagramAnnotations,
       uploadsByImageId,
     ],
   );
@@ -2515,6 +2523,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           composerPreviewAnnotations.length +
           composerReviewComments.length +
           composerDiagramContexts.length +
+          composerDiagramAnnotations.length +
           composerThreadContexts.length,
       }),
     [
@@ -2523,6 +2532,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       composerPreviewAnnotations.length,
       composerReviewComments.length,
       composerDiagramContexts.length,
+      composerDiagramAnnotations.length,
       composerThreadContexts.length,
       composerTerminalContexts,
       prompt,
@@ -2563,6 +2573,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     composerPreviewAnnotations.length === 0 &&
     composerReviewComments.length === 0 &&
     composerDiagramContexts.length === 0 &&
+    composerDiagramAnnotations.length === 0 &&
     composerThreadContexts.length === 0;
 
   const pullRequestListTargets = useMemo(
@@ -3087,6 +3098,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const setComposerDraftDiagramContexts = useComposerDraftStore(
     (store) => store.setDiagramContexts,
   );
+  const setComposerDraftDiagramAnnotations = useComposerDraftStore(
+    (store) => store.setDiagramAnnotations,
+  );
+  const importComposerDraftDiagramAnnotations = useComposerDraftStore(
+    (store) => store.importDiagramAnnotations,
+  );
   const buildContextClipboardFragment = useCallback(
     (contextIds: ReadonlyArray<string>): string | null => {
       const wanted = new Set(contextIds);
@@ -3102,6 +3119,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }
       const records: ComposerContextRecord[] = [
         ...composerDiagramContexts.filter((record) => wanted.has(record.contextId)),
+        ...composerDiagramAnnotations.filter((record) => wanted.has(record.contextId)),
         ...composerThreadContexts.filter((record) => wanted.has(record.contextId)),
         ...composerTerminalContexts
           .filter((c) => wanted.has(terminalContextReference(c).contextId))
@@ -3145,6 +3163,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       composerReviewComments,
       composerTerminalContexts,
       composerDiagramContexts,
+      composerDiagramAnnotations,
       composerThreadContexts,
       environmentId,
       uploadsByImageId,
@@ -3263,23 +3282,35 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       const skippedDependentAttachmentIds = new Set<string>();
       // Resolve annotations before their dependent screenshot records even if a foreign
       // clipboard producer emitted the records in a different order.
+      const ownsImages = (kind: string) =>
+        kind === "preview-annotation" || kind === "diagram" || kind === "diagram-annotations";
       const orderedRecords = records.toSorted((left, right) =>
-        (left.kind === "preview-annotation" || left.kind === "diagram") &&
-        right.kind !== "preview-annotation" &&
-        right.kind !== "diagram"
+        ownsImages(left.kind) && !ownsImages(right.kind)
           ? -1
-          : (right.kind === "preview-annotation" || right.kind === "diagram") &&
-              left.kind !== "preview-annotation" &&
-              left.kind !== "diagram"
+          : ownsImages(right.kind) && !ownsImages(left.kind)
             ? 1
             : 0,
       );
+      let droppedComments = 0;
       for (const candidate of orderedRecords) {
+        const record = asKnownContextRecord(candidate);
+        if (!record) continue;
+        if (record.kind === "diagram-annotations") {
+          // A sent set's numbered images show the old revision. The set comes back as fresh
+          // comments that the next send captures again, so its images stay behind.
+          for (const imageId of composerContextImageDependencies(record)) {
+            skippedDependentAttachmentIds.add(imageId);
+          }
+          // Only this environment's server can capture its diagrams.
+          if (record.payload.environmentId !== environmentId) continue;
+          const imported = importComposerDraftDiagramAnnotations(composerDraftTarget, [record]);
+          for (const [from, to] of imported.rewritten) rewritten.set(from, to);
+          droppedComments += imported.dropped;
+          continue;
+        }
         // Producer ids fold into context ids, so two different excerpts can collide. Only skip
         // when the draft already holds the same payload; a colliding but different record is
         // re-minted under a fresh id so both survive the paste.
-        const record = asKnownContextRecord(candidate);
-        if (!record) continue;
         const existing = composerContextImportLookupIds(record).flatMap((contextId) => {
           const found = composerContextRecords.get(contextId);
           return found ? [found] : [];
@@ -3391,6 +3422,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             break;
         }
       }
+      if (droppedComments > 0) {
+        toastManager.add({
+          type: "warning",
+          title: `${droppedComments} Canvas ${droppedComments === 1 ? "comment" : "comments"} did not fit`,
+          description: "A page holds 30 comments within a size limit, numbered up to 999.",
+        });
+      }
       return rewritten;
     },
     [
@@ -3405,6 +3443,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       composerDraftTarget,
       environmentId,
       importAttachmentRecord,
+      importComposerDraftDiagramAnnotations,
     ],
   );
   const importContextFragment = useCallback(
@@ -3690,7 +3729,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     reviewComments: Map<string, ReviewCommentContext>;
     threads: Map<string, ThreadContextRecord>;
     diagrams: Map<string, DiagramContextRecord>;
-  }>({ terminals: new Map(), reviewComments: new Map(), threads: new Map(), diagrams: new Map() });
+    diagramAnnotations: Map<string, DiagramAnnotationsContextRecord>;
+  }>({
+    terminals: new Map(),
+    reviewComments: new Map(),
+    threads: new Map(),
+    diagrams: new Map(),
+    diagramAnnotations: new Map(),
+  });
   const removedAttachmentContextPayloadsRef = useRef<RetainedAttachmentContextPayloads>({
     files: new Map(),
     previewAnnotations: new Map(),
@@ -3793,6 +3839,29 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       if (nextDiagrams.length !== composerDiagramContexts.length || restoredDiagrams.length > 0) {
         setComposerDraftDiagramContexts(composerDraftTarget, nextDiagrams);
       }
+      const liveAnnotationSetIds = new Set<string>(
+        composerDiagramAnnotations.map((record) => record.contextId),
+      );
+      const restoredAnnotationSets = [...referenced].flatMap((contextId) => {
+        if (liveAnnotationSetIds.has(contextId)) return [];
+        const record = retained.diagramAnnotations.get(contextId);
+        return record ? [record] : [];
+      });
+      const nextAnnotationSets = [
+        ...composerDiagramAnnotations.filter((record) => referenced.has(record.contextId)),
+        ...restoredAnnotationSets,
+      ];
+      for (const record of composerDiagramAnnotations) {
+        if (!referenced.has(record.contextId)) {
+          retained.diagramAnnotations.set(record.contextId, record);
+        }
+      }
+      if (
+        nextAnnotationSets.length !== composerDiagramAnnotations.length ||
+        restoredAnnotationSets.length > 0
+      ) {
+        setComposerDraftDiagramAnnotations(composerDraftTarget, nextAnnotationSets);
+      }
 
       for (const comment of composerReviewComments) {
         const contextId = reviewCommentContextId(comment.id);
@@ -3854,8 +3923,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       setComposerDraftTerminalContexts,
       composerThreadContexts,
       composerDiagramContexts,
+      composerDiagramAnnotations,
       setComposerDraftThreadContexts,
       setComposerDraftDiagramContexts,
+      setComposerDraftDiagramAnnotations,
       composerReviewComments,
       composerPreviewAnnotations,
       composerImages,
@@ -4411,6 +4482,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         composerPreviewAnnotations.length > 0 ||
         composerReviewComments.length > 0 ||
         composerDiagramContexts.length > 0 ||
+        composerDiagramAnnotations.length > 0 ||
         composerThreadContexts.length > 0
       ) {
         return false;
@@ -4442,6 +4514,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       composerPreviewAnnotations.length,
       composerReviewComments.length,
       composerDiagramContexts.length,
+      composerDiagramAnnotations.length,
       composerThreadContexts.length,
       isComposerApprovalState,
       pendingUserInputs.length,
@@ -4913,6 +4986,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     // records so the restore can resolve every chip.
     const stashedRecords: ComposerContextRecord[] = [
       ...composerDiagramContexts,
+      ...composerDiagramAnnotations,
       ...composerThreadContexts,
       ...composerTerminalContextsRef.current.map(terminalContextRecord),
       ...composerReviewComments.map(reviewCommentContextRecord),
@@ -5033,6 +5107,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         removeComposerDraftPreviewAnnotation(stashTarget, annotation.id);
       }
       setComposerDraftDiagramContexts(stashTarget, []);
+      setComposerDraftDiagramAnnotations(stashTarget, []);
       setComposerDraftThreadContexts(stashTarget, []);
       setComposerDraftPrompt(stashTarget, "");
       for (const image of images) {
@@ -5137,8 +5212,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     composerReviewComments,
     composerPreviewAnnotations,
     composerDiagramContexts,
+    composerDiagramAnnotations,
     composerThreadContexts,
     setComposerDraftDiagramContexts,
+    setComposerDraftDiagramAnnotations,
     setComposerDraftThreadContexts,
     removeComposerDraftReviewComment,
     removeComposerDraftPreviewAnnotation,
@@ -6530,6 +6607,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         reviewComments: composerReviewComments,
         threadContexts: composerThreadContexts,
         diagramContexts: composerDiagramContexts,
+        diagramAnnotations: composerDiagramAnnotations,
         selectedPromptEffort,
         selectedModelOptionsForDispatch,
         selectedModelSelection,
@@ -6581,6 +6659,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       composerReviewComments,
       composerThreadContexts,
       composerDiagramContexts,
+      composerDiagramAnnotations,
       focusComposer,
       environmentId,
       primaryEnvironmentId,

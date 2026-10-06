@@ -1,10 +1,10 @@
 import {
   COMPOSER_CONTEXT_REVIEW_DIFF_MAX_CHARS,
   COMPOSER_CONTEXT_REVIEW_TEXT_MAX_CHARS,
-  DiagramContextRecord as DiagramContextRecordSchema,
+  isKnownComposerContextRecord,
 } from "@t3tools/contracts";
-import * as Schema from "effect/Schema";
 import type {
+  CapturedDiagramAnnotationsRecord,
   ComposerContextId,
   ComposerContextRecord,
   EnvironmentId,
@@ -19,6 +19,7 @@ import type {
   ScopedThreadRef,
   TerminalContextRecord,
   ThreadContextRecord,
+  DiagramAnnotationsContextRecord,
   DiagramContextRecord,
   ThreadId,
 } from "@t3tools/contracts";
@@ -186,6 +187,12 @@ export function diagramContextReference(record: DiagramContextRecord): ComposerC
   return { kind: "diagram", contextId: record.contextId, label: record.label };
 }
 
+export function diagramAnnotationsContextReference(
+  record: DiagramAnnotationsContextRecord,
+): ComposerContextReference {
+  return { kind: "diagram-annotations", contextId: record.contextId, label: record.label };
+}
+
 /**
  * The id is the diagram and the exact scope, so attaching the same selection twice, as a
  * double-pressed shortcut does, reuses the chip. A moved or changed selection is a new record.
@@ -348,6 +355,8 @@ export function buildMessageContext(input: {
   previewAnnotations: ReadonlyArray<PreviewAnnotationPayload>;
   threadContexts?: ReadonlyArray<ThreadContextRecord>;
   diagramContexts?: ReadonlyArray<DiagramContextRecord>;
+  /** Only captured sets: a comment set without its numbered images must never be sent. */
+  diagramAnnotations?: ReadonlyArray<CapturedDiagramAnnotationsRecord>;
   attachments?: ReadonlyArray<BoundComposerAttachment>;
 }): OrchestrationMessageContext | undefined {
   // An annotation's screenshot travels as the image attachment that reuses its id.
@@ -361,6 +370,7 @@ export function buildMessageContext(input: {
     ...input.reviewComments.map(reviewCommentContextRecord),
     ...(input.threadContexts ?? []),
     ...(input.diagramContexts ?? []),
+    ...(input.diagramAnnotations ?? []),
     ...input.previewAnnotations.map((annotation) =>
       previewAnnotationContextRecord(annotation, {
         screenshotContextId: screenshotAttachmentIds.has(annotation.id) ? annotation.id : undefined,
@@ -378,10 +388,7 @@ export function buildMessageContext(input: {
 export function asKnownContextRecord(
   record: ComposerContextRecord | undefined,
 ): KnownComposerContextRecord | undefined {
-  if (!record) return undefined;
-  if (Schema.is(DiagramContextRecordSchema)(record)) return record;
-  if ("payload" in record) return undefined;
-  return record as KnownComposerContextRecord;
+  return record && isKnownComposerContextRecord(record) ? record : undefined;
 }
 
 /** Candidate keys for finding the draft record an imported wire record would reconstruct. */

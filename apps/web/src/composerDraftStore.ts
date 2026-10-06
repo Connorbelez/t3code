@@ -20,6 +20,8 @@ import {
   RuntimeMode,
   ThreadContextRecord,
   DiagramContextRecord,
+  DiagramAnnotationsContextRecord,
+  type DiagramAnnotationId,
   type ServerProvider,
   type ScopedProjectRef,
   type ScopedThreadRef,
@@ -73,7 +75,19 @@ import {
   terminalContextReference,
   threadContextReference,
   diagramContextReference,
+  diagramAnnotationsContextReference,
 } from "./lib/composerContextRecords";
+import {
+  draftDiagramAnnotationsRecord,
+  importDiagramAnnotations as importDiagramAnnotationsIntoDraft,
+  removeDiagramAnnotation as removeDiagramAnnotationFromDraft,
+  saveDiagramAnnotation as saveDiagramAnnotationInDraft,
+  type DiagramAnnotationDraftState,
+  type DiagramAnnotationEdit,
+  type DiagramAnnotationPage,
+  type DiagramAnnotationSaveResult,
+  mintDiagramAnnotationId,
+} from "./lib/diagramAnnotationDrafts";
 import { create } from "zustand";
 import { persist, type PersistStorage, type StorageValue } from "zustand/middleware";
 import { useShallow } from "zustand/react/shallow";
@@ -88,6 +102,8 @@ const isReviewCommentContext = Schema.is(ReviewCommentContextSchema);
 const isThreadContextRecord = Schema.is(ThreadContextRecord);
 const isDiagramContextRecord = Schema.is(DiagramContextRecord);
 const decodeDiagramContextRecord = Schema.decodeUnknownOption(DiagramContextRecord);
+const isDiagramAnnotationsRecord = Schema.is(DiagramAnnotationsContextRecord);
+const decodeDiagramAnnotationsRecord = Schema.decodeUnknownOption(DiagramAnnotationsContextRecord);
 const isSnapShotSource = Schema.is(SnapShotSource);
 const isPreviewAnnotationPayload = Schema.is(PreviewAnnotationPayloadSchema);
 
@@ -245,6 +261,8 @@ const PersistedComposerThreadDraftState = Schema.Struct({
   reviewComments: Schema.optionalKey(Schema.Array(ReviewCommentContextSchema)),
   threadContexts: Schema.optionalKey(Schema.Array(ThreadContextRecord)),
   diagramContexts: Schema.optionalKey(Schema.Array(DiagramContextRecord)),
+  diagramAnnotations: Schema.optionalKey(Schema.Array(DiagramAnnotationsContextRecord)),
+  nextDiagramAnnotationNumber: Schema.optionalKey(Schema.Number),
   // Keyed by `ProviderInstanceId` (open branded slug) so custom provider
   // instances (e.g. `codex_personal`) round-trip alongside the built-in
   // `codex` / `claudeAgent` / ... entries. Every prior `ProviderDriverKind`
@@ -401,6 +419,10 @@ export interface ComposerThreadDraftState {
   reviewComments: ReviewCommentContext[];
   threadContexts: ThreadContextRecord[];
   diagramContexts: DiagramContextRecord[];
+  /** Canvas comment sets, one per diagram page. Never holds a capture; sending adds one. */
+  diagramAnnotations: DiagramAnnotationsContextRecord[];
+  /** The number the next Canvas comment gets. Deleting a comment never lowers it. */
+  nextDiagramAnnotationNumber: number;
   /**
    * Per-instance model selection. Keyed by `ProviderInstanceId` (open
    * branded slug) so a default `codex` instance and a user-authored
@@ -445,7 +467,8 @@ export function composerDraftHasUserContent(
     draft.previewAnnotations.length > 0 ||
     draft.reviewComments.length > 0 ||
     draft.threadContexts.length > 0 ||
-    draft.diagramContexts.length > 0
+    draft.diagramContexts.length > 0 ||
+    draft.diagramAnnotations.length > 0
   );
 }
 
@@ -725,6 +748,31 @@ interface ComposerDraftStoreState {
     threadRef: ComposerThreadTarget,
     records: ReadonlyArray<DiagramContextRecord>,
   ) => void;
+  /** Saves or edits one Canvas comment; the first on a page places its set's chip at the caret. */
+  saveDiagramAnnotation: (
+    threadRef: ComposerThreadTarget,
+    page: DiagramAnnotationPage,
+    edit: DiagramAnnotationEdit,
+  ) => DiagramAnnotationSaveResult;
+  /** Deleting a page's last comment also removes its chip from the prompt. */
+  removeDiagramAnnotation: (
+    threadRef: ComposerThreadTarget,
+    annotationId: DiagramAnnotationId,
+  ) => void;
+  /**
+   * Replaces the comment sets and keeps prompt links in step: chip removal and undo, stash, and
+   * failed-send restore, which passes the number the draft had reached before sending.
+   */
+  setDiagramAnnotations: (
+    threadRef: ComposerThreadTarget,
+    records: ReadonlyArray<DiagramAnnotationsContextRecord>,
+    nextNumber?: number,
+  ) => void;
+  /** Paste and stash restore. The caller places the links, rewritten through `rewritten`. */
+  importDiagramAnnotations: (
+    threadRef: ComposerThreadTarget,
+    records: ReadonlyArray<DiagramAnnotationsContextRecord>,
+  ) => { rewritten: ReadonlyMap<string, string>; dropped: number };
   clearPersistedAttachments: (threadRef: ComposerThreadTarget) => void;
   syncPersistedAttachments: (
     threadRef: ComposerThreadTarget,
@@ -895,6 +943,7 @@ function copyDiagramContext(record: DiagramContextRecord): DeepMutable<DiagramCo
 }
 
 const EMPTY_DIAGRAM_CONTEXTS: DiagramContextRecord[] = [];
+const EMPTY_DIAGRAM_ANNOTATIONS: DiagramAnnotationsContextRecord[] = [];
 Object.freeze(EMPTY_IMAGES);
 Object.freeze(EMPTY_FILES);
 Object.freeze(EMPTY_IDS);
@@ -903,6 +952,7 @@ Object.freeze(EMPTY_PREVIEW_ANNOTATIONS);
 Object.freeze(EMPTY_REVIEW_COMMENTS);
 Object.freeze(EMPTY_THREAD_CONTEXTS);
 Object.freeze(EMPTY_DIAGRAM_CONTEXTS);
+Object.freeze(EMPTY_DIAGRAM_ANNOTATIONS);
 const EMPTY_MODEL_SELECTION_BY_PROVIDER: Partial<Record<ProviderDriverKind, ModelSelection>> =
   Object.freeze({});
 const EMPTY_COMPOSER_DRAFT_MODEL_STATE = Object.freeze<ComposerDraftModelState>({
@@ -921,6 +971,8 @@ const EMPTY_THREAD_DRAFT = Object.freeze<ComposerThreadDraftState>({
   reviewComments: EMPTY_REVIEW_COMMENTS,
   threadContexts: EMPTY_THREAD_CONTEXTS,
   diagramContexts: EMPTY_DIAGRAM_CONTEXTS,
+  diagramAnnotations: EMPTY_DIAGRAM_ANNOTATIONS,
+  nextDiagramAnnotationNumber: 1,
   modelSelectionByProvider: EMPTY_MODEL_SELECTION_BY_PROVIDER,
   activeProvider: null,
   runtimeMode: null,
@@ -945,11 +997,39 @@ function createEmptyThreadDraft(): ComposerThreadDraftState {
     reviewComments: [],
     threadContexts: [],
     diagramContexts: [],
+    diagramAnnotations: [],
+    nextDiagramAnnotationNumber: 1,
     modelSelectionByProvider: {},
     activeProvider: null,
     runtimeMode: null,
     interactionMode: null,
   };
+}
+
+const persistedDiagramAnnotations = (record: DiagramAnnotationsContextRecord) =>
+  draftDiagramAnnotationsRecord(record) as DeepMutable<DiagramAnnotationsContextRecord>;
+
+function diagramAnnotationDraftState(
+  draft: ComposerThreadDraftState | undefined,
+): DiagramAnnotationDraftState {
+  return {
+    records: draft?.diagramAnnotations ?? EMPTY_DIAGRAM_ANNOTATIONS,
+    nextNumber: draft?.nextDiagramAnnotationNumber ?? 1,
+  };
+}
+
+/** Never below a number already in use, so a restored or hydrated set cannot be numbered over. */
+function nextDiagramAnnotationNumberFor(
+  records: ReadonlyArray<DiagramAnnotationsContextRecord>,
+  ...floors: ReadonlyArray<number | undefined>
+): number {
+  return Math.max(
+    1,
+    ...floors.flatMap((floor) =>
+      typeof floor === "number" && Number.isSafeInteger(floor) ? [floor] : [],
+    ),
+    ...records.flatMap((record) => record.payload.annotations.map(({ number }) => number + 1)),
+  );
 }
 
 function composerImageDedupKey(image: ComposerImageAttachment): string {
@@ -1041,6 +1121,7 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
     draft.reviewComments.length === 0 &&
     draft.threadContexts.length === 0 &&
     draft.diagramContexts.length === 0 &&
+    draft.diagramAnnotations.length === 0 &&
     Object.keys(draft.modelSelectionByProvider).length === 0 &&
     draft.activeProvider === null &&
     draft.runtimeMode === null &&
@@ -2024,6 +2105,15 @@ function normalizePersistedDraftsByThreadId(
           Option.toArray(decodeDiagramContextRecord(entry)).map(copyDiagramContext),
         )
       : [];
+    const diagramAnnotations = Array.isArray(draftCandidate.diagramAnnotations)
+      ? draftCandidate.diagramAnnotations.flatMap((entry) =>
+          Option.toArray(decodeDiagramAnnotationsRecord(entry)).map(persistedDiagramAnnotations),
+        )
+      : [];
+    const nextDiagramAnnotationNumber = nextDiagramAnnotationNumberFor(
+      diagramAnnotations,
+      draftCandidate.nextDiagramAnnotationNumber,
+    );
     const previewAnnotations = Array.isArray(draftCandidate.previewAnnotations)
       ? draftCandidate.previewAnnotations.filter(isPreviewAnnotationPayload)
       : [];
@@ -2147,6 +2237,7 @@ function normalizePersistedDraftsByThreadId(
       reviewComments.length === 0 &&
       threadContexts.length === 0 &&
       diagramContexts.length === 0 &&
+      diagramAnnotations.length === 0 &&
       !hasModelData &&
       !runtimeMode &&
       !interactionMode
@@ -2174,6 +2265,8 @@ function normalizePersistedDraftsByThreadId(
       ...(reviewComments.length > 0 ? { reviewComments } : {}),
       ...(threadContexts.length > 0 ? { threadContexts } : {}),
       ...(diagramContexts.length > 0 ? { diagramContexts } : {}),
+      ...(diagramAnnotations.length > 0 ? { diagramAnnotations } : {}),
+      ...(nextDiagramAnnotationNumber > 1 ? { nextDiagramAnnotationNumber } : {}),
       ...(hasModelData
         ? {
             modelSelectionByProvider: compactModelSelectionByProvider(modelSelectionByProvider),
@@ -2198,7 +2291,8 @@ function persistedComposerDraftHasUserContent(draft: PersistedComposerThreadDraf
     (draft.previewAnnotations?.length ?? 0) > 0 ||
     (draft.reviewComments?.length ?? 0) > 0 ||
     (draft.threadContexts?.length ?? 0) > 0 ||
-    (draft.diagramContexts?.length ?? 0) > 0
+    (draft.diagramContexts?.length ?? 0) > 0 ||
+    (draft.diagramAnnotations?.length ?? 0) > 0
   );
 }
 
@@ -2285,6 +2379,7 @@ export function partializeComposerDraftStoreState(
       draft.reviewComments.length === 0 &&
       draft.threadContexts.length === 0 &&
       draft.diagramContexts.length === 0 &&
+      draft.diagramAnnotations.length === 0 &&
       !hasModelData &&
       draft.runtimeMode === null &&
       draft.interactionMode === null
@@ -2345,6 +2440,12 @@ export function partializeComposerDraftStoreState(
         : {}),
       ...(draft.diagramContexts.length > 0
         ? { diagramContexts: draft.diagramContexts.map(copyDiagramContext) }
+        : {}),
+      ...(draft.diagramAnnotations.length > 0
+        ? { diagramAnnotations: draft.diagramAnnotations.map(persistedDiagramAnnotations) }
+        : {}),
+      ...(draft.nextDiagramAnnotationNumber > 1
+        ? { nextDiagramAnnotationNumber: draft.nextDiagramAnnotationNumber }
         : {}),
       ...(hasModelData
         ? {
@@ -2613,6 +2714,7 @@ function toHydratedThreadDraft(
       ...(persistedDraft.previewAnnotations ?? []).map(previewAnnotationContextReference),
       ...(persistedDraft.threadContexts ?? []).map(threadContextReference),
       ...(persistedDraft.diagramContexts ?? []).map(diagramContextReference),
+      ...(persistedDraft.diagramAnnotations ?? []).map(diagramAnnotationsContextReference),
       ...files.map(fileContextReference),
     ]),
     images: hydrateImagesFromPersisted(persistedDraft.attachments),
@@ -2629,6 +2731,11 @@ function toHydratedThreadDraft(
     reviewComments: persistedDraft.reviewComments?.map((comment) => ({ ...comment })) ?? [],
     threadContexts: persistedDraft.threadContexts?.map((record) => ({ ...record })) ?? [],
     diagramContexts: [...(persistedDraft.diagramContexts ?? [])],
+    diagramAnnotations: (persistedDraft.diagramAnnotations ?? []).map(
+      draftDiagramAnnotationsRecord,
+    ),
+    // Normalized on hydration to sit above every stored number.
+    nextDiagramAnnotationNumber: persistedDraft.nextDiagramAnnotationNumber ?? 1,
     modelSelectionByProvider,
     activeProvider,
     ...(persistedDraft.modelSelectionExplicit ? { modelSelectionExplicit: true } : {}),
@@ -4238,6 +4345,123 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             return { draftsByThreadKey: nextDraftsByThreadKey };
           });
         },
+        saveDiagramAnnotation: (threadRef, page, edit) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef);
+          if (!threadKey) throw new Error("Canvas comments need a composer draft to save into.");
+          const saved = saveDiagramAnnotationInDraft(
+            diagramAnnotationDraftState(get().draftsByThreadKey[threadKey]),
+            page,
+            edit,
+            mintDiagramAnnotationId,
+          );
+          const { result } = saved;
+          if (!result.ok) return result;
+          const record = saved.state.records.find((entry) => entry.contextId === result.contextId);
+          const reference = record ? diagramAnnotationsContextReference(record) : null;
+          // See addPreviewAnnotation: the caret handler writes the prompt through this store, so
+          // it runs before the update below reads the draft.
+          if (result.createdRecord && reference) {
+            contextInsertionHandlers.get(threadKey)?.([reference]);
+          }
+          set((state) => {
+            const existing = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
+            return {
+              draftsByThreadKey: {
+                ...state.draftsByThreadKey,
+                [threadKey]: {
+                  ...existing,
+                  prompt: reference
+                    ? ensureInlineContextReferences(existing.prompt, [reference])
+                    : existing.prompt,
+                  diagramAnnotations: [...saved.state.records],
+                  nextDiagramAnnotationNumber: saved.state.nextNumber,
+                },
+              },
+            };
+          });
+          return result;
+        },
+        removeDiagramAnnotation: (threadRef, annotationId) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef);
+          if (!threadKey) return;
+          set((state) => {
+            const current = state.draftsByThreadKey[threadKey];
+            if (!current) return state;
+            const removed = removeDiagramAnnotationFromDraft(
+              diagramAnnotationDraftState(current),
+              annotationId,
+            );
+            if (removed.state.records === current.diagramAnnotations) return state;
+            const nextDraft = {
+              ...current,
+              prompt: removed.removedRecordId
+                ? removeInlineContextReference(current.prompt, removed.removedRecordId).prompt
+                : current.prompt,
+              diagramAnnotations: [...removed.state.records],
+            };
+            const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
+            if (shouldRemoveDraft(nextDraft)) delete nextDraftsByThreadKey[threadKey];
+            else nextDraftsByThreadKey[threadKey] = nextDraft;
+            return { draftsByThreadKey: nextDraftsByThreadKey };
+          });
+        },
+        setDiagramAnnotations: (threadRef, records, nextNumber) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef);
+          if (!threadKey) return;
+          const diagramAnnotations = records
+            .map(draftDiagramAnnotationsRecord)
+            .filter(isDiagramAnnotationsRecord);
+          set((state) => {
+            const existing = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
+            const retainedIds = new Set(diagramAnnotations.map((record) => record.contextId));
+            let prompt = existing.prompt;
+            for (const previous of existing.diagramAnnotations) {
+              if (retainedIds.has(previous.contextId)) continue;
+              prompt = removeInlineContextReference(prompt, previous.contextId).prompt;
+            }
+            prompt = ensureInlineContextReferences(
+              prompt,
+              diagramAnnotations.map(diagramAnnotationsContextReference),
+            );
+            const nextDraft = {
+              ...existing,
+              prompt,
+              diagramAnnotations,
+              nextDiagramAnnotationNumber: nextDiagramAnnotationNumberFor(
+                diagramAnnotations,
+                existing.nextDiagramAnnotationNumber,
+                nextNumber,
+              ),
+            };
+            const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
+            if (shouldRemoveDraft(nextDraft)) delete nextDraftsByThreadKey[threadKey];
+            else nextDraftsByThreadKey[threadKey] = nextDraft;
+            return { draftsByThreadKey: nextDraftsByThreadKey };
+          });
+        },
+        importDiagramAnnotations: (threadRef, records) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef);
+          if (!threadKey) return { rewritten: new Map(), dropped: 0 };
+          const before = diagramAnnotationDraftState(get().draftsByThreadKey[threadKey]);
+          const imported = importDiagramAnnotationsIntoDraft(before, records);
+          // Every imported comment raises the next number, so an unchanged one means none landed.
+          if (imported.state.nextNumber > before.nextNumber) {
+            set((state) => {
+              const existing = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
+              return {
+                draftsByThreadKey: {
+                  ...state.draftsByThreadKey,
+                  [threadKey]: {
+                    ...existing,
+                    diagramAnnotations: [...imported.state.records],
+                    nextDiagramAnnotationNumber: imported.state.nextNumber,
+                  },
+                },
+              };
+            });
+          }
+          return { rewritten: imported.rewritten, dropped: imported.dropped };
+        },
         removeReviewComment: (threadRef, commentId) => {
           const threadKey = resolveComposerDraftKey(get(), threadRef);
           if (!threadKey || !commentId) return;
@@ -4336,6 +4560,8 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               reviewComments: [],
               threadContexts: [],
               diagramContexts: [],
+              diagramAnnotations: [],
+              nextDiagramAnnotationNumber: 1,
             };
             const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
             if (shouldRemoveDraft(nextDraft)) {
@@ -4366,6 +4592,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                 ...current.reviewComments.map(reviewCommentContextReference),
                 ...current.threadContexts.map(threadContextReference),
                 ...current.diagramContexts.map(diagramContextReference),
+                ...current.diagramAnnotations.map(diagramAnnotationsContextReference),
                 ...current.previewAnnotations.map(previewAnnotationContextReference),
               ]),
               images: [],
