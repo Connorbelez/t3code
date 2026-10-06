@@ -1,5 +1,5 @@
 import type { DiagramHostComposeResult, DiagramSpec } from "@t3tools/contracts";
-import type { TLRecord, TLShape } from "@tldraw/tlschema";
+import { toRichText, type TLRecord, type TLShape } from "@tldraw/tlschema";
 import { describe, expect, it } from "vite-plus/test";
 
 import { compose, type ComposePorts } from "./compose.ts";
@@ -267,6 +267,7 @@ describe("compose", () => {
     ).toEqual({
       changes: null,
       counts: { created: 0, updated: 0, kept: 6, removed: 0 },
+      overlaps: [],
     });
   });
 
@@ -327,6 +328,294 @@ describe("compose", () => {
     const edges = Array.from({ length: 100 }, (_, i): [string, string] => [`n${i}`, `n${i + 1}`]);
     await expect(run({ kit: "flow", key: "big", nodes, edges })).rejects.toMatchObject({
       code: "too-large",
+    });
+  });
+});
+
+const failingPorts: ComposePorts = {
+  measureText: () => {
+    throw new Error("measured");
+  },
+  rehearse: () => {
+    throw new Error("rehearsed");
+  },
+};
+
+function part(record: TLRecord): unknown {
+  const meta = record.meta["t3Composition"];
+  return meta && typeof meta === "object" && "p" in meta ? meta.p : undefined;
+}
+
+function mainOf(records: readonly TLRecord[], key: string): TLShape {
+  const shape = records.find(
+    (record): record is TLShape =>
+      record.typeName === "shape" && memberKey(record) === key && part(record) === "main",
+  );
+  if (!shape) throw new Error(`no member ${key}`);
+  return shape;
+}
+
+/** Replaces a member's main shape, as a human or a raw apply batch would. */
+function change(
+  records: readonly TLRecord[],
+  key: string,
+  edit: (shape: TLShape) => TLShape,
+): TLRecord[] {
+  const target = mainOf(records, key);
+  return records.map((record) => (record.id === target.id ? edit(target) : record));
+}
+
+/** Deletes a node the way tldraw does: the shape and every binding to it. */
+function deleteNode(records: readonly TLRecord[], key: string): TLRecord[] {
+  const target = mainOf(records, key);
+  return records.filter(
+    (record) =>
+      record.id !== target.id && !(record.typeName === "binding" && record.toId === target.id),
+  );
+}
+
+function box(shape: TLShape) {
+  const size = "w" in shape.props && "h" in shape.props ? shape.props : { w: 0, h: 0 };
+  return { x: shape.x, y: shape.y, w: size.w, h: size.h };
+}
+
+function moved(shape: TLShape, x: number, y: number): TLShape {
+  return { ...shape, x, y };
+}
+
+/** A prop edit; tests only set props the shape type has. */
+function withProps(shape: TLShape, props: Record<string, unknown>): TLShape {
+  return { ...shape, props: { ...shape.props, ...props } } as TLShape;
+}
+
+const recolored = (shape: TLShape) => withProps(shape, { color: "red" });
+
+/** Member keys of the shapes a compose writes, frame excluded, in put order. */
+function writtenMembers(result: DiagramHostComposeResult): unknown[] {
+  return shapes(result)
+    .filter((shape) => shape.type !== "frame")
+    .map(memberKey);
+}
+
+const frameOf = (records: readonly TLRecord[]) =>
+  records.find(
+    (record): record is TLShape => record.typeName === "shape" && record.type === "frame",
+  );
+
+const WITH_SHIP: DiagramSpec = {
+  ...CHECKOUT,
+  nodes: [...CHECKOUT.nodes, { key: "ship" }],
+  edges: [...(CHECKOUT.edges ?? []), ["ok", "ship", "yes"]],
+};
+
+describe("regeneration", () => {
+  it("leaves human edits, moves and deletions alone when the spec is unchanged", async () => {
+    let records = applied(BASE, await run(CHECKOUT));
+    records = change(records, "pay", recolored);
+    records = change(records, "start", (shape) => moved(shape, 900, 900));
+    records = deleteNode(records, "ok");
+    expect(await compose({ spec: CHECKOUT }, records, failingPorts)).toEqual({
+      changes: null,
+      counts: { created: 0, updated: 0, kept: 6, removed: 0 },
+      overlaps: [],
+    });
+  });
+
+  it("rewrites an unedited member whose spec changed at its moved top-left, sized to the new label", async () => {
+    let records = applied(BASE, await run(CHECKOUT));
+    records = change(records, "pay", (shape) =>
+      withProps(moved(shape, 300, 600), { w: 400, h: 300 }),
+    );
+    records = change(records, "start", recolored);
+    const result = await run(
+      {
+        ...CHECKOUT,
+        nodes: [
+          { key: "start", kind: "start" },
+          { key: "pay", label: "Take payment by card" },
+          { key: "ok", kind: "decision" },
+        ],
+      },
+      records,
+    );
+    expect(result.counts).toEqual({ created: 0, updated: 1, kept: 5, removed: 0 });
+    expect(writtenMembers(result)).toEqual(["pay"]);
+    const after = applied(records, result);
+    expect(box(mainOf(after, "pay"))).toEqual({ x: 300, y: 600, w: 192, h: 72 });
+    expect(mainOf(after, "start").props).toMatchObject({ color: "red" });
+    expect(box(frameOf(after)!)).toEqual({ x: 0, y: 0, w: 540, h: 720 });
+  });
+
+  it("recreates a deleted member whose spec changed and rebinds its unedited edges", async () => {
+    const records = deleteNode(applied(BASE, await run(CHECKOUT)), "ok");
+    const result = await run(
+      {
+        ...CHECKOUT,
+        nodes: [
+          { key: "start", kind: "start" },
+          { key: "pay" },
+          { key: "ok", kind: "decision", label: "Paid?" },
+        ],
+      },
+      records,
+    );
+    expect(result.counts).toEqual({ created: 1, updated: 2, kept: 3, removed: 0 });
+    expect(writtenMembers(result)).toEqual(["ok", "pay→ok:flow", "ok→pay:flow"]);
+    const after = applied(records, result);
+    const ok = mainOf(after, "ok");
+    expect(
+      after.flatMap((record) =>
+        record.typeName === "binding" && record.toId === ok.id ? [memberKey(record)] : [],
+      ),
+    ).toEqual(["pay→ok:flow", "ok→pay:flow"]);
+    expect(readCompositions(after).summaries[0]?.editedCount).toBe(0);
+  });
+
+  it("forgets a deleted member the spec dropped and removes its unedited edges", async () => {
+    const records = deleteNode(applied(BASE, await run(CHECKOUT)), "ok");
+    const reduced: DiagramSpec = {
+      ...CHECKOUT,
+      nodes: CHECKOUT.nodes.slice(0, 2),
+      edges: [["start", "pay"]],
+    };
+    const result = await run(reduced, records);
+    expect(result.counts).toEqual({ created: 0, updated: 0, kept: 3, removed: 2 });
+    const byId = new Map(records.map((record) => [record.id as string, record]));
+    expect(
+      result.changes?.deletes.map((id) => {
+        const record = byId.get(id);
+        return record && [memberKey(record), part(record)];
+      }),
+    ).toEqual([
+      ["pay→ok:flow", "start"],
+      ["pay→ok:flow", "main"],
+      ["ok→pay:flow", "end"],
+      ["ok→pay:flow", "main"],
+    ]);
+    expect((await run(reduced, applied(records, result))).changes).toBeNull();
+  });
+
+  it("fails atomically naming every node and edge that both the spec and someone else changed", async () => {
+    let records = applied(BASE, await run(CHECKOUT));
+    records = change(records, "pay", (shape) =>
+      withProps(shape, { richText: toRichText("Pay up") }),
+    );
+    records = change(records, "ok", recolored);
+    records = change(records, "start→pay:flow", recolored);
+    records = change(records, "ok→pay:flow", (shape) => withProps(shape, { dash: "dotted" }));
+    const start = mainOf(records, "start");
+    records = records.map((record) =>
+      record.typeName === "binding" && memberKey(record) === "pay→ok:flow" && part(record) === "end"
+        ? { ...record, toId: start.id }
+        : record,
+    );
+    const next: DiagramSpec = {
+      ...CHECKOUT,
+      nodes: [
+        { key: "start", kind: "start" },
+        { key: "pay", label: "Pay" },
+      ],
+      edges: [["start", "pay", "go"]],
+    };
+    await expect(compose({ spec: next }, records, failingPorts)).rejects.toMatchObject({
+      code: "conflict",
+      details: { members: ["pay", "start→pay:flow", "ok", "pay→ok:flow", "ok→pay:flow"] },
+    });
+  });
+
+  it("places a new member next to its moved neighbor without moving existing members", async () => {
+    const records = change(applied(BASE, await run(CHECKOUT)), "ok", (shape) =>
+      moved(shape, 448, 336),
+    );
+    const result = await run(WITH_SHIP, records);
+    expect(result.counts).toEqual({ created: 2, updated: 0, kept: 6, removed: 0 });
+    expect(writtenMembers(result)).toEqual(["ship", "ok→ship:flow"]);
+    const after = applied(records, result);
+    expect(box(mainOf(after, "ship"))).toEqual({ x: 448, y: 520, w: 160, h: 72 });
+    expect(box(frameOf(after)!)).toEqual({ x: 0, y: 0, w: 656, h: 640 });
+    expect(result.overlaps).toEqual([]);
+  });
+
+  it("moves a new member across the flow past members in its way", async () => {
+    const records = change(applied(BASE, await run(CHECKOUT)), "ok", (shape) =>
+      moved(shape, 256, 336),
+    );
+    const result = await run(
+      {
+        ...CHECKOUT,
+        nodes: [...CHECKOUT.nodes, { key: "refund" }],
+        edges: [...(CHECKOUT.edges ?? []), ["pay", "refund"]],
+      },
+      records,
+    );
+    // Laid out beside ok's old spot, then past ok (256 + 160) plus the gap.
+    expect(box(mainOf(applied(records, result), "refund"))).toEqual({
+      x: 464,
+      y: 336,
+      w: 160,
+      h: 72,
+    });
+    expect(result.overlaps).toEqual([]);
+  });
+
+  it("ignores shapes a human drew inside the frame", async () => {
+    let records = change(applied(BASE, await run(CHECKOUT)), "ok", (shape) =>
+      moved(shape, 448, 336),
+    );
+    const human = {
+      ...mainOf(records, "pay"),
+      id: "shape:human",
+      x: 448,
+      y: 520,
+      meta: {},
+    } as TLShape;
+    records = [...records, human];
+    const result = await run(WITH_SHIP, records);
+    expect(result.changes?.expected.some((entry) => entry.id === human.id)).toBe(false);
+    expect(box(mainOf(applied(records, result), "ship"))).toEqual({
+      x: 448,
+      y: 520,
+      w: 160,
+      h: 72,
+    });
+    expect(result.overlaps).toEqual([]);
+  });
+
+  it("relays out every member only on request, deterministically, keeping content and sizes", async () => {
+    const fresh = applied(BASE, await run(CHECKOUT));
+    let records = change(fresh, "ok", (shape) => moved(shape, 448, 336));
+    records = change(records, "pay", (shape) => recolored(moved(shape, 0, 900)));
+    expect((await run(CHECKOUT, records)).changes).toBeNull();
+
+    const result = await compose({ spec: CHECKOUT, relayout: true }, records, portsFor(records));
+    expect(result.counts).toEqual({ created: 0, updated: 0, kept: 6, removed: 0 });
+    expect(writtenMembers(result)).toEqual(["pay", "ok"]);
+    const after = applied(records, result);
+    for (const key of ["start", "pay", "ok"])
+      expect(box(mainOf(after, key))).toEqual(box(mainOf(fresh, key)));
+    expect(mainOf(after, "pay").props).toMatchObject({ color: "red" });
+    expect(readCompositions(after).summaries[0]?.editedCount).toBe(1);
+    expect(
+      (await compose({ spec: CHECKOUT, relayout: true }, after, portsFor(after))).changes,
+    ).toBeNull();
+  });
+
+  it("keeps a human-resized member's size through relayout", async () => {
+    const records = change(applied(BASE, await run(CHECKOUT)), "pay", (shape) =>
+      withProps(shape, { w: 400 }),
+    );
+    const result = await compose({ spec: CHECKOUT, relayout: true }, records, portsFor(records));
+    expect(box(mainOf(applied(records, result), "pay")).w).toBe(400);
+  });
+
+  it("reports node members that overlap, even when nothing changes", async () => {
+    let records = applied(BASE, await run(CHECKOUT));
+    const start = mainOf(records, "start");
+    records = change(records, "pay", (shape) => moved(shape, start.x + 10, start.y + 10));
+    expect(await run(CHECKOUT, records)).toEqual({
+      changes: null,
+      counts: { created: 0, updated: 0, kept: 6, removed: 0 },
+      overlaps: [["start", "pay"]],
     });
   });
 });

@@ -1,5 +1,6 @@
 import type {
   DiagramComposeRequest,
+  DiagramCompositionsPage,
   DiagramCompositionSummary,
   DiagramKit,
   DiagramKitReference,
@@ -9,7 +10,7 @@ import type { TLRecord } from "@tldraw/tlschema";
 import { indexRecords } from "./canvas.ts";
 import { referenceOf } from "./kit.ts";
 import { KITS } from "./kits/index.ts";
-import { scanCompositions, summarize } from "./membership.ts";
+import { type DetailPage, detail, scanCompositions, summarize } from "./membership.ts";
 import { parseSpec } from "./spec.ts";
 
 /**
@@ -30,6 +31,8 @@ export interface CompositionsView {
   readonly compositionOfFrame: (recordId: string) => DiagramCompositionSummary | undefined;
   /** The composition a genuine member record (or frame) belongs to, wherever it sits on the canvas. */
   readonly compositionOf: (recordId: string) => DiagramCompositionSummary | undefined;
+  /** Each member's last-emitted spec and whether someone edited it, paged by member. */
+  readonly detail: (page: DetailPage) => DiagramCompositionsPage;
 }
 
 /** One pass over a document's records. */
@@ -47,6 +50,7 @@ export function readCompositions(records: Iterable<TLRecord>): CompositionsView 
       const key = scan.owners.get(recordId);
       return key === undefined ? undefined : byKey.get(key);
     },
+    detail: (page) => detail(summaries, scan, page),
   };
 }
 

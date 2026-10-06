@@ -446,9 +446,19 @@ export const make = Effect.gen(function* () {
       );
       const offset = input.offset ?? 0;
       const limit = input.limit ?? DIAGRAM_MAX_READ_RECORDS;
+      const compositions = readCompositions(records);
+      // Member specs can be large, so detail is opt-in; summaries in structure name the keys.
+      const detail =
+        input.compositionKey !== undefined || input.includeCompositions
+          ? compositions.detail({
+              key: input.compositionKey,
+              offset: input.compositionOffset ?? 0,
+              limit: input.compositionLimit ?? DIAGRAM_MAX_READ_RECORDS,
+            })
+          : undefined;
       return {
         diagram,
-        structure: diagramStructure(records, diagram.revision, input),
+        structure: diagramStructure(records, diagram.revision, input, compositions),
         records:
           input.includeRecords || input.recordIds ? selected.slice(offset, offset + limit) : [],
         schema: schema.serialize(),
@@ -456,6 +466,7 @@ export const make = Effect.gen(function* () {
           (input.includeRecords || input.recordIds) && offset + limit < selected.length
             ? offset + limit
             : null,
+        ...(detail ? { compositions: detail } : {}),
       } satisfies DiagramReadResult;
     });
   });
@@ -864,7 +875,7 @@ export const make = Effect.gen(function* () {
   ) {
     const diagram = yield* targetMetadata(input);
     if (diagram.archivedAt) return yield* new DiagramOperationError({ code: "archived" });
-    const request = { spec: input.spec };
+    const request = { spec: input.spec, ...(input.relayout ? { relayout: true } : {}) };
     yield* attempt(() => validateComposeRequest(request));
     const composed = yield* invoke({ ...input, operation: "compose", value: request });
     const result = yield* attempt(() => decodeHostComposeResult(composed.value));
@@ -875,6 +886,7 @@ export const make = Effect.gen(function* () {
         revision: (yield* attempt(() => metadata(input))).revision,
         compositionKey,
         counts: result.counts,
+        overlaps: result.overlaps,
       } satisfies DiagramComposeResult;
     // Prepare on the host that composed: it measured against the records it is about to fence.
     const receipt = yield* applyBatchCore({
@@ -890,6 +902,7 @@ export const make = Effect.gen(function* () {
       revision: receipt.revision,
       compositionKey,
       counts: result.counts,
+      overlaps: result.overlaps,
     } satisfies DiagramComposeResult;
   });
 

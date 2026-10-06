@@ -110,7 +110,7 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
     (decision) => decision.do === "create" && decision.draft.spec.role === "node",
   ).length;
   const newIndexes = indexesAbove(maxChildIndex(final, frame.id), createdNodes).values();
-  const nodes: TLGeoShape[] = [];
+  const nodes: TLShape[] = [];
   for (const decision of written) {
     const node = decision.draft.spec;
     const box = placement.nodes.get(node.key);
@@ -153,6 +153,13 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
       },
     };
     nodes.push(remember(withPartMeta(record, spec.key, epoch, node, "main")));
+  }
+  // Relayout moves kept nodes; their content, size and parent stay as the canvas has them.
+  for (const decision of decisions) {
+    const box = placement.nodes.get(decision.key);
+    const main =
+      decision.do === "keep" && decision.current ? mainShape(decision.current) : undefined;
+    if (box && main) nodes.push(remember({ ...main, x: box.x, y: box.y }));
   }
 
   const placeArrow = arrowPlacer(final);

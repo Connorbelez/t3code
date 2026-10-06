@@ -63,6 +63,14 @@ whole drawing is one Undo step. A diagram can hold several generated drawings
 side by side. When you attach a diagram, the agent sees each generated drawing as
 one summary instead of every shape, so large drawings don't crowd out the rest.
 
+Ask for changes and the agent updates the same drawing. Shapes you moved or
+resized stay as you left them, new shapes are placed around them, and shapes you
+deleted stay deleted. Your text and style edits are kept unless the agent needs
+to change that same shape. In that case it stops without changing anything,
+reads your edits, and tries again with them merged in. Shapes you draw inside a
+generated drawing's frame are never touched. To tidy up, ask the agent to lay
+the drawing out again. That moves every generated shape but keeps your edits.
+
 ## Send while the agent is working
 
 On web and desktop, choose **Settings → General → Follow-up behavior** to queue

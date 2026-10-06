@@ -210,9 +210,9 @@ const measureText: ComposePorts["measureText"] = (text, font) => {
   const lines = font.maxWidth === null ? 1 : Math.max(1, Math.ceil(width / font.maxWidth));
   return { w: Math.min(width, font.maxWidth ?? width), h: lines * font.fontSize * 1.35 };
 };
-function composeInto(editor: Editor) {
+function composeInto(editor: Editor, request: DiagramComposeRequest = checkout) {
   const records = editor.store.serialize("document");
-  return compose(checkout, Object.values(records), {
+  return compose(request, Object.values(records), {
     measureText,
     rehearse: (puts, deletes) =>
       new Map(Object.entries(rehearseDiagramChanges(editor, records, puts, deletes))),
@@ -273,5 +273,71 @@ describe("composed batches", () => {
         .flatMap((shape) => (shape.type === "frame" ? [shape.props.name] : [])),
     ).toEqual(["Checkout"]);
     expect((await composeInto(editor)).changes).toBeNull();
+  });
+});
+
+type Changes = NonNullable<Awaited<ReturnType<typeof composeInto>>["changes"]>;
+function applyComposed(editor: Editor, changes: Changes) {
+  expect(() => validateDiagramBatch(editor, { requestId: "compose", ...changes })).not.toThrow();
+  editor.run(
+    () => {
+      editor.store.put(changes.puts.map(parseDocumentRecord));
+      editor.store.remove(changes.deletes as TLRecord["id"][]);
+    },
+    { ignoreShapeLock: true },
+  );
+}
+function member(editor: Editor, key: string) {
+  const shape = editor.getCurrentPageShapes().find((candidate) => {
+    const meta = candidate.meta["t3Composition"];
+    return (
+      typeof meta === "object" &&
+      meta !== null &&
+      !Array.isArray(meta) &&
+      meta["m"] === key &&
+      meta["p"] === "main"
+    );
+  });
+  assert(shape, `member ${key} is on the canvas`);
+  return shape;
+}
+describe("regenerated batches", () => {
+  it("pass the preflight after human edits, for new members, rewrites and relayout", async () => {
+    const editor = mount();
+    const first = await composeInto(editor);
+    assert(first.changes, "a new composition must produce changes");
+    applyComposed(editor, first.changes);
+
+    const valid = member(editor, "valid");
+    editor.updateShape({ id: valid.id, type: "geo", x: valid.x + 400 });
+    editor.updateShape({ id: member(editor, "cart").id, type: "geo", props: { color: "red" } });
+    editor.deleteShapes([member(editor, "receipt").id]);
+
+    const next: DiagramComposeRequest = {
+      spec: {
+        ...checkout.spec,
+        nodes: [
+          ...checkout.spec.nodes.map((node) =>
+            node.key === "pay" ? { ...node, label: "Take card payment" } : node,
+          ),
+          { key: "refund", label: "Refund" },
+        ],
+        edges: [...(checkout.spec.edges ?? []), ["valid", "refund", "no"]],
+      },
+    };
+    const regenerated = await composeInto(editor, next);
+    expect(regenerated.counts).toEqual({ created: 2, updated: 1, kept: 11, removed: 0 });
+    assert(regenerated.changes, "the changed spec must produce changes");
+    applyComposed(editor, regenerated.changes);
+    expect(member(editor, "valid").x).toBe(valid.x + 400);
+    expect(member(editor, "cart").props).toMatchObject({ color: "red" });
+
+    const relayout = { ...next, relayout: true };
+    const relaid = await composeInto(editor, relayout);
+    assert(relaid.changes, "relayout must move the dragged member back");
+    applyComposed(editor, relaid.changes);
+    expect(member(editor, "cart").props).toMatchObject({ color: "red" });
+    expect((await composeInto(editor, relayout)).changes).toBeNull();
+    expect((await composeInto(editor, next)).changes).toBeNull();
   });
 });

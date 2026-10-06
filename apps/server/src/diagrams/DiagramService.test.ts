@@ -6,13 +6,20 @@ import {
   DiagramCapture,
   DiagramScope,
   DiagramOperationError,
+  DiagramReadResult,
   type DiagramHostComposeResult,
   type DiagramHostOperation,
   type DiagramMetadata,
   type DiagramSpec,
 } from "@t3tools/contracts";
 import { compose } from "@t3tools/diagram-compose/compose";
-import { PageRecordType, AssetRecordType, createTLSchema, type TLRecord } from "@tldraw/tlschema";
+import {
+  PageRecordType,
+  AssetRecordType,
+  createTLSchema,
+  toRichText,
+  type TLRecord,
+} from "@tldraw/tlschema";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -87,6 +94,7 @@ const connect = Effect.fn(function* (
 ) {
   const { control } = options;
   const received: DiagramHostOperation[] = [];
+  const composeInputs: unknown[] = [];
   const ready = yield* Deferred.make<string>();
   const connected = yield* Deferred.make<void>();
   const committed = yield* Deferred.make<{ generation: string; fence: string }>();
@@ -169,6 +177,7 @@ const connect = Effect.fn(function* (
       }
       received.push(request.operation);
       if (request.operation === "compose") {
+        composeInputs.push(request.input);
         const answer = options.composeAnswers?.shift();
         if (!answer) return yield* Effect.die("Unexpected compose request");
         yield* service.hostRespond({
@@ -222,7 +231,7 @@ const connect = Effect.fn(function* (
     }),
   ).pipe(Effect.forkScoped);
   yield* Deferred.await(hostReady);
-  return { connectionId, committed, adopted, released, received };
+  return { connectionId, committed, adopted, released, received, composeInputs };
 });
 
 it.effect("selects the mounted host and refuses a busy context even when images are optional", () =>
@@ -919,6 +928,7 @@ const flowSpec: DiagramSpec = {
 const unchanged: DiagramHostComposeResult = {
   changes: null,
   counts: { created: 0, updated: 0, kept: 3, removed: 0 },
+  overlaps: [["start", "pay"]],
 };
 
 // Needs the real validateComposeRequest from @t3tools/diagram-compose.
@@ -960,6 +970,7 @@ it.effect("routes each host request only to hosts advertising its operation", ()
       revision: 0,
       compositionKey: "checkout",
       counts: unchanged.counts,
+      overlaps: [["start", "pay"]],
     });
     const page = sdkSchema.types.page.validate({
       id: PageRecordType.createId("routed"),
@@ -1007,6 +1018,7 @@ it.effect("applies composed changes on the composing host and no-ops an identica
         {
           changes: { expected: [{ id: page.id, record: null }], puts: [page], deletes: [] },
           counts,
+          overlaps: [],
         },
         unchanged,
       ],
@@ -1017,6 +1029,7 @@ it.effect("applies composed changes on the composing host and no-ops an identica
       revision: 1,
       compositionKey: "checkout",
       counts,
+      overlaps: [],
     });
     assert.deepEqual(
       yield* service.receipt({
@@ -1027,15 +1040,23 @@ it.effect("applies composed changes on the composing host and no-ops an identica
       }),
       { requestId: "compose-1", revision: 1, changedRecordIds: ["page:composed"] },
     );
-    assert.deepEqual(yield* service.compose(input), {
+    assert.deepEqual(yield* service.compose({ ...input, relayout: true }), {
       requestId: null,
       revision: 1,
       compositionKey: "checkout",
       counts: unchanged.counts,
+      overlaps: unchanged.overlaps,
     });
     assert.deepEqual(host.received, ["compose", "prepare-batch", "compose"]);
+    assert.deepEqual(host.composeInputs, [{ spec: flowSpec }, { spec: flowSpec, relayout: true }]);
   }).pipe(Effect.scoped, Effect.provide(dependencies)),
 );
+
+const tooLargeIssue = {
+  path: "spec",
+  message:
+    "needs 601 records but one compose writes at most 500; split it into several compositions",
+};
 
 // Needs the real validateComposeRequest from @t3tools/diagram-compose.
 it.effect("surfaces host compose errors intact and rejects invalid specs before any host", () =>
@@ -1047,6 +1068,7 @@ it.effect("surfaces host compose errors intact and rejects invalid specs before 
       operations: allOperations,
       composeAnswers: [
         new DiagramOperationError({ code: "conflict", details: { members: ["start", "pay"] } }),
+        new DiagramOperationError({ code: "too-large", details: { issues: [tooLargeIssue] } }),
       ],
     });
     const input = { projectId, diagramId: diagram.id, namespace: "provider", spec: flowSpec };
@@ -1055,6 +1077,11 @@ it.effect("surfaces host compose errors intact and rejects invalid specs before 
       { code: conflict.code, details: conflict.details },
       { code: "conflict", details: { members: ["start", "pay"] } },
     );
+    const tooLarge = yield* Effect.flip(service.compose(input));
+    assert.deepEqual(
+      { code: tooLarge.code, details: tooLarge.details },
+      { code: "too-large", details: { issues: [tooLargeIssue] } },
+    );
     const invalid = yield* Effect.flip(
       service.compose({
         ...input,
@@ -1062,7 +1089,7 @@ it.effect("surfaces host compose errors intact and rejects invalid specs before 
       }),
     );
     assert.equal(invalid.code, "invalid-spec");
-    assert.deepEqual(host.received, ["compose"]);
+    assert.deepEqual(host.received, ["compose", "compose"]);
   }).pipe(Effect.scoped, Effect.provide(dependencies)),
 );
 
@@ -1172,6 +1199,236 @@ it.effect("lists large compositions once in structure and attached context", () 
     assert.deepEqual(
       viewport.structure.compositions.map((item) => item.key),
       ["left"],
+    );
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
+/** Runs the real pipeline the way a host would and returns the records after its batch. */
+const composeRecords = Effect.fn(function* (
+  records: readonly TLRecord[],
+  spec: DiagramSpec,
+  options: { relayout?: boolean } = {},
+) {
+  const result = yield* Effect.promise(() =>
+    compose({ spec, ...options }, records, {
+      measureText: (text) => ({ w: text.length * 8, h: 20 }),
+      rehearse: (puts, deletes) => {
+        const after = new Map(records.map((item) => [item.id as string, item]));
+        for (const id of deletes) after.delete(id);
+        for (const item of puts) after.set(item.id, item);
+        return after;
+      },
+    }),
+  );
+  const after = new Map(records.map((item) => [item.id as string, item]));
+  for (const id of result.changes?.deletes ?? []) after.delete(id);
+  for (const item of result.changes?.puts ?? []) {
+    const record = sdkRecord(item);
+    after.set(record.id, record);
+  }
+  return { result, records: Array.from(after.values()) };
+});
+
+function memberShape(records: readonly TLRecord[], key: string) {
+  const shape = records.find((item) => {
+    if (item.typeName !== "shape") return false;
+    const meta = item.meta["t3Composition"];
+    return (
+      typeof meta === "object" &&
+      meta !== null &&
+      !Array.isArray(meta) &&
+      meta["m"] === key &&
+      meta["p"] === "main"
+    );
+  });
+  if (shape?.typeName !== "shape") throw new Error(`no member ${key}`);
+  return shape;
+}
+
+const encodeReadResult = Schema.encodeEffect(DiagramReadResult);
+const decodeReadResult = Schema.decodeUnknownEffect(DiagramReadResult);
+
+const authSpec: DiagramSpec = {
+  kit: "flow",
+  key: "auth",
+  title: "Auth",
+  nodes: [
+    { key: "login", kind: "start", ref: { path: "src/auth/login.ts", line: 12 } },
+    { key: "session", label: "Create session" },
+  ],
+  edges: [["login", "session", "ok"]],
+};
+
+// Needs the real compose pipeline and readCompositions from @t3tools/diagram-compose.
+it.effect("reads composition detail by key with its own pagination, ref and edited text", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    const page = document().records[0]!;
+    let { records } = yield* composeRecords([page], authSpec);
+    ({ records } = yield* composeRecords(records, {
+      kit: "flow",
+      key: "billing",
+      nodes: [{ key: "invoice" }],
+    }));
+    const session = memberShape(records, "session");
+    records = records.map((item) =>
+      item.id === session.id && item.typeName === "shape" && item.type === "geo"
+        ? sdkRecord({ ...item, props: { ...item.props, richText: toRichText("Start\nsession") } })
+        : item,
+    );
+    const diagram = yield* service.importDocument({
+      projectId,
+      name: "Detail",
+      document: { ...document(), records },
+    });
+    const target = { projectId, diagramId: diagram.id };
+    assert.isUndefined((yield* service.read(target)).compositions);
+
+    const login = {
+      spec: {
+        key: "login",
+        kind: "start",
+        label: "login",
+        ref: { path: "src/auth/login.ts", line: 12 },
+      },
+      edited: false,
+    };
+    const edited = {
+      spec: { key: "session", kind: "process", label: "Create session" },
+      edited: true,
+      text: "Start\nsession",
+    };
+    const edge = {
+      spec: { key: "login→session:flow", from: "login", to: "session", kind: "flow", label: "ok" },
+      edited: false,
+    };
+    const auth = { key: "auth", kit: "flow", title: "Auth", direction: "down" } as const;
+    const first = yield* service.read({ ...target, compositionKey: "auth", compositionLimit: 2 });
+    assert.deepEqual(first.compositions, {
+      items: [{ ...auth, members: [login, edited] }],
+      nextOffset: 2,
+    });
+    const second = yield* service.read({
+      ...target,
+      compositionKey: "auth",
+      compositionOffset: 2,
+      compositionLimit: 2,
+    });
+    assert.deepEqual(second.compositions, {
+      items: [{ ...auth, members: [edge] }],
+      nextOffset: null,
+    });
+    const across = yield* service.read({
+      ...target,
+      includeCompositions: true,
+      compositionOffset: 2,
+      compositionLimit: 2,
+    });
+    assert.deepEqual(across.compositions, {
+      items: [
+        { ...auth, members: [edge] },
+        {
+          key: "billing",
+          kit: "flow",
+          title: "billing",
+          direction: "down",
+          members: [{ spec: { key: "invoice", kind: "process", label: "invoice" }, edited: false }],
+        },
+      ],
+      nextOffset: null,
+    });
+    // The MCP tool encodes reads through the contract, so the section must fit it exactly.
+    assert.deepEqual(
+      (yield* decodeReadResult(yield* encodeReadResult(first))).compositions,
+      first.compositions,
+    );
+    assert.deepEqual((yield* service.read({ ...target, compositionKey: "missing" })).compositions, {
+      items: [],
+      nextOffset: null,
+    });
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
+// Needs the real compose pipeline from @t3tools/diagram-compose.
+it.effect("fails stale and changes nothing when a member changes between compose and commit", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    const page = document().records[0]!;
+    const documentRecord = sdkRecord({
+      id: "document:document",
+      typeName: "document",
+      gridSize: 10,
+      name: "",
+      meta: {},
+    });
+    const { records } = yield* composeRecords([documentRecord, page], authSpec);
+    const diagram = yield* service.importDocument({
+      projectId,
+      name: "Stale",
+      document: { ...document(), records },
+    });
+    const next: DiagramSpec = {
+      ...authSpec,
+      nodes: [authSpec.nodes[0]!, { key: "session", label: "Open session" }],
+    };
+    // The host composes against the canvas as it is now.
+    const { result: answer } = yield* composeRecords(records, next);
+    const host = yield* connect(service, diagram, {
+      operations: allOperations,
+      composeAnswers: [answer],
+    });
+
+    // Then a raw agent batch recolors the same member before the compose is prepared.
+    const session = memberShape(records, "session");
+    const recolored = sdkRecord({ ...session, props: { ...session.props, color: "red" } });
+    const edit = {
+      requestId: "human-edit",
+      expected: records.map((item) => ({ id: item.id, record: item })),
+      puts: [recolored],
+      deletes: [],
+    };
+    yield* service.applyBatch({
+      projectId,
+      diagramId: diagram.id,
+      namespace: "provider",
+      batch: edit,
+    });
+    const committed = yield* Deferred.await(host.committed);
+    yield* service.syncSend({
+      projectId,
+      diagramId: diagram.id,
+      connectionId: host.connectionId,
+      message: encode({
+        type: "diagram-adoption",
+        generation: committed.generation,
+        fence: committed.fence,
+        push: { type: "push", clientClock: 1, diff: { [recolored.id]: ["put", recolored] } },
+      }),
+    });
+    yield* Deferred.await(host.adopted);
+
+    const input = {
+      projectId,
+      diagramId: diagram.id,
+      namespace: "provider",
+      requestId: "compose-stale",
+      spec: next,
+    };
+    assert.equal((yield* Effect.flip(service.compose(input))).code, "stale");
+    assert.deepEqual(host.received, ["prepare-batch", "compose", "prepare-batch"]);
+    assert.isNull(
+      yield* service.receipt({ ...input, requestId: "compose-stale", namespace: "provider" }),
+    );
+    const after = yield* service.read({ projectId, diagramId: diagram.id, compositionKey: "auth" });
+    assert.deepEqual(
+      after.compositions?.items[0]?.members.find((member) => member.spec.key === "session"),
+      {
+        spec: { key: "session", kind: "process", label: "Create session" },
+        edited: true,
+        text: "Create session",
+      },
     );
   }).pipe(Effect.scoped, Effect.provide(dependencies)),
 );

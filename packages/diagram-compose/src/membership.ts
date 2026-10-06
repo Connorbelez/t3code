@@ -1,4 +1,8 @@
-import type { DiagramCompositionSummary } from "@t3tools/contracts";
+import type {
+  DiagramCompositionMember,
+  DiagramCompositionSummary,
+  DiagramCompositionsPage,
+} from "@t3tools/contracts";
 import type { TLFrameShape, TLParentId, TLRecord } from "@tldraw/tlschema";
 
 import {
@@ -147,4 +151,101 @@ export function summarize(index: RecordIndex, scan: CompositionScan): DiagramCom
         bounds: unionOf(boxes),
       };
     });
+}
+
+export interface DetailPage {
+  /** Only this composition; every composition when absent. */
+  readonly key?: string | undefined;
+  readonly offset: number;
+  readonly limit: number;
+}
+
+const MAX_TEXT = 2000;
+
+/**
+ * Members as compose last wrote them, flattened across the compositions in summary order and
+ * paged by member. Members a human deleted are absent; their keys stay in the ledger only.
+ */
+export function detail(
+  summaries: readonly DiagramCompositionSummary[],
+  scan: CompositionScan,
+  page: DetailPage,
+): DiagramCompositionsPage {
+  const end = page.offset + page.limit;
+  let cursor = 0;
+  const items: DiagramCompositionsPage["items"][number][] = [];
+  for (const summary of summaries) {
+    const composition = scan.compositions.get(summary.key);
+    if (!composition || (page.key !== undefined && page.key !== summary.key)) continue;
+    const members = memberOrder(composition);
+    const from = Math.max(page.offset - cursor, 0);
+    const to = Math.max(end - cursor, 0);
+    const slice = members.slice(from, to);
+    const start = cursor;
+    cursor += members.length;
+    if (slice.length === 0 && !(members.length === 0 && start >= page.offset && start < end))
+      continue;
+    items.push({
+      key: composition.key,
+      kit: composition.meta.kit,
+      title: composition.meta.title,
+      direction: composition.meta.direction,
+      members: slice.map(memberDetail),
+    });
+  }
+  return { items, nextOffset: end < cursor ? end : null };
+}
+
+/** Ledger order, which is spec order, then members the ledger lost track of by key. */
+function memberOrder(composition: CurrentComposition): CurrentMember[] {
+  const listed = Array.from(composition.ledger.keys()).flatMap((key) => {
+    const member = composition.members.get(key);
+    return member ? [member] : [];
+  });
+  const unlisted = Array.from(composition.members.values())
+    .filter((member) => !composition.ledger.has(member.key))
+    .sort((a, b) => compareIndex(a.key, b.key));
+  return [...listed, ...unlisted];
+}
+
+function memberDetail(member: CurrentMember): DiagramCompositionMember {
+  const { stored } = member;
+  const spec =
+    stored.role === "node"
+      ? {
+          key: stored.key,
+          kind: stored.kind,
+          label: stored.label,
+          ...(stored.parent === null ? {} : { parent: stored.parent }),
+          ...(stored.ref === null ? {} : { ref: stored.ref }),
+        }
+      : {
+          key: stored.key,
+          from: stored.from,
+          to: stored.to,
+          kind: stored.kind,
+          label: stored.label,
+        };
+  if (!member.edited) return { spec, edited: false };
+  const main = member.parts.get("main");
+  const text =
+    main?.typeName === "shape" && "richText" in main.props ? plainText(main.props.richText) : "";
+  return {
+    spec,
+    edited: true,
+    text: text.length > MAX_TEXT ? `${text.slice(0, MAX_TEXT - 1)}…` : text,
+  };
+}
+
+const INLINE_BLOCKS = new Set(["paragraph", "heading"]);
+
+/** Rich text as plain text: blocks on their own lines, the inverse of `toRichText` for labels. */
+function plainText(node: unknown): string {
+  if (typeof node !== "object" || node === null) return "";
+  if ("text" in node && typeof node.text === "string") return node.text;
+  const type = "type" in node ? node.type : null;
+  if (type === "hardBreak") return "\n";
+  if (!("content" in node) || !Array.isArray(node.content)) return "";
+  const separator = typeof type === "string" && INLINE_BLOCKS.has(type) ? "" : "\n";
+  return node.content.map(plainText).join(separator);
 }

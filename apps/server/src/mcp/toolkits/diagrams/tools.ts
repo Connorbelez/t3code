@@ -30,7 +30,7 @@ const list = Tool.make("t3_diagram_list", {
 const read = Tool.make("t3_diagram_read", {
   ...shared,
   description:
-    "Read current diagram revision and bounded all-page shape/binding summaries. Each composition is listed once instead of its member shapes. Set includeRecords or recordIds for schema-bearing records and paginate with nextOffset. Retain exact target, ancestor, binding and asset records as expected preconditions before editing. Reads work without an editor.",
+    "Read current diagram revision and bounded all-page shape/binding summaries. Each composition is listed once instead of its member shapes; pass compositionKey (or includeCompositions) for its detail: each member's last composed spec including ref, whether someone edited it, and its current text when edited, paged by compositionOffset and compositionLimit. Set includeRecords or recordIds for schema-bearing records and paginate with nextOffset. Retain exact target, ancestor, binding and asset records as expected preconditions before editing. Reads work without an editor.",
   parameters: Schema.Struct({ ...Contracts.DiagramReadInput.fields, projectId }),
   success: Contracts.DiagramReadResult,
 })
@@ -58,7 +58,10 @@ const apply = Tool.make("t3_diagram_apply", {
 const composeGuidance = [
   "Compose a structured diagram such as a flowchart from a spec of nodes and edges. T3 Code lays it out and draws editable stock shapes inside a frame named by the composition key.",
   "Prefer this over t3_diagram_apply for structured diagrams, and describe content, not coordinates: labels default to keys, kinds default per kit, and edges accept [from, to, label?]. t3_diagram_kit lists a kit's vocabulary and an example; invalid specs fail listing the valid options.",
-  "The spec replaces the whole composition with that key, so read the diagram before recomposing an existing key.",
+  "The spec replaces the whole composition with that key. Before recomposing an existing key, read it with t3_diagram_read compositionKey and build the new spec from the member specs there.",
+  "Recomposing keeps every existing position, places new members around them, keeps human edits to members your spec leaves unchanged, and rewrites only unedited members whose spec changed.",
+  "If your spec changes or drops a member that someone else also edited, nothing changes and the call fails with conflict listing those keys in details.members; merge their current text into your spec, or leave those members as they were, and retry.",
+  "Set relayout: true only when the user asks to rearrange the diagram, because it moves every member. The result lists overlapping member pairs; mention them rather than relaying out unasked.",
   "An identical retry is a no-op, so retry freely after an uncertain response. requestId is optional and only needed for t3_diagram_receipt lookup.",
   "One composition is at most 500 records; split large diagrams into several compositions by area.",
   "A connected editor host is required. Attaching a diagram is context and does not authorize changing it.",

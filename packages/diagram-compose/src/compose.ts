@@ -7,13 +7,13 @@ import {
 } from "@t3tools/contracts";
 import type { TLRecord } from "@tldraw/tlschema";
 
-import { indexRecords, type RecordIndex } from "./canvas.ts";
+import { indexRecords, pageBox, type RecordIndex, shapeOf } from "./canvas.ts";
 import { emit } from "./emit.ts";
-import { frameShapeId } from "./identity.ts";
+import { frameShapeId, memberShapeId } from "./identity.ts";
 import { type MeasureText, place } from "./layout.ts";
 import { decideReplace, type Decision, draftsOf, nextLedger } from "./merge.ts";
 import { scanCompositions } from "./membership.ts";
-import { parseSpec } from "./spec.ts";
+import { type ComposeSpec, parseSpec } from "./spec.ts";
 
 /**
  * Pipeline entry for the editor host. Import lazily; layout loads ELK on first use.
@@ -53,21 +53,60 @@ export async function compose(
   const decisions = decideReplace(draftsOf(spec), current);
   const counts = countsOf(decisions);
   const ledger = nextLedger(decisions);
+  const epoch = current?.epoch ?? freeEpoch(spec.key, index);
   if (
     current &&
+    !request.relayout &&
     decisions.every((decision) => decision.do === "keep") &&
     current.meta.kit === spec.kit.name &&
     current.meta.title === spec.title &&
     current.meta.direction === spec.direction &&
     isEqualJson(current.meta.ledger, ledger)
   ) {
-    return { changes: null, counts };
+    return { changes: null, counts, overlaps: overlapsOf(spec, epoch, index) };
   }
 
-  const epoch = current?.epoch ?? freeEpoch(spec.key, index);
-  const placement = await place(spec, decisions, current, index, ports.measureText);
+  const placement = await place(
+    spec,
+    decisions,
+    current,
+    index,
+    ports.measureText,
+    request.relayout ?? false,
+  );
   const { puts, deletes } = emit({ spec, epoch, current, decisions, ledger, placement, index });
-  return { changes: finalize(puts, deletes, index, ports.rehearse), counts };
+  const after = new Map(index);
+  for (const record of puts) after.set(record.id, record);
+  for (const id of deletes) after.delete(id);
+  return {
+    changes: finalize(puts, deletes, index, ports.rehearse),
+    counts,
+    overlaps: overlapsOf(spec, epoch, after),
+  };
+}
+
+const MAX_OVERLAPS = 50;
+
+/** Node members whose page boxes intersect, in spec order. Arrows and non-members never count. */
+function overlapsOf(spec: ComposeSpec, epoch: number, index: RecordIndex): [string, string][] {
+  const boxes = spec.nodes.flatMap((node) => {
+    const shape = shapeOf(index, memberShapeId(spec.key, epoch, node.key, "main"));
+    return shape ? [{ key: node.key, box: pageBox(index, shape) }] : [];
+  });
+  const pairs: [string, string][] = [];
+  for (const [i, a] of boxes.entries()) {
+    for (const b of boxes.slice(i + 1)) {
+      if (pairs.length === MAX_OVERLAPS) return pairs;
+      if (
+        a.box.x < b.box.x + b.box.w &&
+        b.box.x < a.box.x + a.box.w &&
+        a.box.y < b.box.y + b.box.h &&
+        b.box.y < a.box.y + a.box.h
+      )
+        pairs.push([a.key, b.key]);
+    }
+  }
+  return pairs;
 }
 
 function countsOf(decisions: readonly Decision[]): DiagramComposeCounts {

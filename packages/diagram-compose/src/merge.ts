@@ -1,7 +1,7 @@
 import { DiagramOperationError } from "@t3tools/contracts";
 
 import { compareIndex } from "./canvas.ts";
-import { specHash, type StoredMember } from "./identity.ts";
+import { MEMBER_PARTS, specHash, type StoredMember } from "./identity.ts";
 import type { CurrentComposition, CurrentMember } from "./membership.ts";
 import type { ComposeSpec } from "./spec.ts";
 
@@ -127,6 +127,24 @@ export function decideReplace(
   }
   const nodes = presentNodes(decisions);
   return decisions.map((decision, i) => {
+    const row = rows[i];
+    if (
+      decision.do === "keep" &&
+      decision.current?.stored.role === "edge" &&
+      !decision.current.edited &&
+      decision.current.parts.size < MEMBER_PARTS.edge.length &&
+      row?.intent.want === "upsert" &&
+      nodes.has(decision.current.stored.from) &&
+      nodes.has(decision.current.stored.to)
+    ) {
+      // An unedited edge lost its binding with a deleted endpoint that this compose recreates.
+      return {
+        do: "overwrite",
+        key: decision.key,
+        draft: row.intent.draft,
+        current: decision.current,
+      };
+    }
     if (decision.do !== "create" && decision.do !== "overwrite") return decision;
     const spec = decision.draft.spec;
     if (spec.role !== "edge" || (nodes.has(spec.from) && nodes.has(spec.to))) return decision;
@@ -135,7 +153,7 @@ export function decideReplace(
     return {
       do: "keep",
       key: decision.key,
-      hash: rows[i]?.last ?? null,
+      hash: row?.last ?? null,
       current: decision.do === "overwrite" ? decision.current : null,
     };
   });
