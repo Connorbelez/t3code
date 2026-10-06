@@ -53,6 +53,53 @@ Wait for **Saved** before closing or refreshing an editor with offline changes.
 Export editable diagrams or PNG/SVG images when you need files. Removing a project
 permanently deletes its active and archived diagrams; export them first to keep them.
 
+### Ask the agent for a diagram
+
+Ask the agent for a flowchart, a state machine, a class diagram of your models,
+an ER diagram of your database schema, a C4 view, a system architecture diagram,
+a sequence diagram of a request path, low-fidelity phone, tablet, or web
+screens, or a user flow between screens,
+for example "draw the checkout flow in the architecture diagram". The agent describes what the diagram contains, and T3 Code
+lays it out and draws it as ordinary shapes inside a named frame, placed to the
+right of what is already on the first page. Everything stays editable, and the
+whole drawing is one Undo step. A diagram can hold several generated drawings
+side by side. When you attach a diagram, the agent sees each generated drawing as
+one summary instead of every shape, so large drawings don't crowd out the rest.
+
+Ask for changes and the agent updates the same drawing. Shapes you moved or
+resized stay as you left them, new shapes are placed around them, and shapes you
+deleted stay deleted. Your text and style edits are kept unless the agent needs
+to change that same shape. In that case it stops without changing anything,
+reads your edits, and tries again with them merged in. Shapes you draw inside a
+generated drawing's frame are never touched. To tidy up, ask the agent to lay
+the drawing out again. That moves every generated shape but keeps your edits.
+Screens and sequence diagrams are the exception to keeping positions: when the
+agent changes a screen, its elements are laid out again in order, so an inserted
+button pushes the rest down. Likewise, any change to a sequence diagram lays the
+whole diagram out again, so an inserted message pushes later messages down and a
+participant you dragged goes back to its column. Your text and style edits are
+still kept.
+In a user flow, arrows start at the button that leads on, and screens can be empty
+labelled frames until you design them.
+
+Groups such as flowchart subgraphs and composite states are drawn as frames inside
+the drawing, so you can drag a whole group. Moving a shape into or out of a group
+frame doesn't change which group the agent thinks it belongs to. The agent can
+also add sticky notes, optionally linked to a shape by a dashed line.
+
+The agent can also send Mermaid flowchart, state, class, ER, or sequence diagram text, for example
+"turn the Mermaid in your last answer into a diagram". The result is the same
+editable drawing, and asking again with changed Mermaid updates it in place.
+Mermaid styling is not carried over, and other Mermaid diagram types are not
+supported yet.
+
+To clear a generated drawing, ask the agent to remove it. Its shapes are
+deleted, but arrows you drew to them stay, unattached, and shapes you drew inside
+its frames stay where they are. To take a drawing over by hand, ask the agent to
+detach it instead. Every shape stays exactly where it is, and the agent no
+longer updates it. If you later ask for that drawing again, the agent starts a
+new one.
+
 ## Send while the agent is working
 
 On web and desktop, choose **Settings → General → Follow-up behavior** to queue

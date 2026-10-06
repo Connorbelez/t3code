@@ -96,6 +96,7 @@ describe("diagram chat context", () => {
         structure: {
           revision: 3,
           pages: [{ id: "page:one", name: "Page", shapeCount: 50 }],
+          compositions: [],
           shapes: Array.from({ length: 50 }, (_, index) => ({
             id: `shape:${index}`,
             pageId: "page:one",

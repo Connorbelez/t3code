@@ -1,4 +1,10 @@
 // @vitest-environment jsdom
+import type {
+  DiagramComposeRequest,
+  DiagramHostComposeResult,
+  DiagramSpecEdge,
+} from "@t3tools/contracts";
+import { compose, type ComposePorts } from "@t3tools/diagram-compose/compose";
 import {
   Editor,
   createTLStore,
@@ -8,10 +14,18 @@ import {
   defaultShapeTools,
   createShapeId,
   createBindingId,
+  defaultAddFontsFromNode,
+  PageRecordType,
+  tipTapDefaultExtensions,
+  toRichText,
   type TLAnyShapeUtilConstructor,
+  type TLRecord,
+  type TLShape,
+  type TLShapeId,
 } from "tldraw";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
-import { validateDiagramBatch } from "./diagramBatchPreflight";
+import { afterEach, assert, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { rehearseDiagramChanges, validateDiagramBatch } from "./diagramBatchPreflight";
+import { parseDocumentRecord } from "./diagramSocket";
 
 vi.hoisted(() =>
   Object.defineProperty(window, "matchMedia", {
@@ -55,6 +69,11 @@ function mount() {
     initialState: "select",
     autoFocus: false,
     getContainer: () => container,
+    // What <Tldraw> supplies to the mounted editor.
+    textOptions: {
+      addFontsFromNode: defaultAddFontsFromNode,
+      tipTapConfig: { extensions: tipTapDefaultExtensions },
+    },
   });
   cleanups.push(() => {
     editor.dispose();
@@ -80,6 +99,20 @@ describe("native batch preflight", () => {
     expect(editor.store.serialize("document")).toEqual(document);
     editor.undo();
     expect(editor.getShape(id)).toBeUndefined();
+  });
+  it("accepts an edit in a document that contains text", () => {
+    const editor = mount();
+    const id = createShapeId("label");
+    editor.createShape({ id, type: "text", x: 10, props: { richText: toRichText("Hello") } });
+    const before = editor.getShape(id)!;
+    expect(() =>
+      validateDiagramBatch(editor, {
+        requestId: "text",
+        expected: [{ id, record: before }],
+        puts: [{ ...before, x: 80 }],
+        deletes: [],
+      }),
+    ).not.toThrow();
   });
   it("rejects a binding whose native SDK effects additionally reorder the arrow before touching the mounted document", () => {
     const editor = mount();
@@ -153,5 +186,1116 @@ describe("native batch preflight", () => {
     expect(editor.store.serialize("document")).toEqual(before);
     editor.updateShape({ id: targetId, type: "geo", props: { geo: "triangle" } });
     expect(editor.getBinding(bindingId)).not.toEqual(bindingBefore);
+  });
+});
+
+const checkout = {
+  spec: {
+    kit: "flow",
+    key: "checkout",
+    title: "Checkout",
+    nodes: [
+      { key: "start", kind: "start" },
+      { key: "cart", kind: "process", label: "Review cart" },
+      { key: "pay", kind: "process", label: "Take payment" },
+      { key: "valid", kind: "decision", label: "Payment valid?" },
+      { key: "receipt", kind: "io", label: "Email receipt" },
+      { key: "end", kind: "end" },
+    ],
+    edges: [
+      ["start", "cart"],
+      ["cart", "pay"],
+      ["pay", "valid"],
+      ["valid", "receipt", "yes"],
+      ["valid", "cart", "no"],
+      ["receipt", "end"],
+    ],
+  },
+} satisfies DiagramComposeRequest;
+const measureText: ComposePorts["measureText"] = (text, font) => {
+  const width = text.length * font.fontSize * 0.6;
+  const lines = font.maxWidth === null ? 1 : Math.max(1, Math.ceil(width / font.maxWidth));
+  return { w: Math.min(width, font.maxWidth ?? width), h: lines * font.fontSize * 1.35 };
+};
+// Nested boundaries, arrows between frames and into them, and notes attached across frames.
+const orders = {
+  spec: {
+    kit: "state",
+    key: "orders",
+    title: "Orders",
+    nodes: [
+      { key: "start", kind: "initial" },
+      { key: "draft" },
+      { key: "open", kind: "composite", label: "Open" },
+      { key: "openStart", kind: "initial", parent: "open" },
+      { key: "paying", parent: "open" },
+      { key: "check", kind: "choice", parent: "open" },
+      { key: "shipping", kind: "composite", label: "Shipping", parent: "open" },
+      { key: "packed", parent: "shipping" },
+      { key: "sent", parent: "shipping" },
+      { key: "done", kind: "final" },
+      { key: "why", kind: "note", label: "Retries card twice", body: { on: "paying" } },
+      {
+        key: "late",
+        kind: "note",
+        label: "Courier picks up at 5pm",
+        parent: "shipping",
+        body: { on: "draft" },
+      },
+    ],
+    edges: [
+      ["start", "draft"],
+      ["draft", "paying", "submit [valid] / reserve"],
+      ["openStart", "paying"],
+      ["paying", "check"],
+      ["check", "packed", "[paid]"],
+      ["check", "draft", "[declined]"],
+      ["packed", "sent", "pickup"],
+      ["sent", "done"],
+      ["open", "draft", "cancel"],
+      ["shipping", "done", "lost"],
+    ],
+  },
+} satisfies DiagramComposeRequest;
+const grouped = {
+  spec: {
+    kit: "flow",
+    key: "grouped",
+    nodes: [
+      { key: "client", kind: "group", label: "Client" },
+      { key: "server", kind: "group", label: "Server" },
+      { key: "click", kind: "start", parent: "client" },
+      { key: "post", parent: "client" },
+      { key: "handle", parent: "server" },
+      { key: "store", kind: "io", parent: "server" },
+      { key: "tip", kind: "note", label: "Idempotent" },
+    ],
+    edges: [
+      ["click", "post"],
+      ["post", "handle", "POST /orders"],
+      ["handle", "store"],
+      ["store", "client", "201"],
+    ],
+  },
+} satisfies DiagramComposeRequest;
+// Classes are groups inside a package frame; arrows bind to header boxes across groups, into the
+// package, and back onto the same class.
+const library = {
+  spec: {
+    kit: "uml-class",
+    key: "library",
+    title: "Library",
+    nodes: [
+      { key: "catalog", kind: "package", label: "Catalog" },
+      {
+        key: "Item",
+        kind: "abstract",
+        parent: "catalog",
+        body: {
+          attributes: [{ visibility: "protected", name: "id", type: "string" }],
+          methods: [{ visibility: "public", name: "title", returns: "string" }],
+        },
+      },
+      {
+        key: "Book",
+        parent: "catalog",
+        body: { attributes: [{ visibility: "private", name: "isbn", type: "string" }] },
+      },
+      {
+        key: "Loanable",
+        kind: "interface",
+        body: { methods: [{ name: "lend", params: "to: Member", returns: "Loan" }] },
+      },
+      {
+        key: "Member",
+        body: {
+          attributes: [{ visibility: "public", name: "limit", type: "int", static: true }],
+        },
+      },
+      { key: "Status", kind: "enum", body: { values: ["OUT", "IN"] } },
+      { key: "why", kind: "note", label: "Members borrow up to 5 books", body: { on: "Member" } },
+    ],
+    edges: [
+      { from: "Book", to: "Item", kind: "inheritance" },
+      { from: "Item", to: "Loanable", kind: "realization" },
+      {
+        from: "Member",
+        to: "Book",
+        label: "borrows",
+        body: { from: "1", to: "0..5", directed: true },
+      },
+      { from: "Book", to: "catalog", kind: "composition" },
+      { from: "Member", to: "Member", label: "refers" },
+      { from: "Item", to: "Status", kind: "dependency" },
+    ],
+  },
+} satisfies DiagramComposeRequest;
+const shop = {
+  spec: {
+    kit: "er",
+    key: "shop",
+    title: "Shop",
+    nodes: [
+      {
+        key: "users",
+        body: {
+          columns: [
+            { name: "id", type: "uuid", pk: true },
+            { name: "email", type: "text" },
+          ],
+        },
+      },
+      {
+        key: "orders",
+        body: {
+          columns: [
+            { name: "id", type: "uuid", pk: true },
+            { name: "user_id", type: "uuid", fk: true },
+            { name: "note", type: "text", nullable: true },
+          ],
+        },
+      },
+      { key: "items", body: { columns: [{ name: "order_id", type: "uuid", pk: true, fk: true }] } },
+      { key: "tip", kind: "note", label: "Soft-deleted rows stay", body: { on: "orders" } },
+    ],
+    edges: [
+      { from: "users", to: "orders", label: "places", body: { from: "one", to: "many" } },
+      { from: "orders", to: "items", body: { from: "one", to: "oneOrMany" } },
+    ],
+  },
+} satisfies DiagramComposeRequest;
+// Components in a container boundary inside a system boundary, with multi-line labels and external elements.
+const containers = {
+  spec: {
+    kit: "c4",
+    key: "banking",
+    title: "Banking components",
+    nodes: [
+      { key: "customer", kind: "person", label: "Customer" },
+      { key: "bank", kind: "boundary", label: "Internet Banking" },
+      { key: "api", kind: "boundary", label: "API", parent: "bank" },
+      {
+        key: "signin",
+        kind: "component",
+        label: "Sign In",
+        parent: "api",
+        body: { technology: "Express", description: "Checks credentials" },
+      },
+      { key: "db", label: "Database", parent: "bank", body: { technology: "PostgreSQL" } },
+      { key: "mail", kind: "system", label: "Email", body: { external: true } },
+    ],
+    edges: [
+      ["customer", "signin", "Signs in [HTTPS]"],
+      ["signin", "db", "Reads [SQL]"],
+      ["signin", "mail", "Sends [SMTP]"],
+    ],
+  },
+} satisfies DiagramComposeRequest;
+const system = {
+  spec: {
+    kit: "architecture",
+    key: "system",
+    title: "System",
+    nodes: [
+      { key: "web", kind: "client", label: "Browser" },
+      { key: "cloud", kind: "zone", label: "Cloud" },
+      { key: "private", kind: "zone", label: "Private subnet", parent: "cloud" },
+      { key: "gw", kind: "gateway", parent: "cloud" },
+      { key: "lb", kind: "loadBalancer", parent: "private" },
+      { key: "api", parent: "private", body: { technology: "Go" } },
+      { key: "db", kind: "datastore", parent: "private" },
+      { key: "cache", kind: "cache", parent: "private" },
+      { key: "jobs", kind: "queue", parent: "cloud" },
+      { key: "worker", kind: "function", parent: "cloud" },
+      { key: "blobs", kind: "storage", parent: "cloud" },
+      { key: "pay", kind: "external", label: "Payments" },
+    ],
+    edges: [
+      ["web", "gw", "HTTPS"],
+      ["gw", "lb"],
+      ["lb", "api"],
+      ["api", "db", "SQL"],
+      ["api", "cache"],
+      ["api", "jobs", "AMQP"],
+      ["jobs", "worker"],
+      ["worker", "blobs"],
+      ["api", "pay", "HTTPS"],
+    ],
+  },
+} satisfies DiagramComposeRequest;
+// Every element, a phone with chrome, a web page with a browser bar, and a modal.
+const feed = [
+  { key: "top", kind: "navBar", label: "Feed" },
+  {
+    kind: "stack",
+    size: "fill",
+    padding: 16,
+    children: [
+      { key: "title", kind: "heading", label: "Today" },
+      { key: "search", kind: "input", label: "Search" },
+      {
+        key: "post",
+        kind: "card",
+        children: [
+          {
+            kind: "row",
+            children: [
+              { key: "me", kind: "avatar" },
+              { key: "name", kind: "text", label: "Ada wrote", size: "fill" },
+              { key: "follow", kind: "toggle" },
+            ],
+          },
+          { key: "photo", kind: "image", label: "Photo" },
+          { key: "rule", kind: "divider" },
+          { key: "like", kind: "button", label: "Like" },
+        ],
+      },
+      { key: "older", kind: "listItem", label: "Yesterday" },
+    ],
+  },
+  { key: "tabs", kind: "tabBar", label: "Home · Search · Me" },
+];
+const wireframes = (children: readonly unknown[]) =>
+  ({
+    spec: {
+      kit: "wireframe",
+      key: "screens",
+      title: "Screens",
+      nodes: [
+        {
+          key: "feed",
+          label: "Feed",
+          body: {
+            chrome: true,
+            padding: 0,
+            gap: 0,
+            children,
+          },
+        },
+        {
+          key: "site",
+          body: { device: "web", chrome: true, children: [{ key: "hi", kind: "text" }] },
+        },
+        {
+          key: "delete",
+          label: "Delete post?",
+          body: {
+            modal: true,
+            children: [
+              { key: "warning", kind: "text", label: "This cannot be undone." },
+              { key: "confirm", kind: "button", label: "Delete" },
+            ],
+          },
+        },
+        { key: "why", kind: "note", label: "Swipe to refresh", body: { on: "feed" } },
+      ],
+    },
+  }) satisfies DiagramComposeRequest;
+const screens = wireframes(feed);
+// A self call, an activation from a call to its reply, an alt block with an else branch nested
+// in a loop, an async message and a note under a lifeline.
+const loginMessages = [
+  ["user", "web", "Sign in"],
+  { key: "check", from: "web", to: "api", label: "POST /login", body: { activate: true } },
+  ["api", "api", "Hash password"],
+  { key: "ok", from: "api", to: "web", kind: "reply", label: "200 token" },
+  {
+    key: "denied",
+    from: "api",
+    to: "web",
+    kind: "reply",
+    label: "401",
+    body: { deactivate: true },
+  },
+  { key: "audit", from: "web", to: "api", kind: "async", label: "Log attempt" },
+] satisfies DiagramSpecEdge[];
+const sequenceOf = (edges: readonly DiagramSpecEdge[]) =>
+  ({
+    spec: {
+      kit: "sequence",
+      key: "login",
+      title: "Login",
+      nodes: [
+        { key: "user", kind: "actor", label: "User" },
+        { key: "web", label: "Web app" },
+        { key: "api", label: "API" },
+        {
+          key: "retry",
+          kind: "loop",
+          label: "up to 3 times",
+          body: { from: "check", to: "denied" },
+        },
+        {
+          key: "valid",
+          kind: "alt",
+          label: "password valid",
+          body: { from: "ok", to: "denied", else: [{ from: "denied", label: "wrong password" }] },
+        },
+        { key: "why", kind: "note", label: "Rate limited", body: { on: "api" } },
+      ],
+      edges,
+    },
+  }) satisfies DiagramComposeRequest;
+const login = sequenceOf(loginMessages);
+// Three screens, one empty, a decision, and an edge from a button inside a screen frame.
+const onboarding = (welcome: readonly unknown[]) =>
+  ({
+    spec: {
+      kit: "user-flow",
+      key: "onboarding",
+      title: "Onboarding",
+      nodes: [
+        { key: "welcome", label: "Welcome", body: { chrome: true, children: welcome } },
+        { key: "hasAccount", kind: "decision", label: "Has account?" },
+        {
+          key: "login",
+          label: "Log in",
+          body: { children: [{ key: "submit", kind: "button", label: "Log in" }] },
+        },
+        { key: "signup", label: "Sign up" },
+      ],
+      edges: [
+        ["welcome.start", "hasAccount", "tap Get started"],
+        ["hasAccount", "login", "yes"],
+        ["hasAccount", "signup", "no"],
+        ["login.submit", "welcome", "tap Log in"],
+      ],
+    },
+  }) satisfies DiagramComposeRequest;
+const welcome = [
+  { key: "title", kind: "heading", label: "Plan trips together" },
+  { key: "start", kind: "button", label: "Get started" },
+];
+const userFlow = onboarding(welcome);
+function composeInto(editor: Editor, request: DiagramComposeRequest = checkout) {
+  const records = editor.store.serialize("document");
+  return compose(request, Object.values(records), {
+    measureText,
+    rehearse: (puts, deletes) =>
+      new Map(Object.entries(rehearseDiagramChanges(editor, records, puts, deletes))),
+    parseMermaid: () => Promise.reject(new Error("not expected")),
+  });
+}
+function applyChanges(editor: Editor, changes: NonNullable<DiagramHostComposeResult["changes"]>) {
+  editor.run(
+    () => {
+      editor.store.put(changes.puts.map(parseDocumentRecord));
+      editor.store.remove(changes.deletes as TLRecord["id"][]);
+    },
+    { ignoreShapeLock: true },
+  );
+}
+function addLooseShapes(editor: Editor) {
+  const [left, right, arrow] = [
+    createShapeId("left"),
+    createShapeId("right"),
+    createShapeId("arrow"),
+  ];
+  editor.createShapes([
+    { id: left, type: "geo", x: 0, y: 0 },
+    { id: right, type: "geo", x: 400, y: 0 },
+    { id: createShapeId("note"), type: "text", x: 0, y: 300 },
+    { id: arrow, type: "arrow" },
+  ]);
+  editor.createBindings(
+    (["start", "end"] as const).map((terminal) => ({
+      type: "arrow",
+      fromId: arrow,
+      toId: terminal === "start" ? left : right,
+      props: {
+        terminal,
+        normalizedAnchor: { x: 0.5, y: 0.5 },
+        isExact: false,
+        isPrecise: false,
+        snap: "none",
+      },
+    })),
+  );
+}
+describe("composed batches", () => {
+  it.each([
+    ["an empty diagram", (_editor: Editor) => {}],
+    ["a diagram with loose shapes", addLooseShapes],
+  ])("pass the preflight on %s and recompose to no change", async (_, seed) => {
+    const editor = mount();
+    seed(editor);
+    const loose = editor.store.serialize("document");
+    const { changes } = await composeInto(editor);
+    assert(changes, "a new composition must produce changes");
+    expect(() => validateDiagramBatch(editor, { requestId: "compose", ...changes })).not.toThrow();
+
+    editor.run(
+      () => {
+        editor.store.put(changes.puts.map(parseDocumentRecord));
+        editor.store.remove(changes.deletes as TLRecord["id"][]);
+      },
+      { ignoreShapeLock: true },
+    );
+    const after = editor.store.serialize("document");
+    for (const [id, record] of Object.entries(loose))
+      expect(after[id as TLRecord["id"]]).toEqual(record);
+    expect(
+      editor
+        .getCurrentPageShapes()
+        .flatMap((shape) => (shape.type === "frame" ? [shape.props.name] : [])),
+    ).toEqual(["Checkout"]);
+    expect((await composeInto(editor)).changes).toBeNull();
+  });
+
+  it.each([
+    ["a state machine with nested composites and notes", orders, "Orders"],
+    ["a flowchart with groups", grouped, "grouped"],
+    ["a class diagram with a package, notes and a self-association", library, "Library"],
+    ["an ER diagram with notes", shop, "Shop"],
+    ["a C4 component view with nested boundaries", containers, "Banking components"],
+    ["an architecture diagram with nested zones", system, "System"],
+    ["wireframes with chrome and a modal", screens, "Screens"],
+    ["a sequence with a self call, an activation and an alt block", login, "Login"],
+    ["a user flow with arrows from buttons inside screens", userFlow, "Onboarding"],
+  ])("pass the preflight for %s and recompose to no change", async (_, request, title) => {
+    const editor = mount();
+    addLooseShapes(editor);
+    const { changes } = await composeInto(editor, request);
+    assert(changes, "a new composition must produce changes");
+    expect(() => validateDiagramBatch(editor, { requestId: "nested", ...changes })).not.toThrow();
+    applyChanges(editor, changes);
+    expect(
+      editor
+        .getCurrentPageShapes()
+        .flatMap((shape) =>
+          shape.type === "frame" && shape.parentId === editor.getCurrentPageId()
+            ? [shape.props.name]
+            : [],
+        ),
+    ).toEqual([title]);
+    expect((await composeInto(editor, request)).changes).toBeNull();
+  });
+
+  it("pushes a screen's elements down for an inserted one and passes the preflight", async () => {
+    const editor = mount();
+    const first = await composeInto(editor, screens);
+    assert(first.changes, "a new composition must produce changes");
+    applyChanges(editor, first.changes);
+    const inserted = wireframes([{ key: "banner", kind: "image", label: "Banner" }, ...feed]);
+    const { changes } = await composeInto(editor, inserted);
+    assert(changes, "an insertion must produce changes");
+    expect(() => validateDiagramBatch(editor, { requestId: "insert", ...changes })).not.toThrow();
+    applyChanges(editor, changes);
+    expect((await composeInto(editor, inserted)).changes).toBeNull();
+  });
+
+  it("keeps messages on their lifelines when a participant is dragged, and pushes them down for an inserted one", async () => {
+    const editor = mount();
+    const first = await composeInto(editor, login);
+    assert(first.changes, "a new composition must produce changes");
+    applyChanges(editor, first.changes);
+    const api = member(editor, "api");
+    const call = member(editor, "check");
+    const before = editor.getShapePageBounds(call.id)?.toJson();
+    assert(before, "the call is drawn");
+    // Dragging the head drags its group, lifeline and bar, and the bound call stretches along.
+    editor.updateShape({ id: api.parentId as TLShapeId, type: "group", x: 600 });
+    const dragged = editor.getShapePageBounds(call.id)?.toJson();
+    expect(dragged?.w).toBeGreaterThan(before.w);
+    expect(dragged?.y).toBe(before.y);
+    editor.updateShape({
+      id: member(editor, "ok").id,
+      type: "arrow",
+      props: { richText: toRichText("200 + token") },
+    });
+
+    const inserted = sequenceOf(loginMessages.toSpliced(1, 0, ["web", "web", "Validate form"]));
+    const { changes, counts } = await composeInto(editor, inserted);
+    expect(counts).toMatchObject({ created: 1, updated: 0, removed: 0 });
+    assert(changes, "an insertion must produce changes");
+    expect(() => validateDiagramBatch(editor, { requestId: "insert", ...changes })).not.toThrow();
+    applyChanges(editor, changes);
+    // Order is meaning: the participant is back in its column and later messages moved down.
+    expect(editor.getShape(api.parentId as TLShapeId)?.x).toBeLessThan(600);
+    expect(editor.getShapePageBounds(member(editor, "check").id)?.y).toBeGreaterThan(before.y);
+    expect(member(editor, "ok").props).toMatchObject({ richText: toRichText("200 + token") });
+    expect((await composeInto(editor, inserted)).changes).toBeNull();
+  });
+
+  it("keeps a user flow arrow bound to its button when the button's screen relays out", async () => {
+    const editor = mount();
+    const first = await composeInto(editor, userFlow);
+    assert(first.changes, "a new composition must produce changes");
+    applyChanges(editor, first.changes);
+    const shapeOf = (key: string) => member(editor, key);
+    const arrow = shapeOf("welcome.start→hasAccount:navigate");
+    const start = () =>
+      editor
+        .getBindingsFromShape(arrow.id, "arrow")
+        .find((binding) => binding.props.terminal === "start")?.toId;
+    expect(start()).toBe(shapeOf("welcome.start").id);
+    expect(arrow.parentId).toBe(shapeOf("welcome").parentId);
+    const button = shapeOf("welcome.start");
+
+    const inserted = onboarding([{ key: "hero", kind: "image", label: "Hero" }, ...welcome]);
+    const { changes } = await composeInto(editor, inserted);
+    assert(changes, "an insertion must produce changes");
+    expect(() => validateDiagramBatch(editor, { requestId: "insert", ...changes })).not.toThrow();
+    applyChanges(editor, changes);
+    expect(shapeOf("welcome.start").y).toBeGreaterThan(button.y);
+    expect(start()).toBe(button.id);
+    expect((await composeInto(editor, inserted)).changes).toBeNull();
+  });
+
+  it("moves a node between boundaries and absorbs tldraw's reparenting of a human arrow", async () => {
+    const editor = mount();
+    const { changes } = await composeInto(editor, grouped);
+    assert(changes, "a new composition must produce changes");
+    applyChanges(editor, changes);
+    const shapeOf = (key: string) =>
+      editor
+        .getCurrentPageShapes()
+        .find((shape) => (shape.meta["t3Composition"] as { m?: string } | undefined)?.m === key);
+    const handle = shapeOf("handle");
+    const click = shapeOf("click");
+    assert(handle && click, "members must exist");
+    const arrow = createShapeId("human-arrow");
+    editor.createShape({ id: arrow, type: "arrow" });
+    editor.createBindings(
+      (["start", "end"] as const).map((terminal) => ({
+        type: "arrow",
+        fromId: arrow,
+        toId: terminal === "start" ? click.id : handle.id,
+        props: {
+          terminal,
+          normalizedAnchor: { x: 0.5, y: 0.5 },
+          isExact: false,
+          isPrecise: false,
+          snap: "none",
+        },
+      })),
+    );
+    const moved = await composeInto(editor, {
+      spec: {
+        ...grouped.spec,
+        nodes: grouped.spec.nodes.map((node) =>
+          node.key === "handle" ? { ...node, parent: "client" } : node,
+        ),
+      },
+    });
+    const movedChanges = moved.changes;
+    assert(movedChanges, "moving a node must produce changes");
+    expect(() =>
+      validateDiagramBatch(editor, { requestId: "move", ...movedChanges }),
+    ).not.toThrow();
+    applyChanges(editor, movedChanges);
+    expect(editor.getShape(handle.id)?.parentId).toBe(editor.getShape(click.id)?.parentId);
+    expect(editor.getShape(arrow)?.parentId).toBe(editor.getShape(click.id)?.parentId);
+  });
+});
+
+type Changes = NonNullable<Awaited<ReturnType<typeof composeInto>>["changes"]>;
+function applyComposed(editor: Editor, changes: Changes) {
+  expect(() => validateDiagramBatch(editor, { requestId: "compose", ...changes })).not.toThrow();
+  editor.run(
+    () => {
+      editor.store.put(changes.puts.map(parseDocumentRecord));
+      editor.store.remove(changes.deletes as TLRecord["id"][]);
+    },
+    { ignoreShapeLock: true },
+  );
+}
+function member(editor: Editor, key: string) {
+  const shape = editor.getCurrentPageShapes().find((candidate) => {
+    const meta = candidate.meta["t3Composition"];
+    return (
+      typeof meta === "object" &&
+      meta !== null &&
+      !Array.isArray(meta) &&
+      meta["m"] === key &&
+      meta["p"] === "main"
+    );
+  });
+  assert(shape, `member ${key} is on the canvas`);
+  return shape;
+}
+describe("regenerated batches", () => {
+  it("pass the preflight after human edits, for new members, rewrites and relayout", async () => {
+    const editor = mount();
+    const first = await composeInto(editor);
+    assert(first.changes, "a new composition must produce changes");
+    applyComposed(editor, first.changes);
+
+    const valid = member(editor, "valid");
+    editor.updateShape({ id: valid.id, type: "geo", x: valid.x + 400 });
+    editor.updateShape({ id: member(editor, "cart").id, type: "geo", props: { color: "red" } });
+    editor.deleteShapes([member(editor, "receipt").id]);
+
+    const next: DiagramComposeRequest = {
+      spec: {
+        ...checkout.spec,
+        nodes: [
+          ...checkout.spec.nodes.map((node) =>
+            node.key === "pay" ? { ...node, label: "Take card payment" } : node,
+          ),
+          { key: "refund", label: "Refund" },
+        ],
+        edges: [...(checkout.spec.edges ?? []), ["valid", "refund", "no"]],
+      },
+    };
+    const regenerated = await composeInto(editor, next);
+    expect(regenerated.counts).toEqual({ created: 2, updated: 1, kept: 11, removed: 0 });
+    assert(regenerated.changes, "the changed spec must produce changes");
+    applyComposed(editor, regenerated.changes);
+    expect(member(editor, "valid").x).toBe(valid.x + 400);
+    expect(member(editor, "cart").props).toMatchObject({ color: "red" });
+
+    const relayout = { ...next, relayout: true };
+    const relaid = await composeInto(editor, relayout);
+    assert(relaid.changes, "relayout must move the dragged member back");
+    applyComposed(editor, relaid.changes);
+    expect(member(editor, "cart").props).toMatchObject({ color: "red" });
+    expect((await composeInto(editor, relayout)).changes).toBeNull();
+    expect((await composeInto(editor, next)).changes).toBeNull();
+  });
+});
+function compositionShapes(editor: Editor) {
+  return editor.getCurrentPageShapes().filter((shape) => shape.meta["t3Composition"] !== undefined);
+}
+/** A note drawn inside the frame and an arrow from a loose shape to the `pay` member. */
+function drawAround(editor: Editor) {
+  const frame = editor.getCurrentPageShapes().find((shape) => shape.type === "frame");
+  assert(frame, "the composition has a frame");
+  const note = createShapeId("inside");
+  const loose = createShapeId("loose");
+  const arrow = createShapeId("human-arrow");
+  editor.createShapes([
+    {
+      id: note,
+      type: "text",
+      parentId: frame.id,
+      x: 20,
+      y: 30,
+      props: { richText: toRichText("mine") },
+    },
+    { id: loose, type: "geo", x: -400, y: 0 },
+    { id: arrow, type: "arrow" },
+  ]);
+  editor.createBindings(
+    (["start", "end"] as const).map((terminal) => ({
+      type: "arrow",
+      fromId: arrow,
+      toId: terminal === "start" ? loose : member(editor, "pay").id,
+      props: {
+        terminal,
+        normalizedAnchor: { x: 0.5, y: 0.5 },
+        isExact: false,
+        isPrecise: false,
+        snap: "none",
+      },
+    })),
+  );
+  return { note, arrow, notePage: editor.getShapePageBounds(note)?.toJson() };
+}
+
+describe("patch, remove and detach batches", () => {
+  it("patch one member and drop another, then remove keeping the user's shapes", async () => {
+    const editor = mount();
+    const first = await composeInto(editor);
+    assert(first.changes, "a new composition must produce changes");
+    applyComposed(editor, first.changes);
+    const { note, arrow, notePage } = drawAround(editor);
+
+    const patch: DiagramComposeRequest = {
+      mode: "patch",
+      spec: { kit: "flow", key: "checkout", nodes: [{ key: "pay", label: "Charge card" }] },
+      removeKeys: ["receipt"],
+    };
+    const patched = await composeInto(editor, patch);
+    expect(patched.counts).toEqual({ created: 0, updated: 1, kept: 8, removed: 3 });
+    assert(patched.changes, "the patch must produce changes");
+    applyComposed(editor, patched.changes);
+    expect(editor.getShape(member(editor, "pay").id)?.props).toMatchObject({
+      richText: toRichText("Charge card"),
+    });
+    expect((await composeInto(editor, patch)).changes).toBeNull();
+
+    const remove: DiagramComposeRequest = { operation: "remove", key: "checkout" };
+    const removed = await composeInto(editor, remove);
+    assert(removed.changes, "removing must produce changes");
+    applyComposed(editor, removed.changes);
+    expect(compositionShapes(editor)).toEqual([]);
+    expect(editor.getShape(note)?.parentId).toBe(editor.getCurrentPageId());
+    expect(editor.getShapePageBounds(note)?.toJson()).toEqual(notePage);
+    expect(editor.getShape(arrow)).toBeDefined();
+    expect(editor.getBindingsFromShape(arrow, "arrow").map((binding) => binding.toId)).toEqual([
+      createShapeId("loose"),
+    ]);
+    expect((await composeInto(editor, remove)).changes).toBeNull();
+  });
+
+  it("detach leaves the shapes as they are, and composing again starts a new composition", async () => {
+    const editor = mount();
+    const first = await composeInto(editor);
+    assert(first.changes, "a new composition must produce changes");
+    applyComposed(editor, first.changes);
+    drawAround(editor);
+    const strip = (shapes: TLShape[]) => shapes.map((shape) => ({ ...shape, meta: {} }));
+    const before = strip(editor.getCurrentPageShapes());
+
+    const detach: DiagramComposeRequest = { operation: "detach", key: "checkout" };
+    const detached = await composeInto(editor, detach);
+    assert(detached.changes, "detaching must produce changes");
+    applyComposed(editor, detached.changes);
+    expect(compositionShapes(editor)).toEqual([]);
+    expect(strip(editor.getCurrentPageShapes())).toEqual(before);
+    expect((await composeInto(editor, detach)).changes).toBeNull();
+
+    const again = await composeInto(editor);
+    expect(again.counts.created).toBe(12);
+    assert(again.changes, "composing a detached key again must produce changes");
+    applyComposed(editor, again.changes);
+    expect(compositionShapes(editor)).toHaveLength(13);
+    expect(strip(before.flatMap((shape) => editor.getShape(shape.id) ?? []))).toEqual(before);
+  });
+});
+
+describe("compartment nodes", () => {
+  it("patch one class and its multiplicities, drop another, then remove the class diagram", async () => {
+    const editor = mount();
+    const first = await composeInto(editor, library);
+    assert(first.changes, "a new composition must produce changes");
+    applyComposed(editor, first.changes);
+
+    const patch: DiagramComposeRequest = {
+      mode: "patch",
+      spec: {
+        kit: "uml-class",
+        key: "library",
+        nodes: [
+          {
+            key: "Book",
+            parent: "catalog",
+            body: {
+              attributes: [
+                { visibility: "private", name: "isbn", type: "string" },
+                { visibility: "private", name: "pages", type: "int" },
+              ],
+            },
+          },
+        ],
+        edges: [
+          {
+            from: "Member",
+            to: "Book",
+            label: "borrows",
+            body: { from: "1", to: "0..3", directed: true },
+          },
+        ],
+      },
+      removeKeys: ["Status"],
+    };
+    const patched = await composeInto(editor, patch);
+    expect(patched.counts).toEqual({ created: 0, updated: 2, kept: 10, removed: 2 });
+    assert(patched.changes, "the patch must produce changes");
+    applyComposed(editor, patched.changes);
+    const book = editor.getCurrentPageShapes().find((shape) => {
+      const meta = shape.meta["t3Composition"] as { m?: string; p?: string } | undefined;
+      return meta?.m === "Book" && meta.p === "c1";
+    });
+    expect(book?.props).toMatchObject({
+      richText: toRichText("- isbn: string\n- pages: int"),
+    });
+    expect((await composeInto(editor, patch)).changes).toBeNull();
+
+    const remove: DiagramComposeRequest = { operation: "remove", key: "library" };
+    const removed = await composeInto(editor, remove);
+    assert(removed.changes, "removing must produce changes");
+    applyComposed(editor, removed.changes);
+    expect(compositionShapes(editor)).toEqual([]);
+    expect(editor.getCurrentPageShapes()).toEqual([]);
+  });
+
+  it("detach leaves each class grouped as ordinary shapes", async () => {
+    const editor = mount();
+    const first = await composeInto(editor, shop);
+    assert(first.changes, "a new composition must produce changes");
+    applyComposed(editor, first.changes);
+    const detached = await composeInto(editor, { operation: "detach", key: "shop" });
+    assert(detached.changes, "detaching must produce changes");
+    applyComposed(editor, detached.changes);
+    expect(compositionShapes(editor)).toEqual([]);
+    expect(editor.getCurrentPageShapes().filter((shape) => shape.type === "group")).toHaveLength(3);
+  });
+});
+
+describe("removing boundaries", () => {
+  function drawInside(editor: Editor, parentKey: string, name: string) {
+    const id = createShapeId(name);
+    editor.createShape({
+      id,
+      type: "text",
+      parentId: member(editor, parentKey).id,
+      x: 8,
+      y: 12,
+      props: { richText: toRichText(name) },
+    });
+    return { id, page: editor.getShapePageBounds(id)?.toJson() };
+  }
+  function expectKept(editor: Editor, shape: { id: TLShapeId; page: unknown }, parentId: string) {
+    expect(editor.getShape(shape.id)?.parentId).toBe(parentId);
+    expect(editor.getShapePageBounds(shape.id)?.toJson()).toEqual(shape.page);
+  }
+
+  it("keeps shapes a user drew inside a boundary the spec drops, a patch removes, or remove deletes", async () => {
+    const editor = mount();
+    const first = await composeInto(editor, grouped);
+    assert(first.changes, "a new composition must produce changes");
+    applyComposed(editor, first.changes);
+    const frame = editor
+      .getCurrentPageShapes()
+      .find(
+        (shape) =>
+          shape.type === "frame" &&
+          shape.meta["t3Composition"] !== undefined &&
+          shape.parentId === editor.getCurrentPageId(),
+      );
+    assert(frame, "the composition has a frame");
+    const inServer = drawInside(editor, "server", "in-server");
+    const inClient = drawInside(editor, "client", "in-client");
+
+    const withoutServer: DiagramComposeRequest = {
+      spec: {
+        ...grouped.spec,
+        nodes: [
+          { key: "client", kind: "group", label: "Client" },
+          { key: "click", kind: "start", parent: "client" },
+          { key: "post", parent: "client" },
+          { key: "handle" },
+          { key: "store", kind: "io" },
+          { key: "tip", kind: "note", label: "Idempotent" },
+        ],
+      },
+    };
+    const replaced = await composeInto(editor, withoutServer);
+    assert(replaced.changes, "dropping a boundary must produce changes");
+    applyComposed(editor, replaced.changes);
+    expectKept(editor, inServer, frame.id);
+
+    const removeClient = {
+      mode: "patch",
+      spec: { kit: "flow", key: "grouped", nodes: [] },
+      removeKeys: ["client"],
+    } satisfies DiagramComposeRequest;
+    await expect(composeInto(editor, removeClient)).rejects.toMatchObject({
+      code: "invalid-spec",
+      details: {
+        issues: [
+          {
+            path: "removeKeys",
+            message: '"client" still holds "click"; remove it too, or patch its parent',
+          },
+          {
+            path: "removeKeys",
+            message: '"client" still holds "post"; remove it too, or patch its parent',
+          },
+        ],
+      },
+    });
+    const patched = await composeInto(editor, {
+      ...removeClient,
+      spec: { ...removeClient.spec, nodes: [{ key: "click", kind: "start" }, { key: "post" }] },
+    });
+    assert(patched.changes, "removing a boundary must produce changes");
+    applyComposed(editor, patched.changes);
+    expectKept(editor, inClient, frame.id);
+
+    const removed = await composeInto(editor, { operation: "remove", key: "grouped" });
+    assert(removed.changes, "removing must produce changes");
+    applyComposed(editor, removed.changes);
+    expect(compositionShapes(editor)).toEqual([]);
+    expectKept(editor, inServer, editor.getCurrentPageId());
+    expectKept(editor, inClient, editor.getCurrentPageId());
+  });
+
+  it("carries a shape out of a nested boundary when the whole composition is removed", async () => {
+    const editor = mount();
+    const first = await composeInto(editor, orders);
+    assert(first.changes, "a new composition must produce changes");
+    applyComposed(editor, first.changes);
+    const deep = drawInside(editor, "shipping", "deep");
+    const removed = await composeInto(editor, { operation: "remove", key: "orders" });
+    assert(removed.changes, "removing must produce changes");
+    applyComposed(editor, removed.changes);
+    expect(compositionShapes(editor)).toEqual([]);
+    expectKept(editor, deep, editor.getCurrentPageId());
+  });
+});
+
+describe("dropping members while connecting others", () => {
+  /** Composes, passes the preflight, applies, and checks the same request is then a no-op. */
+  async function composeApplied(editor: Editor, request: DiagramComposeRequest) {
+    const result = await composeInto(editor, request);
+    assert(result.changes, "the request must produce changes");
+    applyComposed(editor, result.changes);
+    expect((await composeInto(editor, request)).changes).toBeNull();
+    return result.counts;
+  }
+  const keyed = (kit: "flow" | "state" | "sequence", keys: string[], edges: DiagramSpecEdge[]) =>
+    ({
+      spec: { kit, key: "k", nodes: keys.map((key) => ({ key })), edges },
+    }) satisfies DiagramComposeRequest;
+
+  it.each([
+    ["a flowchart", "flow"],
+    ["a state machine", "state"],
+    ["a sequence", "sequence"],
+  ] as const)("drops a node and adds an edge between the others in %s", async (_, kit) => {
+    const editor = mount();
+    await composeApplied(editor, keyed(kit, ["a", "b", "c"], [["a", "b"]]));
+    expect(
+      await composeApplied(
+        editor,
+        keyed(
+          kit,
+          ["a", "b"],
+          [
+            ["a", "b"],
+            ["b", "a"],
+          ],
+        ),
+      ),
+    ).toEqual({ created: 1, updated: 0, kept: 3, removed: 1 });
+  });
+
+  it("removes a node by patch and adds an edge in the same batch", async () => {
+    const editor = mount();
+    await composeApplied(editor, keyed("flow", ["a", "b", "c"], []));
+    expect(
+      await composeApplied(editor, {
+        mode: "patch",
+        spec: { kit: "flow", key: "k", nodes: [], edges: [["a", "b"]] },
+        removeKeys: ["c"],
+      }),
+    ).toEqual({ created: 1, updated: 0, kept: 2, removed: 1 });
+  });
+
+  it("carries a member a human dragged into a dropped boundary, and connects it there", async () => {
+    const editor = mount();
+    await composeApplied(editor, {
+      spec: {
+        kit: "flow",
+        key: "k",
+        nodes: [{ key: "g", kind: "group" }, { key: "x", parent: "g" }, { key: "a" }, { key: "b" }],
+      },
+    });
+    const b = member(editor, "b");
+    const page = editor.getShapePageBounds(b.id)?.toJson();
+    editor.reparentShapes([b.id], member(editor, "g").id);
+    expect(await composeApplied(editor, keyed("flow", ["a", "b"], [["a", "b"]]))).toEqual({
+      created: 1,
+      updated: 0,
+      kept: 2,
+      removed: 2,
+    });
+    const frame = member(editor, "a").parentId;
+    expect(editor.getShape(b.id)?.parentId).toBe(frame);
+    expect(editor.getShapePageBounds(b.id)?.toJson()).toEqual(page);
+    expect(member(editor, "a→b:flow").parentId).toBe(frame);
+  });
+});
+
+describe("reusing member IDs", () => {
+  async function composeApplied(editor: Editor, request: DiagramComposeRequest) {
+    const result = await composeInto(editor, request);
+    assert(result.changes, "the request must produce changes");
+    applyComposed(editor, result.changes);
+    expect((await composeInto(editor, request)).changes).toBeNull();
+  }
+  const flow = (nodes: string[], edges: DiagramSpecEdge[]) =>
+    ({
+      spec: { kit: "flow", key: "k", nodes: nodes.map((key) => ({ key })), edges },
+    }) satisfies DiagramComposeRequest;
+
+  it("turns an edge's key into a node's, and back", async () => {
+    const editor = mount();
+    await composeApplied(editor, flow(["a", "b"], [{ key: "x", from: "a", to: "b" }]));
+    await composeApplied(editor, flow(["a", "b", "x"], [["a", "x"]]));
+    expect(member(editor, "x").type).toBe("geo");
+    await composeApplied(editor, flow(["a", "b"], [{ key: "x", from: "a", to: "b" }]));
+    expect(member(editor, "x").type).toBe("arrow");
+  });
+
+  it("redraws a class over the compartments left when a human deleted its header", async () => {
+    const editor = mount();
+    await composeApplied(editor, library);
+    editor.deleteShapes([member(editor, "Member").id]);
+    await composeApplied(editor, {
+      spec: {
+        ...library.spec,
+        nodes: library.spec.nodes.map((node) =>
+          node.key === "Member" ? { ...node, label: "Patron" } : node,
+        ),
+      },
+    });
+    expect(member(editor, "Member").props).toMatchObject({ richText: toRichText("Patron") });
+  });
+});
+
+describe("over-constrained wireframes", () => {
+  const screen = (body: Record<string, unknown>) =>
+    ({
+      spec: { kit: "wireframe", key: "w", nodes: [{ key: "s", body }] },
+    }) satisfies DiagramComposeRequest;
+  const squeezed = (kind: string) => ({
+    children: [
+      {
+        kind: "row",
+        children: [
+          { key: "q", kind, label: "Search", size: "fill" },
+          { key: "go", kind: "button", label: "Go", size: 400 },
+        ],
+      },
+    ],
+  });
+
+  it.each([
+    ["padding wider than the phone", { padding: 200, children: [{ key: "go", kind: "button" }] }],
+    ["a fill input squeezed out of its row", squeezed("input")],
+    ["fill text squeezed out of its row", squeezed("text")],
+    ["an empty card without padding", { children: [{ key: "c", kind: "card", padding: 0 }] }],
+  ])("draws %s with every box at least a pixel", async (_, body) => {
+    const editor = mount();
+    const { changes } = await composeInto(editor, screen(body));
+    assert(changes, "a new composition must produce changes");
+    applyComposed(editor, changes);
+    for (const shape of compositionShapes(editor)) {
+      const bounds = editor.getShapeGeometry(shape).bounds;
+      if (shape.type !== "line") expect(Math.min(bounds.w, bounds.h)).toBeGreaterThanOrEqual(1);
+    }
+  });
+});
+
+describe("members on other pages", () => {
+  it("names an edge to a member a human moved to another page instead of failing the batch", async () => {
+    const editor = mount();
+    const nodes = [{ key: "a" }, { key: "b" }];
+    const first = await composeInto(editor, { spec: { kit: "flow", key: "k", nodes } });
+    assert(first.changes, "a new composition must produce changes");
+    applyComposed(editor, first.changes);
+    const other = PageRecordType.createId("other");
+    editor.createPage({ id: other, name: "Other" });
+    editor.moveShapesToPage([member(editor, "b").id], other);
+    editor.setCurrentPage(editor.getPages()[0]!.id);
+
+    await expect(
+      composeInto(editor, { spec: { kit: "flow", key: "k", nodes, edges: [["a", "b"]] } }),
+    ).rejects.toMatchObject({
+      code: "invalid-spec",
+      details: {
+        issues: [
+          {
+            path: "spec.edges",
+            message:
+              '"a→b:flow" connects "a" and "b", which are on different pages; move them onto one page or leave the edge out',
+          },
+        ],
+      },
+    });
   });
 });

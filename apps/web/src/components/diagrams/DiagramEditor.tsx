@@ -4,7 +4,7 @@ import { sha256 } from "@noble/hashes/sha2";
 import { useSync } from "@tldraw/sync";
 import {
   DiagramOperationError,
-  DiagramScope,
+  DiagramPageScope,
   type DiagramCapture,
   type DiagramMetadata,
   type EnvironmentId,
@@ -13,6 +13,7 @@ import {
   Box,
   EmbedShapeUtil,
   Tldraw,
+  getFontFamily,
   type Editor,
   type TLAssetStore,
   type TLRecord,
@@ -24,12 +25,13 @@ import { useTheme } from "~/hooks/useTheme";
 import { createDiagramApi, diagramSyncEvents } from "./diagramApi";
 import { DiagramSocket, parseDocumentRecord, type DiagramSaveState } from "./diagramSocket";
 import { diagramHostClientId, registerDiagramHost, type MountedDiagramHost } from "./diagramHosts";
-import { validateDiagramBatch } from "./diagramBatchPreflight";
+import { rehearseDiagramChanges, validateDiagramBatch } from "./diagramBatchPreflight";
+import { composeOnHost } from "./diagramHostCompose";
 import "tldraw/tldraw.css";
 
 const assetUrls = getAssetUrlsByImport();
 const shapeUtils = [EmbedShapeUtil.configure({ embedDefinitions: [] })];
-const decodeScope = Schema.decodeSync(DiagramScope);
+const decodeScope = Schema.decodeSync(DiagramPageScope);
 const canonical = (value: unknown): string => {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
@@ -161,9 +163,12 @@ function MountedDiagramEditor(props: DiagramEditorProps & { onAdoptionLost: () =
     let generation: string | null = null;
     let pendingRequestId: string | null = null;
     let held = false;
+    const releaseWaiters = new Set<{ resolve: () => void; reject: (error: Error) => void }>();
     const release = () => {
       if (!held || socket.cancelAdoption()) return;
       held = false;
+      for (const waiter of releaseWaiters) waiter.resolve();
+      releaseWaiters.clear();
       heldRef.current = false;
       generation = null;
       pendingRequestId = null;
@@ -181,7 +186,7 @@ function MountedDiagramEditor(props: DiagramEditorProps & { onAdoptionLost: () =
     const requireSafe = () => {
       if (!safe()) throw new DiagramOperationError({ code: "busy", diagramId: target.diagramId });
     };
-    const currentScope = (kind: DiagramScope["kind"]): DiagramScope => {
+    const currentScope = (kind: DiagramPageScope["kind"]): DiagramPageScope => {
       const pageId = editor.getCurrentPageId();
       if (kind === "diagram") return { kind, pageId };
       if (kind === "viewport")
@@ -229,6 +234,9 @@ function MountedDiagramEditor(props: DiagramEditorProps & { onAdoptionLost: () =
         }
       },
       capture: async (rawScope, format, expectedRevision) => {
+        // A compose with capture asks as soon as it commits, before this editor adopts the commit.
+        if (held)
+          await new Promise<void>((resolve, reject) => releaseWaiters.add({ resolve, reject }));
         requireSafe();
         await socket.waitUntilSaved();
         requireSafe();
@@ -372,6 +380,35 @@ function MountedDiagramEditor(props: DiagramEditorProps & { onAdoptionLost: () =
           base64,
         } satisfies DiagramCapture;
       },
+      compose: async (request) => {
+        requireSafe();
+        await socket.waitUntilSaved();
+        requireSafe();
+        const records = editor.store.serialize("document");
+        const theme = editor.getCurrentTheme();
+        return composeOnHost(request, Object.values(records), {
+          fontsReady: async () => {
+            const faces = [theme.fonts.sans?.faces, theme.fonts.draw?.faces].flatMap(
+              (items) => items ?? [],
+            );
+            await Promise.all(faces.map((face) => editor.fonts.ensureFontIsLoaded(face)));
+          },
+          measureText: (text, font) => {
+            const { w, h } = editor.textMeasure.measureText(text, {
+              fontStyle: "normal",
+              fontWeight: "normal",
+              fontFamily: getFontFamily(theme, font.family),
+              fontSize: font.fontSize,
+              lineHeight: theme.lineHeight,
+              maxWidth: font.maxWidth,
+              padding: "0px",
+            });
+            return { w, h };
+          },
+          rehearse: (puts, deletes) =>
+            new Map(Object.entries(rehearseDiagramChanges(editor, records, puts, deletes))),
+        });
+      },
     };
     socket.onFenceReleased = (event) => {
       if (!event || (event.generation === generation && event.requestId === pendingRequestId))
@@ -443,6 +480,9 @@ function MountedDiagramEditor(props: DiagramEditorProps & { onAdoptionLost: () =
     return () => {
       unregister();
       for (const cleanup of cleanups) cleanup();
+      for (const waiter of releaseWaiters)
+        waiter.reject(new DiagramOperationError({ code: "disconnected" }));
+      releaseWaiters.clear();
       socket.onCommit = null;
       socket.onFenceReleased = null;
     };

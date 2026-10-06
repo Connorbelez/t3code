@@ -1,9 +1,13 @@
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import * as SchemaTransformation from "effect/SchemaTransformation";
 
 import {
   EnvironmentId,
+  ForwardCompatibleArray,
   IsoDateTime,
   NonNegativeInt,
+  PositiveInt,
   ProjectId,
   ThreadId,
   TrimmedNonEmptyString,
@@ -49,7 +53,13 @@ export const DiagramBounds = Schema.Struct({
 });
 export type DiagramBounds = typeof DiagramBounds.Type;
 
-export const DiagramScope = Schema.Union([
+export const DiagramCompositionKey = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(120),
+  Schema.isPattern(/^\S+$/),
+);
+
+/** Scopes addressed by page and area: what clients attach and what an editor host captures. */
+export const DiagramPageScope = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("diagram"), pageId: DiagramRecordId }),
   Schema.Struct({
     kind: Schema.Literal("selection"),
@@ -65,6 +75,13 @@ export const DiagramScope = Schema.Union([
     pageId: DiagramRecordId,
     bounds: DiagramBounds,
   }),
+]);
+export type DiagramPageScope = typeof DiagramPageScope.Type;
+
+/** A composition scope resolves on the server to its frame's current page and bounds. */
+export const DiagramScope = Schema.Union([
+  ...DiagramPageScope.members,
+  Schema.Struct({ kind: Schema.Literal("composition"), key: DiagramCompositionKey }),
 ]);
 export type DiagramScope = typeof DiagramScope.Type;
 
@@ -97,9 +114,25 @@ export const DiagramPageSummary = Schema.Struct({
 });
 export type DiagramPageSummary = typeof DiagramPageSummary.Type;
 
+/** One composition listed once in place of its member shapes. */
+export const DiagramCompositionSummary = Schema.Struct({
+  key: Schema.String,
+  kit: Schema.String,
+  title: Schema.String,
+  pageId: DiagramRecordId,
+  frameId: DiagramRecordId,
+  memberCount: NonNegativeInt,
+  editedCount: NonNegativeInt,
+  bounds: Schema.NullOr(DiagramBounds),
+});
+export type DiagramCompositionSummary = typeof DiagramCompositionSummary.Type;
+
 export const DiagramStructure = Schema.Struct({
   revision: DiagramRevision,
   pages: Schema.Array(DiagramPageSummary).check(Schema.isMaxLength(100)),
+  compositions: Schema.Array(DiagramCompositionSummary)
+    .check(Schema.isMaxLength(100))
+    .pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   shapes: Schema.Array(DiagramShapeSummary).check(Schema.isMaxLength(DIAGRAM_MAX_READ_RECORDS)),
   bindings: Schema.Array(
     Schema.Struct({
@@ -143,28 +176,6 @@ export type DiagramMutationReceipt = typeof DiagramMutationReceipt.Type;
 
 export const DiagramTarget = Schema.Struct({ projectId: ProjectId, diagramId: DiagramId });
 export type DiagramTarget = typeof DiagramTarget.Type;
-
-export const DiagramReadInput = Schema.Struct({
-  ...DiagramTarget.fields,
-  recordIds: Schema.optional(
-    Schema.Array(DiagramRecordId).check(Schema.isMaxLength(DIAGRAM_MAX_READ_RECORDS)),
-  ),
-  pageId: Schema.optional(DiagramRecordId),
-  includeRecords: Schema.optional(Schema.Boolean),
-  offset: Schema.optional(NonNegativeInt),
-  limit: Schema.optional(
-    NonNegativeInt.check(Schema.isBetween({ minimum: 1, maximum: DIAGRAM_MAX_READ_RECORDS })),
-  ),
-});
-export type DiagramReadInput = typeof DiagramReadInput.Type;
-export const DiagramReadResult = Schema.Struct({
-  diagram: DiagramMetadata,
-  structure: DiagramStructure,
-  records: Schema.Array(DiagramRecordData).check(Schema.isMaxLength(DIAGRAM_MAX_READ_RECORDS)),
-  schema: DiagramRecordData,
-  nextOffset: Schema.NullOr(NonNegativeInt),
-});
-export type DiagramReadResult = typeof DiagramReadResult.Type;
 
 export const DiagramLifecycleInput = Schema.Union([
   Schema.Struct({
@@ -221,32 +232,61 @@ export const DiagramCapabilities = Schema.Struct({
   sdkVersion: Schema.Literal(DIAGRAM_SDK_VERSION),
 });
 
+/** Bounded detail an agent can act on: path-addressed spec issues or conflicting member keys. */
+export const DiagramOperationErrorDetails = Schema.Struct({
+  issues: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        path: Schema.String.check(Schema.isMaxLength(300)),
+        message: Schema.String.check(Schema.isMaxLength(1000)),
+      }),
+    ).check(Schema.isMaxLength(20)),
+  ),
+  members: Schema.optional(
+    Schema.Array(Schema.String.check(Schema.isMaxLength(300))).check(Schema.isMaxLength(50)),
+  ),
+});
+export type DiagramOperationErrorDetails = typeof DiagramOperationErrorDetails.Type;
+
+export const DiagramOperationErrorCode = Schema.Literals([
+  "not-found",
+  "project-unavailable",
+  "archived",
+  "stale",
+  "locked",
+  "invalid-records",
+  "invalid-schema",
+  "request-collision",
+  "no-editor",
+  "busy",
+  "unsaved",
+  "disconnected",
+  "cancelled",
+  "storage",
+  "scope-unavailable",
+  "assets-unavailable",
+  "conflict",
+  "invalid-spec",
+  "too-large",
+  "unsupported-mermaid",
+]);
+export type DiagramOperationErrorCode = typeof DiagramOperationErrorCode.Type;
+
 export class DiagramOperationError extends Schema.TaggedError<DiagramOperationError>()(
   "DiagramOperationError",
   {
-    code: Schema.Literals([
-      "not-found",
-      "project-unavailable",
-      "archived",
-      "stale",
-      "locked",
-      "invalid-records",
-      "invalid-schema",
-      "request-collision",
-      "no-editor",
-      "busy",
-      "unsaved",
-      "disconnected",
-      "cancelled",
-      "storage",
-      "scope-unavailable",
-      "assets-unavailable",
-    ]),
+    code: DiagramOperationErrorCode,
     diagramId: Schema.optional(DiagramId),
+    details: Schema.optional(DiagramOperationErrorDetails),
   },
 ) {
   override get message(): string {
-    return `Diagram operation failed (${this.code}).`;
+    const issues = this.details?.issues?.map((issue) => `${issue.path}: ${issue.message}`) ?? [];
+    const members = this.details?.members?.length
+      ? [`members: ${this.details.members.join(", ")}`]
+      : [];
+    const detail = [...issues, ...members].join("; ");
+    return `Diagram operation failed (${this.code})${detail ? `: ${detail}` : "."}`;
   }
 }
 
@@ -268,12 +308,24 @@ export const DiagramSyncSendInput = Schema.Struct({
 });
 export type DiagramSyncSendInput = typeof DiagramSyncSendInput.Type;
 
+export const DiagramHostOperation = Schema.Literals(["prepare-batch", "capture", "compose"]);
+export type DiagramHostOperation = typeof DiagramHostOperation.Type;
+/** Operations a host supports when it advertises none, as clients before advertisement did. */
+export const DIAGRAM_LEGACY_HOST_OPERATIONS: readonly DiagramHostOperation[] = [
+  "prepare-batch",
+  "capture",
+];
+
 export const DiagramHostConnectInput = Schema.Struct({
   clientId: TrimmedNonEmptyString,
   environmentId: EnvironmentId,
   sdkVersion: Schema.Literal(DIAGRAM_SDK_VERSION),
   focused: Schema.Boolean,
   mountedDiagramIds: Schema.optional(Schema.Array(DiagramId).check(Schema.isMaxLength(100))),
+  /** Operations a newer client knows and this server does not are dropped, not rejected. */
+  operations: Schema.optional(
+    ForwardCompatibleArray(DiagramHostOperation).check(Schema.isMaxLength(20)),
+  ),
 });
 export const DiagramHostRequest = Schema.Union([
   Schema.Struct({
@@ -286,7 +338,7 @@ export const DiagramHostRequest = Schema.Union([
     connectionId: Schema.String,
     threadId: Schema.optional(ThreadId),
     ...DiagramTarget.fields,
-    operation: Schema.Literals(["prepare-batch", "capture"]),
+    operation: DiagramHostOperation,
     input: DiagramDocumentData,
   }),
 ]);
@@ -361,3 +413,265 @@ export const DiagramMetadataChange = Schema.Struct({
   diagramId: Schema.NullOr(DiagramId),
 });
 export type DiagramMetadataChange = typeof DiagramMetadataChange.Type;
+
+export const DIAGRAM_KITS = [
+  "flow",
+  "state",
+  "uml-class",
+  "er",
+  "c4",
+  "architecture",
+  "wireframe",
+  "sequence",
+  "user-flow",
+] as const;
+export const DiagramKit = Schema.Literals(DIAGRAM_KITS);
+export type DiagramKit = typeof DiagramKit.Type;
+
+/** Node keys cannot contain "." because edges address nested elements as `node.element`. */
+export const DiagramMemberKey = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(120),
+  Schema.isPattern(/^[^.\s]+$/),
+);
+const DiagramEdgeEndpoint = TrimmedNonEmptyString.check(Schema.isMaxLength(241));
+/** Derived edge keys are `from→to:kind`, so an edge from `node.element` has a "." in its key. */
+const DiagramEdgeKey = TrimmedNonEmptyString.check(Schema.isMaxLength(600));
+
+/** A source location an agent attaches to a node and reads back later. */
+export const DiagramSpecRef = Schema.Struct({
+  path: TrimmedNonEmptyString.check(Schema.isMaxLength(500)),
+  line: Schema.optional(PositiveInt),
+});
+export type DiagramSpecRef = typeof DiagramSpecRef.Type;
+
+/** `kind` defaults to the kit's most common kind and `label` to `key`; `body` is validated per kit. */
+export const DiagramSpecNode = Schema.Struct({
+  key: DiagramMemberKey,
+  kind: Schema.optional(Schema.String.check(Schema.isMaxLength(64))),
+  label: Schema.optional(Schema.String.check(Schema.isMaxLength(2000))),
+  parent: Schema.optional(DiagramMemberKey),
+  body: Schema.optional(boundedJson(64 * 1024)),
+  ref: Schema.optional(DiagramSpecRef),
+});
+export type DiagramSpecNode = typeof DiagramSpecNode.Type;
+
+export const DiagramSpecEdgeObject = Schema.Struct({
+  key: Schema.optional(DiagramEdgeKey),
+  from: DiagramEdgeEndpoint,
+  to: DiagramEdgeEndpoint,
+  kind: Schema.optional(Schema.String.check(Schema.isMaxLength(64))),
+  label: Schema.optional(Schema.String.check(Schema.isMaxLength(500))),
+  /** Validated per kit edge kind, such as multiplicities on a UML association. */
+  body: Schema.optional(boundedJson(4 * 1024)),
+});
+const DiagramEdgeLabel = Schema.String.check(Schema.isMaxLength(500));
+const DiagramEdgeTuple = Schema.Union([
+  Schema.Tuple([DiagramEdgeEndpoint, DiagramEdgeEndpoint]),
+  Schema.Tuple([DiagramEdgeEndpoint, DiagramEdgeEndpoint, DiagramEdgeLabel]),
+]);
+/**
+ * Edges accept `[from, to, label?]` with the kit's default edge kind. The tuple is published as a
+ * plain array of strings, because MCP clients that predate JSON Schema 2020-12 reject
+ * `prefixItems`; it still decodes, and trims its endpoints, as the tuple.
+ */
+export const DiagramSpecEdge = Schema.Union([
+  DiagramSpecEdgeObject,
+  Schema.Array(DiagramEdgeLabel)
+    .check(Schema.isMinLength(2), Schema.isMaxLength(3))
+    .pipe(
+      Schema.decodeTo(
+        DiagramEdgeTuple,
+        SchemaTransformation.passthroughSupertype<
+          typeof DiagramEdgeTuple.Encoded,
+          ReadonlyArray<string>
+        >(),
+      ),
+    ),
+]);
+export type DiagramSpecEdge = typeof DiagramSpecEdge.Type;
+
+export const DiagramLayoutDirection = Schema.Literals(["right", "down", "left", "up"]);
+export type DiagramLayoutDirection = typeof DiagramLayoutDirection.Type;
+
+export const DiagramSpec = Schema.Struct({
+  kit: DiagramKit,
+  key: DiagramCompositionKey,
+  title: Schema.optional(Schema.String.check(Schema.isMaxLength(200))),
+  pageId: Schema.optional(DiagramRecordId),
+  position: Schema.optional(
+    Schema.Struct({
+      x: Schema.Number.check(Schema.isFinite()),
+      y: Schema.Number.check(Schema.isFinite()),
+    }),
+  ),
+  direction: Schema.optional(DiagramLayoutDirection),
+  nodes: Schema.Array(DiagramSpecNode).check(Schema.isMaxLength(DIAGRAM_MAX_BATCH_RECORDS)),
+  edges: Schema.optional(
+    Schema.Array(DiagramSpecEdge).check(Schema.isMaxLength(DIAGRAM_MAX_BATCH_RECORDS)),
+  ),
+});
+export type DiagramSpec = typeof DiagramSpec.Type;
+
+/** Mermaid text the editor host converts to a spec; its node IDs become member keys. */
+export const DiagramMermaidSource = Schema.Struct({
+  key: DiagramCompositionKey,
+  text: Schema.String.check(Schema.isMaxLength(64 * 1024)),
+  title: Schema.optional(Schema.String.check(Schema.isMaxLength(200))),
+});
+export type DiagramMermaidSource = typeof DiagramMermaidSource.Type;
+
+export const DiagramComposeOperation = Schema.Literals(["compose", "remove", "detach"]);
+export type DiagramComposeOperation = typeof DiagramComposeOperation.Type;
+
+/**
+ * What the editor host needs; the server adds the target and request ID. `compose` (the default)
+ * takes exactly one of `spec` or `mermaid`; `remove` and `detach` take only the composition `key`.
+ * One flat struct keeps the MCP tool's input a single JSON object; the pipeline's validation
+ * enforces the combinations.
+ */
+export const DiagramComposeRequest = Schema.Struct({
+  operation: Schema.optional(DiagramComposeOperation),
+  key: Schema.optional(DiagramCompositionKey),
+  spec: Schema.optional(DiagramSpec),
+  mermaid: Schema.optional(DiagramMermaidSource),
+  /** `replace` (default): the spec is the whole composition. `patch`: only the listed members. */
+  mode: Schema.optional(Schema.Literals(["replace", "patch"])),
+  /** Patch only: node and edge keys to delete, with the member edges of any node among them. */
+  removeKeys: Schema.optional(
+    Schema.Array(DiagramEdgeKey).check(Schema.isMaxLength(DIAGRAM_MAX_BATCH_RECORDS)),
+  ),
+  /** Repositions every member; otherwise existing members stay where they are. */
+  relayout: Schema.optional(Schema.Boolean),
+});
+export type DiagramComposeRequest = typeof DiagramComposeRequest.Type;
+
+export const DiagramComposeInput = Schema.Struct({
+  ...DiagramTarget.fields,
+  requestId: Schema.optional(DiagramRequestId),
+  ...DiagramComposeRequest.fields,
+  /** Return the member key to shape ID map. */
+  includeMembers: Schema.optional(Schema.Boolean),
+  /** Return a PNG of the composition frame at the committed revision. */
+  capture: Schema.optional(Schema.Boolean),
+});
+export type DiagramComposeInput = typeof DiagramComposeInput.Type;
+
+export const DiagramComposeCounts = Schema.Struct({
+  created: NonNegativeInt,
+  updated: NonNegativeInt,
+  kept: NonNegativeInt,
+  removed: NonNegativeInt,
+});
+export type DiagramComposeCounts = typeof DiagramComposeCounts.Type;
+
+/** Node member pairs whose boxes overlap after the compose, in spec order. */
+export const DiagramComposeOverlaps = Schema.Array(
+  Schema.Tuple([DiagramMemberKey, DiagramMemberKey]),
+).check(Schema.isMaxLength(50));
+
+/**
+ * A no-op compose commits nothing, so it has no request ID. Counts describe what this call wrote:
+ * a retry of a committed request ID is answered from its receipt, so its counts are all zero.
+ */
+export const DiagramComposeResult = Schema.Struct({
+  requestId: Schema.NullOr(DiagramRequestId),
+  revision: DiagramRevision,
+  compositionKey: DiagramCompositionKey,
+  counts: DiagramComposeCounts,
+  overlaps: DiagramComposeOverlaps,
+  /** Member key to main shape ID, only with `includeMembers`. */
+  members: Schema.optional(Schema.Record(Schema.String, DiagramRecordId)),
+  capture: Schema.optional(DiagramCapture),
+  /** Why the requested capture is missing; the compose itself succeeded. */
+  captureError: Schema.optional(DiagramOperationErrorCode),
+});
+export type DiagramComposeResult = typeof DiagramComposeResult.Type;
+
+/** The host's compose answer; `changes` is null when the canvas already matches. */
+export const DiagramHostComposeResult = Schema.Struct({
+  changes: Schema.NullOr(
+    Schema.Struct({
+      expected: DiagramBatch.fields.expected,
+      puts: DiagramBatch.fields.puts,
+      deletes: DiagramBatch.fields.deletes,
+    }),
+  ),
+  counts: DiagramComposeCounts,
+  overlaps: DiagramComposeOverlaps,
+});
+export type DiagramHostComposeResult = typeof DiagramHostComposeResult.Type;
+
+export const DiagramKitReference = Schema.Struct({
+  kit: DiagramKit,
+  defaultKind: Schema.String,
+  nodeKinds: Schema.Array(Schema.Struct({ kind: Schema.String, description: Schema.String })),
+  /** Null for kits without edges, such as wireframes. */
+  defaultEdgeKind: Schema.NullOr(Schema.String),
+  edgeKinds: Schema.Array(Schema.Struct({ kind: Schema.String, description: Schema.String })),
+  guidance: Schema.String,
+  example: DiagramSpec,
+});
+export type DiagramKitReference = typeof DiagramKitReference.Type;
+
+/**
+ * A member as compose last wrote it, in full spec form. Members inside a node, such as wireframe
+ * elements, read back keyed `node.element`. `text` is its current text once edited.
+ */
+export const DiagramCompositionMember = Schema.Struct({
+  spec: Schema.Union([
+    DiagramSpecEdgeObject,
+    Schema.Struct({ ...DiagramSpecNode.fields, key: DiagramEdgeEndpoint }),
+  ]),
+  edited: Schema.Boolean,
+  text: Schema.optional(Schema.String.check(Schema.isMaxLength(2000))),
+});
+export type DiagramCompositionMember = typeof DiagramCompositionMember.Type;
+
+export const DiagramCompositionDetail = Schema.Struct({
+  key: DiagramCompositionKey,
+  kit: DiagramKit,
+  title: Schema.String,
+  direction: DiagramLayoutDirection,
+  members: Schema.Array(DiagramCompositionMember).check(
+    Schema.isMaxLength(DIAGRAM_MAX_READ_RECORDS),
+  ),
+});
+export type DiagramCompositionDetail = typeof DiagramCompositionDetail.Type;
+
+/** One page of members across the requested compositions, in summary then member order. */
+export const DiagramCompositionsPage = Schema.Struct({
+  items: Schema.Array(DiagramCompositionDetail).check(Schema.isMaxLength(100)),
+  nextOffset: Schema.NullOr(NonNegativeInt),
+});
+export type DiagramCompositionsPage = typeof DiagramCompositionsPage.Type;
+
+export const DiagramReadInput = Schema.Struct({
+  ...DiagramTarget.fields,
+  recordIds: Schema.optional(
+    Schema.Array(DiagramRecordId).check(Schema.isMaxLength(DIAGRAM_MAX_READ_RECORDS)),
+  ),
+  pageId: Schema.optional(DiagramRecordId),
+  includeRecords: Schema.optional(Schema.Boolean),
+  offset: Schema.optional(NonNegativeInt),
+  limit: Schema.optional(
+    NonNegativeInt.check(Schema.isBetween({ minimum: 1, maximum: DIAGRAM_MAX_READ_RECORDS })),
+  ),
+  /** Composition detail is returned only for this key, or for every composition with `includeCompositions`. */
+  compositionKey: Schema.optional(DiagramCompositionKey),
+  includeCompositions: Schema.optional(Schema.Boolean),
+  /** Pages through composition members, independently of record pagination. */
+  compositionOffset: Schema.optional(NonNegativeInt),
+  compositionLimit: Schema.optional(
+    NonNegativeInt.check(Schema.isBetween({ minimum: 1, maximum: DIAGRAM_MAX_READ_RECORDS })),
+  ),
+});
+export type DiagramReadInput = typeof DiagramReadInput.Type;
+export const DiagramReadResult = Schema.Struct({
+  diagram: DiagramMetadata,
+  structure: DiagramStructure,
+  records: Schema.Array(DiagramRecordData).check(Schema.isMaxLength(DIAGRAM_MAX_READ_RECORDS)),
+  schema: DiagramRecordData,
+  nextOffset: Schema.NullOr(NonNegativeInt),
+  compositions: Schema.optional(DiagramCompositionsPage),
+});
+export type DiagramReadResult = typeof DiagramReadResult.Type;

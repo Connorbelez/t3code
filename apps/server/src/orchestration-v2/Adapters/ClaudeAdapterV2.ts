@@ -931,6 +931,7 @@ export const CLAUDE_T3_MCP_TOOL_WILDCARD = "mcp__t3-code__*";
 export const CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS: ReadonlyArray<string> = [
   "mcp__t3-code__t3_diagram_list",
   "mcp__t3-code__t3_diagram_read",
+  "mcp__t3-code__t3_diagram_kit",
   "mcp__t3-code__t3_diagram_receipt",
   "mcp__t3-code__t3_diagram_capture",
   "mcp__t3-code__t3_diagram_export",

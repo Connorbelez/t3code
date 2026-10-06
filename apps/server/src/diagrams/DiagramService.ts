@@ -10,6 +10,8 @@ import {
   DiagramMutationReceipt,
   DiagramHostResponse,
   DiagramBatch,
+  DiagramHostComposeResult,
+  DIAGRAM_LEGACY_HOST_OPERATIONS,
   DIAGRAM_MAX_READ_RECORDS,
   DIAGRAM_MAX_DOCUMENT_BYTES,
   type DiagramTarget,
@@ -22,9 +24,14 @@ import {
   type DiagramSyncEvent,
   type DiagramSyncSendInput,
   type DiagramHostRequest,
+  type DiagramHostConnectInput,
+  type DiagramHostOperation,
+  type DiagramComposeInput,
+  type DiagramComposeResult,
+  type DiagramPageScope,
+  type DiagramScope,
   type ProjectId,
   type ThreadId,
-  type EnvironmentId,
   type DiagramCounts,
   type DiagramPreviewResult,
   type DiagramMetadataChange,
@@ -43,6 +50,7 @@ import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import { readCompositions, validateComposeRequest } from "@t3tools/diagram-compose/model";
 import * as ServerConfig from "../config.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
@@ -55,13 +63,7 @@ import {
   type DiagramHostFence,
 } from "./DiagramRoom.ts";
 
-type HostInput = {
-  clientId: string;
-  environmentId: EnvironmentId;
-  sdkVersion: "5.5.2";
-  focused: boolean;
-  mountedDiagramIds?: readonly DiagramId[];
-};
+type HostInput = typeof DiagramHostConnectInput.Type;
 type ApplyInput = DiagramTarget & {
   batch: DiagramBatch;
   namespace: string;
@@ -105,6 +107,9 @@ export class DiagramService extends Context.Service<
     readonly applyBatch: (
       input: ApplyInput,
     ) => Effect.Effect<DiagramMutationReceipt, DiagramOperationError>;
+    readonly compose: (
+      input: DiagramComposeInput & { namespace: string; threadId?: ThreadId },
+    ) => Effect.Effect<DiagramComposeResult, DiagramOperationError>;
     readonly receipt: (
       input: DiagramTarget & { namespace: string; requestId: string },
     ) => Effect.Effect<DiagramMutationReceipt | null, DiagramOperationError>;
@@ -209,6 +214,7 @@ const assetClaim = Schema.Struct({
   diagramId: Schema.String,
   expires: Schema.Number,
 });
+const decodeHostComposeResult = Schema.decodeUnknownSync(DiagramHostComposeResult);
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
@@ -319,6 +325,7 @@ export const make = Effect.gen(function* () {
       connectionId: string;
       focused: boolean;
       mountedDiagramIds: readonly DiagramId[];
+      operations: readonly DiagramHostOperation[];
       queue: Queue.Queue<DiagramHostRequest, Cause.Done>;
     }
   >();
@@ -441,9 +448,19 @@ export const make = Effect.gen(function* () {
       );
       const offset = input.offset ?? 0;
       const limit = input.limit ?? DIAGRAM_MAX_READ_RECORDS;
+      const compositions = readCompositions(records);
+      // Member specs can be large, so detail is opt-in; summaries in structure name the keys.
+      const detail =
+        input.compositionKey !== undefined || input.includeCompositions
+          ? compositions.detail({
+              key: input.compositionKey,
+              offset: input.compositionOffset ?? 0,
+              limit: input.compositionLimit ?? DIAGRAM_MAX_READ_RECORDS,
+            })
+          : undefined;
       return {
         diagram,
-        structure: diagramStructure(records, diagram.revision, input),
+        structure: diagramStructure(records, diagram.revision, input, compositions),
         records:
           input.includeRecords || input.recordIds ? selected.slice(offset, offset + limit) : [],
         schema: schema.serialize(),
@@ -451,6 +468,7 @@ export const make = Effect.gen(function* () {
           (input.includeRecords || input.recordIds) && offset + limit < selected.length
             ? offset + limit
             : null,
+        ...(detail ? { compositions: detail } : {}),
       } satisfies DiagramReadResult;
     });
   });
@@ -715,6 +733,7 @@ export const make = Effect.gen(function* () {
       connectionId,
       focused: input.focused,
       mountedDiagramIds: input.mountedDiagramIds ?? [],
+      operations: input.operations ?? DIAGRAM_LEGACY_HOST_OPERATIONS,
       queue,
     };
     hosts.set(connectionId, host);
@@ -737,7 +756,7 @@ export const make = Effect.gen(function* () {
   });
   const invoke = Effect.fn("DiagramService.invoke")(function* (
     input: DiagramTarget & {
-      operation: "prepare-batch" | "capture";
+      operation: DiagramHostOperation;
       value: unknown;
       clientId?: string;
       threadId?: ThreadId;
@@ -750,7 +769,11 @@ export const make = Effect.gen(function* () {
             Number(a.mountedDiagramIds.includes(input.diagramId)) ||
           Number(b.focused) - Number(a.focused),
       )
-      .find((item) => !input.clientId || item.clientId === input.clientId);
+      .find(
+        (item) =>
+          item.operations.includes(input.operation) &&
+          (!input.clientId || item.clientId === input.clientId),
+      );
     if (!host) return yield* new DiagramOperationError({ code: "no-editor" });
     const requestId = NodeCrypto.randomUUID();
     const result = yield* Deferred.make<unknown, DiagramOperationError>();
@@ -781,6 +804,9 @@ export const make = Effect.gen(function* () {
     );
     if (Option.isNone(response)) {
       release();
+      // An unanswered prepare leaves the host's fence unknown; other operations are just slow.
+      if (input.operation !== "prepare-batch")
+        return yield* new DiagramOperationError({ code: "busy" });
       yield* disconnectHost(host.connectionId);
       return yield* new DiagramOperationError({ code: "disconnected" });
     }
@@ -848,6 +874,83 @@ export const make = Effect.gen(function* () {
     applyBatchCore(input).pipe(
       Effect.ensuring(Effect.sync(() => database.releaseIdle(input.diagramId))),
     );
+
+  const compose = Effect.fn("DiagramService.compose")(function* ({
+    projectId,
+    diagramId,
+    namespace,
+    threadId,
+    requestId,
+    includeMembers,
+    capture,
+    ...request
+  }: DiagramComposeInput & { namespace: string; threadId?: ThreadId }) {
+    const target = { projectId, diagramId };
+    const diagram = yield* targetMetadata(target);
+    // Mermaid text can only be checked by the host's parser.
+    const compositionKey = yield* attempt(() =>
+      validateComposeRequest({ ...request, includeMembers, capture }),
+    );
+    const membersOf = () =>
+      includeMembers
+        ? attempt(
+            () => readCompositions(database.read(diagramId)).memberShapes(compositionKey) ?? {},
+          ).pipe(Effect.map((members) => ({ members })))
+        : Effect.succeed({});
+    const known = requestId
+      ? yield* attempt(() => database.getReceipt(diagramId, namespace, requestId))
+      : null;
+    if (known)
+      return {
+        requestId: known.requestId,
+        revision: known.revision,
+        compositionKey,
+        counts: { created: 0, updated: 0, kept: 0, removed: 0 },
+        overlaps: [],
+        ...(yield* membersOf()),
+      } satisfies DiagramComposeResult;
+    if (diagram.archivedAt) return yield* new DiagramOperationError({ code: "archived" });
+    const composed = yield* invoke({
+      ...target,
+      ...(threadId ? { threadId } : {}),
+      operation: "compose",
+      value: request,
+    });
+    const result = yield* attempt(() => decodeHostComposeResult(composed.value));
+    // Prepare on the host that composed: it measured against the records it is about to fence.
+    const committed = result.changes
+      ? yield* applyBatchCore({
+          ...target,
+          namespace,
+          clientId: composed.host.clientId,
+          ...(threadId ? { threadId } : {}),
+          batch: { requestId: requestId ?? NodeCrypto.randomUUID(), ...result.changes },
+        })
+      : null;
+    const revision = committed?.revision ?? (yield* attempt(() => metadata(target))).revision;
+    const members = yield* membersOf();
+    // The batch is durable by now, so a failed capture only leaves the image out.
+    const captured = capture
+      ? yield* captureAt(
+          { ...target, scope: { kind: "composition", key: compositionKey } },
+          { clientId: composed.host.clientId, revision },
+        ).pipe(
+          Effect.map((value) => ({ capture: value })),
+          Effect.catchTag("DiagramOperationError", (error) =>
+            Effect.succeed({ captureError: error.code }),
+          ),
+        )
+      : {};
+    return {
+      requestId: committed?.requestId ?? null,
+      revision,
+      compositionKey,
+      counts: result.counts,
+      overlaps: result.overlaps,
+      ...members,
+      ...captured,
+    } satisfies DiagramComposeResult;
+  });
 
   const failSyncRequests = Effect.fn(function* (clientId: string, diagramId: DiagramId) {
     for (const [requestId, entry] of pending)
@@ -931,14 +1034,32 @@ export const make = Effect.gen(function* () {
     });
   });
 
-  const capture = Effect.fn("DiagramService.capture")(function* (input: DiagramCaptureInput) {
+  /** Hosts capture page scopes; a composition resolves to its frame's current page and bounds. */
+  const pageScope = (scope: DiagramScope, records: () => readonly TLRecord[]): DiagramPageScope => {
+    if (scope.kind !== "composition") return scope;
+    const resolved = readCompositions(records()).frameScope(scope.key);
+    if (!resolved) throw new DiagramOperationError({ code: "scope-unavailable" });
+    return resolved;
+  };
+  /**
+   * `pin` targets the host that just committed a compose and requires the capture to show that
+   * commit's revision.
+   */
+  const captureAt = Effect.fn("DiagramService.capture")(function* (
+    input: DiagramCaptureInput,
+    pin: { clientId: string; revision: number } | null = null,
+  ) {
     yield* targetMetadata(input);
+    const scope = yield* attempt(() =>
+      pageScope(input.scope, () => database.read(input.diagramId)),
+    );
     const response = yield* invoke({
       ...input,
+      ...(pin ? { clientId: pin.clientId } : {}),
       operation: "capture",
       value: {
-        scope: input.scope,
-        revision: metadata(input).revision,
+        scope,
+        revision: pin?.revision ?? metadata(input).revision,
         format: input.format ?? "png",
       },
     });
@@ -948,15 +1069,17 @@ export const make = Effect.gen(function* () {
       if (
         captured.diagramId !== input.diagramId ||
         captured.revision !== current.revision ||
-        encodeJson(captured.scope) !== encodeJson(input.scope)
+        encodeJson(captured.scope) !== encodeJson(scope)
       )
         throw new DiagramOperationError({ code: "stale" });
+      const result = { ...captured, scope: input.scope };
       sql
         .prepare("INSERT OR REPLACE INTO diagram_previews VALUES (?, ?, ?)")
-        .run(input.diagramId, encodeJson(input.scope), encodeJson(captured));
-      return captured;
+        .run(input.diagramId, encodeJson(input.scope), encodeJson(result));
+      return result;
     });
   });
+  const capture = (input: DiagramCaptureInput) => captureAt(input);
   const cachedPreview = Effect.fn("DiagramService.cachedPreview")(function* (
     input: DiagramCaptureInput,
   ) {
@@ -990,26 +1113,39 @@ export const make = Effect.gen(function* () {
           attempt(() => {
             const diagram = metadata(input);
             const records = database.read(input.diagramId);
-            if (!records.some((item) => item.id === input.scope.pageId && item.typeName === "page"))
+            const scope = pageScope(input.scope, () => records);
+            if (!records.some((item) => item.id === scope.pageId && item.typeName === "page"))
               throw new DiagramOperationError({ code: "scope-unavailable" });
             if (
-              input.scope.kind === "selection" &&
-              input.scope.shapeIds.some(
+              scope.kind === "selection" &&
+              scope.shapeIds.some(
                 (id) => !records.some((item) => item.id === id && item.typeName === "shape"),
               )
             )
               throw new DiagramOperationError({ code: "scope-unavailable" });
-            const structure = diagramStructure(records, diagram.revision, {
-              limit: 40,
-              ...(input.scope.kind === "selection"
-                ? { recordIds: input.scope.shapeIds, pageId: input.scope.pageId }
-                : input.scope.kind === "viewport"
-                  ? { pageId: input.scope.pageId }
-                  : { priorityPageId: input.scope.pageId }),
-            });
+            const compositions = readCompositions(records);
+            const structure = diagramStructure(
+              records,
+              diagram.revision,
+              {
+                limit: 40,
+                ...(scope.kind === "selection"
+                  ? { recordIds: scope.shapeIds, pageId: scope.pageId }
+                  : scope.kind === "viewport"
+                    ? { pageId: scope.pageId, viewport: scope.bounds }
+                    : { priorityPageId: scope.pageId }),
+              },
+              compositions,
+            );
             if (
-              input.scope.kind === "selection" &&
-              structure.shapes.length !== Math.min(40, input.scope.shapeIds.length)
+              scope.kind === "selection" &&
+              structure.shapes.length !==
+                Math.min(
+                  40,
+                  scope.shapeIds.filter(
+                    (id) => !compositions.isMember(id) && !compositions.compositionOf(id),
+                  ).length,
+                )
             )
               throw new DiagramOperationError({ code: "scope-unavailable" });
             const structureBudget = Math.min(
@@ -1018,10 +1154,17 @@ export const make = Effect.gen(function* () {
             );
             if (structureBudget < 1024)
               throw new DiagramOperationError({ code: "scope-unavailable" });
+            // Shapes and compositions are sorted focused page first, so popping drops other pages
+            // first; the focused page's shapes outrank other pages' compositions.
+            const elsewhere = (item: { pageId: string } | undefined) =>
+              item !== undefined && item.pageId !== scope.pageId;
             while (Buffer.byteLength(encodeJson(structure)) > structureBudget) {
               if (structure.bindings.length) structure.bindings.pop();
+              else if (elsewhere(structure.shapes.at(-1))) structure.shapes.pop();
+              else if (elsewhere(structure.compositions.at(-1))) structure.compositions.pop();
               else if (structure.shapes.length) structure.shapes.pop();
-              else structure.pages.pop();
+              else if (structure.pages.length) structure.pages.pop();
+              else structure.compositions.pop();
               structure.truncated = true;
             }
             return { diagram, structure };
@@ -1154,6 +1297,10 @@ export const make = Effect.gen(function* () {
     read,
     lifecycle,
     applyBatch,
+    compose: (input) =>
+      compose(input).pipe(
+        Effect.ensuring(Effect.sync(() => database.releaseIdle(input.diagramId))),
+      ),
     receipt,
     capture,
     prepareContext,

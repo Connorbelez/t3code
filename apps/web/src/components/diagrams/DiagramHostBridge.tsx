@@ -3,7 +3,7 @@ import {
   DIAGRAM_SDK_VERSION,
   DiagramBatch,
   DiagramOperationError,
-  DiagramScope,
+  DiagramPageScope,
   type DiagramHostRequest,
   type DiagramMetadata,
   type EnvironmentId,
@@ -12,19 +12,22 @@ import * as Schema from "effect/Schema";
 import { lazy, Suspense, useContext, useEffect, useMemo, useState } from "react";
 import { useServerConfigs } from "~/state/entities";
 import { createDiagramApi, diagramHostRequests } from "./diagramApi";
+import { decodeHostComposeRequest } from "./diagramHostCompose";
 import {
   awaitDiagramHost,
+  createTemporaryDiagramEditor,
   diagramHostClientId,
   findDiagramHost,
   getVisibleDiagramHostIds,
   subscribeDiagramHosts,
   type MountedDiagramHost,
+  type TemporaryDiagramLease,
 } from "./diagramHosts";
 
 const DiagramEditor = lazy(() => import("./DiagramEditor"));
 const isDiagramError = Schema.is(DiagramOperationError);
 const captureInput = Schema.Struct({
-  scope: DiagramScope,
+  scope: DiagramPageScope,
   revision: Schema.Number,
   format: Schema.Literals(["png", "svg"]),
 });
@@ -79,17 +82,13 @@ function EnvironmentDiagramHost({ environmentId }: { environmentId: EnvironmentI
     let connectionController = new AbortController();
     const fencedHosts = new Set<MountedDiagramHost>();
     let generation: string | null = null;
-    let temporaryTarget: string | null = null;
-    const releaseTemporary = () => {
-      temporaryTarget = null;
-      setOnDemand(null);
-    };
+    const temporary = createTemporaryDiagramEditor(setOnDemand);
     const disconnect = () => {
       generation = null;
       connectionController.abort();
       for (const host of fencedHosts) host.release();
       fencedHosts.clear();
-      releaseTemporary();
+      temporary.reset();
     };
     const handle = async (request: Exclude<DiagramHostRequest, { operation: "ready" }>) => {
       if (generation !== request.connectionId || controller.signal.aborted) return;
@@ -100,20 +99,18 @@ function EnvironmentDiagramHost({ environmentId }: { environmentId: EnvironmentI
         if (!connected())
           throw new DiagramOperationError({ code: "disconnected", diagramId: request.diagramId });
       };
-      let temporary = false;
       let ownFence = false;
       let host = findDiagramHost(environmentId, request.diagramId);
+      // Held until the request ends; a prepare hands it to its fence release instead.
+      let lease: TemporaryDiagramLease | null = host ? temporary.adopt(host) : null;
       try {
         if (!host) {
-          if (temporaryTarget !== null)
-            throw new DiagramOperationError({ code: "busy", diagramId: request.diagramId });
-          temporaryTarget = request.diagramId;
-          temporary = true;
           const current = await api.read(request);
           requireConnected();
-          setOnDemand(current.diagram);
+          lease = temporary.open(current.diagram);
           host = await awaitDiagramHost(environmentId, request.diagramId, signal);
           requireConnected();
+          lease.bind(host);
         }
         if (request.operation === "prepare-batch") {
           const result = await host.prepare(
@@ -125,17 +122,27 @@ function EnvironmentDiagramHost({ environmentId }: { environmentId: EnvironmentI
           requireConnected();
           const preparedHost = host;
           const previousRelease = preparedHost.onReleased;
+          const fenceLease = lease;
+          lease = null;
           fencedHosts.add(preparedHost);
           preparedHost.onReleased = () => {
             fencedHosts.delete(preparedHost);
             preparedHost.onReleased = previousRelease;
             previousRelease?.();
-            if (temporary) releaseTemporary();
+            fenceLease?.end();
           };
           await api.hostRespond({
             requestId: request.requestId,
             connectionId: request.connectionId,
             result: { ok: true, value: result },
+          });
+        } else if (request.operation === "compose") {
+          const value = await host.compose(decodeHostComposeRequest(request.input));
+          requireConnected();
+          await api.hostRespond({
+            requestId: request.requestId,
+            connectionId: request.connectionId,
+            result: { ok: true, value },
           });
         } else {
           const input = decodeCaptureInput(request.input);
@@ -146,11 +153,9 @@ function EnvironmentDiagramHost({ environmentId }: { environmentId: EnvironmentI
             connectionId: request.connectionId,
             result: { ok: true, value },
           });
-          if (temporary) releaseTemporary();
         }
       } catch (cause) {
         if (ownFence) host?.release();
-        if (temporary && connected()) releaseTemporary();
         if (!connected()) return;
         const error = isDiagramError(cause)
           ? cause
@@ -162,6 +167,8 @@ function EnvironmentDiagramHost({ environmentId }: { environmentId: EnvironmentI
             result: { ok: false, error },
           })
           .catch(() => {});
+      } finally {
+        lease?.end();
       }
     };
     const unsubscribe = diagramHostRequests(registry, {
@@ -172,6 +179,7 @@ function EnvironmentDiagramHost({ environmentId }: { environmentId: EnvironmentI
         sdkVersion: DIAGRAM_SDK_VERSION,
         focused,
         mountedDiagramIds,
+        operations: ["prepare-batch", "capture", "compose"],
       },
       onEvent: (request) => {
         if (request.operation === "ready") {

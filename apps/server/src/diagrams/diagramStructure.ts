@@ -1,4 +1,5 @@
 import type { DiagramBounds, DiagramReadInput, DiagramStructure } from "@t3tools/contracts";
+import { readCompositions } from "@t3tools/diagram-compose/model";
 import type { TLRecord, TLShape } from "@tldraw/tlschema";
 
 type Point = { x: number; y: number };
@@ -58,13 +59,26 @@ function box(values: readonly Point[]): DiagramBounds | null {
   return { x, y, w: right - x, h: bottom - y };
 }
 
+function intersects(a: DiagramBounds, b: DiagramBounds) {
+  return a.x <= b.x + b.w && b.x <= a.x + a.w && a.y <= b.y + b.h && b.y <= a.y + a.h;
+}
+
+/**
+ * Compositions are listed once each in place of their members, so they never consume the shape
+ * limit. A selected member or frame selects its composition; a viewport selects compositions
+ * whose bounds it intersects.
+ */
 export function diagramStructure(
   records: readonly TLRecord[],
   revision: number,
   input: Pick<DiagramReadInput, "pageId" | "recordIds" | "offset" | "limit"> & {
     priorityPageId?: string;
+    viewport?: DiagramBounds;
   } = {},
+  compositions = readCompositions(records),
 ) {
+  const collapsed = (id: string) =>
+    compositions.isMember(id) || compositions.compositionOf(id) !== undefined;
   const byId = new Map(records.map((item) => [item.id as string, item]));
   const shapes = records.filter((item) => item.typeName === "shape");
   const ancestors = (shape: TLShape) => {
@@ -135,6 +149,7 @@ export function diagramStructure(
   };
   const selected = shapes.filter(
     (item) =>
+      !collapsed(item.id) &&
       (!input.pageId || ancestry.get(item.id)?.pageId === input.pageId) &&
       (!input.recordIds || input.recordIds.includes(item.id)),
   );
@@ -156,9 +171,10 @@ export function diagramStructure(
     .filter((item) => item.typeName === "binding")
     .filter(
       (item) =>
-        (!input.recordIds && !input.pageId) ||
-        selectedIds.has(item.fromId) ||
-        selectedIds.has(item.toId),
+        !collapsed(item.fromId) &&
+        ((!input.recordIds && !input.pageId) ||
+          selectedIds.has(item.fromId) ||
+          selectedIds.has(item.toId)),
     );
   if (input.priorityPageId) {
     const onPriorityPage = (id: string) => {
@@ -173,16 +189,29 @@ export function diagramStructure(
         Number(onPriorityPage(a.fromId) || onPriorityPage(a.toId)),
     );
   }
+  const selectedKeys =
+    input.recordIds &&
+    new Set(input.recordIds.flatMap((id) => compositions.compositionOf(id)?.key ?? []));
+  const listed = compositions.summaries.filter(
+    (item) =>
+      (!input.pageId || item.pageId === input.pageId) &&
+      (!selectedKeys || selectedKeys.has(item.key)) &&
+      (!input.viewport || (item.bounds !== null && intersects(item.bounds, input.viewport))),
+  );
+  if (input.priorityPageId)
+    listed.sort(
+      (a, b) =>
+        Number(b.pageId === input.priorityPageId) - Number(a.pageId === input.priorityPageId),
+    );
+  const pages = records.filter((item) => item.typeName === "page");
   return {
     revision,
-    pages: records
-      .filter((item) => item.typeName === "page")
-      .slice(0, 100)
-      .map((page) => ({
-        id: page.id,
-        name: page.name.slice(0, 256),
-        shapeCount: shapes.filter((shape) => ancestry.get(shape.id)?.pageId === page.id).length,
-      })),
+    pages: pages.slice(0, 100).map((page) => ({
+      id: page.id,
+      name: page.name.slice(0, 256),
+      shapeCount: shapes.filter((shape) => ancestry.get(shape.id)?.pageId === page.id).length,
+    })),
+    compositions: listed.slice(0, 100),
     shapes: selected.slice(offset, offset + limit).map((shape) => ({
       id: shape.id,
       pageId: ancestry.get(shape.id)?.pageId ?? shape.parentId,
@@ -198,6 +227,10 @@ export function diagramStructure(
       .slice(offset, offset + limit)
       .map((item) => ({ id: item.id, type: item.type, fromId: item.fromId, toId: item.toId })),
     totalShapes: shapes.length,
-    truncated: offset + limit < selected.length || offset + limit < bindings.length,
+    truncated:
+      offset + limit < selected.length ||
+      offset + limit < bindings.length ||
+      listed.length > 100 ||
+      pages.length > 100,
   } satisfies DiagramStructure;
 }
