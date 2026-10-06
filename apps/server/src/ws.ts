@@ -3543,6 +3543,12 @@ const layerWsRpc = (
           observeRpcEffect(WS_METHODS.diagramsPrepareContext, diagrams.prepareContext(input), {
             "rpc.aggregate": "diagrams",
           }),
+        [WS_METHODS.diagramsPrepareAnnotations]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.diagramsPrepareAnnotations,
+            diagrams.prepareAnnotations(input),
+            { "rpc.aggregate": "diagrams" },
+          ),
         [WS_METHODS.diagramsImport]: (input) =>
           observeRpcEffect(WS_METHODS.diagramsImport, diagrams.importDocument(input), {
             "rpc.aggregate": "diagrams",

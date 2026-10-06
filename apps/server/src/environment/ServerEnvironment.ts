@@ -226,7 +226,11 @@ export const make = Effect.gen(function* () {
       pullRequests: true,
       pullRequestChecks: true,
       inlineMessageContext: true,
-      diagrams: { protocolVersion: DIAGRAM_PROTOCOL_VERSION, sdkVersion: DIAGRAM_SDK_VERSION },
+      diagrams: {
+        protocolVersion: DIAGRAM_PROTOCOL_VERSION,
+        sdkVersion: DIAGRAM_SDK_VERSION,
+        annotations: true,
+      },
       requiredWorktreeBootstrap: true,
       threadSettlement: true,
       threadAutoSettlement: true,

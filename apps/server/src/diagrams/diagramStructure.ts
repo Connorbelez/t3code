@@ -73,6 +73,8 @@ function intersects(a: DiagramBounds, b: DiagramBounds) {
  * Compositions are listed once each in place of their members, so they never consume the shape
  * limit. A selected member or frame selects its composition; a viewport selects compositions
  * whose bounds it intersects. Selected members are listed by key unless the frame is selected too.
+ * `focus` lists its shapes, then shapes and compositions its regions intersect, ahead of the rest
+ * without filtering anything out; its member shapes are listed by key like selected ones.
  */
 export function diagramStructure(
   records: readonly TLRecord[],
@@ -80,6 +82,7 @@ export function diagramStructure(
   input: Pick<DiagramReadInput, "pageId" | "recordIds" | "offset" | "limit"> & {
     priorityPageId?: string;
     viewport?: DiagramBounds;
+    focus?: { shapeIds: readonly string[]; regions: readonly DiagramBounds[] };
   } = {},
   compositions = readCompositions(records),
 ) {
@@ -170,6 +173,19 @@ export function diagramStructure(
         Number(ancestry.get(b.id)?.pageId === input.priorityPageId) -
         Number(ancestry.get(a.id)?.pageId === input.priorityPageId),
     );
+  else if (input.focus) {
+    const { shapeIds, regions } = input.focus;
+    const ranks = new Map(
+      selected.map((shape) => {
+        const index = shapeIds.indexOf(shape.id);
+        if (index !== -1) return [shape.id, index];
+        const value = regions.length ? bounds(shape) : null;
+        const inRegion = value !== null && regions.some((region) => intersects(value, region));
+        return [shape.id, inRegion ? shapeIds.length : Infinity];
+      }),
+    );
+    selected.sort((a, b) => (ranks.get(a.id) ?? Infinity) - (ranks.get(b.id) ?? Infinity));
+  }
   const offset = input.offset ?? 0;
   const limit = Math.min(input.limit ?? 200, 200);
   const selectedIds = new Set<string>(selected.map((item) => item.id));
@@ -198,11 +214,10 @@ export function diagramStructure(
   const selectedKeys =
     input.recordIds &&
     new Set(input.recordIds.flatMap((id) => compositions.compositionOf(id)?.key ?? []));
-  const wholeKeys = new Set(
-    input.recordIds?.flatMap((id) => compositions.compositionOfFrame(id)?.key ?? []),
-  );
+  const picked = input.recordIds ?? input.focus?.shapeIds ?? [];
+  const wholeKeys = new Set(picked.flatMap((id) => compositions.compositionOfFrame(id)?.key ?? []));
   const selectedMembers = new Map<string, Map<string, DiagramSelectedMember>>();
-  for (const id of input.recordIds ?? []) {
+  for (const id of picked) {
     const found = compositions.memberOf(id);
     if (!found || wholeKeys.has(found.compositionKey)) continue;
     const members = selectedMembers.get(found.compositionKey) ?? new Map();
@@ -230,6 +245,14 @@ export function diagramStructure(
       (a, b) =>
         Number(b.pageId === input.priorityPageId) - Number(a.pageId === input.priorityPageId),
     );
+  else if (input.focus) {
+    const { regions } = input.focus;
+    const focused = ({ key, bounds: area }: (typeof listed)[number]) =>
+      selectedMembers.has(key) ||
+      wholeKeys.has(key) ||
+      (area !== null && regions.some((region) => intersects(area, region)));
+    listed.sort((a, b) => Number(focused(b)) - Number(focused(a)));
+  }
   const pages = records.filter((item) => item.typeName === "page");
   return {
     revision,
@@ -263,4 +286,37 @@ export function diagramStructure(
         (members) => members.size > DIAGRAM_MAX_SELECTED_MEMBERS,
       ),
   } satisfies DiagramStructure;
+}
+
+/**
+ * Drops entries from the end until the structure's JSON fits `budget` bytes. Shapes and
+ * compositions are sorted focused page first, so popping drops other pages first; the focused
+ * page's shapes outrank other pages' compositions. Selected members go before the summaries that
+ * name them.
+ */
+export function fitStructure(
+  structure: ReturnType<typeof diagramStructure>,
+  budget: number,
+  pageId: string,
+) {
+  const elsewhere = (item: { pageId: string } | undefined) =>
+    item !== undefined && item.pageId !== pageId;
+  while (Buffer.byteLength(JSON.stringify(structure)) > budget) {
+    const trimmable = structure.compositions.findLastIndex(
+      (item) => item.selectedMembers !== undefined,
+    );
+    if (structure.bindings.length) structure.bindings.pop();
+    else if (elsewhere(structure.shapes.at(-1))) structure.shapes.pop();
+    else if (elsewhere(structure.compositions.at(-1))) structure.compositions.pop();
+    else if (structure.shapes.length) structure.shapes.pop();
+    else if (structure.pages.length) structure.pages.pop();
+    else if (trimmable !== -1) {
+      const { selectedMembers = [], ...summary } = structure.compositions[trimmable]!;
+      structure.compositions[trimmable] =
+        selectedMembers.length > 1
+          ? { ...summary, selectedMembers: selectedMembers.slice(0, -1) }
+          : summary;
+    } else structure.compositions.pop();
+    structure.truncated = true;
+  }
 }

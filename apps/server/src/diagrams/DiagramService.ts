@@ -11,9 +11,14 @@ import {
   DiagramHostResponse,
   DiagramBatch,
   DiagramHostComposeResult,
+  DiagramAnnotatedCapture,
+  DiagramAnnotations,
+  DIAGRAM_ANNOTATION_MAX_IMAGES,
   DIAGRAM_LEGACY_HOST_OPERATIONS,
   DIAGRAM_MAX_READ_RECORDS,
   DIAGRAM_MAX_DOCUMENT_BYTES,
+  type DiagramPrepareAnnotationsInput,
+  type DiagramPreparedAnnotations,
   type DiagramTarget,
   type DiagramReadInput,
   type DiagramReadResult,
@@ -48,6 +53,7 @@ import * as Exit from "effect/Exit";
 import type * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
+import type * as Duration from "effect/Duration";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import { readCompositions, validateComposeRequest } from "@t3tools/diagram-compose/model";
@@ -55,7 +61,7 @@ import * as ServerConfig from "../config.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
-import { diagramStructure } from "./diagramStructure.ts";
+import { diagramStructure, fitStructure } from "./diagramStructure.ts";
 import {
   DiagramDatabase,
   DiagramRoomError,
@@ -119,6 +125,13 @@ export class DiagramService extends Context.Service<
     readonly prepareContext: (
       input: DiagramCaptureInput & { allowImageUnavailable?: boolean },
     ) => Effect.Effect<DiagramPreparedContext, DiagramOperationError>;
+    /** Badges number exactly these annotations, so the capture is never cached as a preview. */
+    readonly captureAnnotated: (
+      input: DiagramPrepareAnnotationsInput,
+    ) => Effect.Effect<DiagramAnnotatedCapture, DiagramOperationError>;
+    readonly prepareAnnotations: (
+      input: DiagramPrepareAnnotationsInput,
+    ) => Effect.Effect<DiagramPreparedAnnotations, DiagramOperationError>;
     readonly cachedPreview: (
       input: DiagramCaptureInput,
     ) => Effect.Effect<DiagramCapture | null, DiagramOperationError>;
@@ -215,8 +228,67 @@ const assetClaim = Schema.Struct({
   expires: Schema.Number,
 });
 const decodeHostComposeResult = Schema.decodeUnknownSync(DiagramHostComposeResult);
+const decodeAnnotatedCapture = Schema.decodeUnknownSync(DiagramAnnotatedCapture);
+const encodeAnnotations = Schema.encodeSync(DiagramAnnotations);
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
+
+/** Shapes listed in a chat context's structure before byte trimming. */
+const CONTEXT_STRUCTURE_SHAPES = 40;
+const OUTDATED_EDITORS_MESSAGE =
+  "Connected editors are too old for Canvas comments. Update T3 Code on the device with this diagram open.";
+const NO_EDITOR_MESSAGE = "Open this diagram in T3 Code web or desktop to capture comments.";
+
+/** The page a shape sits on through its parents; null when the id is not a shape on a page. */
+function shapePageId(records: ReadonlyMap<string, TLRecord>, id: string) {
+  let current = records.get(id);
+  if (current?.typeName !== "shape") return null;
+  const seen = new Set<string>();
+  while (current?.typeName === "shape" && !seen.has(current.id)) {
+    seen.add(current.id);
+    current = records.get(current.parentId);
+  }
+  return current?.typeName === "page" ? current.id : null;
+}
+
+/**
+ * JSON length of the context record payload a client builds from this send, minus its structure.
+ * Geometry and image ids do not exist before capture, so they are sized wide: long coordinates,
+ * every annotation in the overview and again in one detail image.
+ */
+function annotationsPayloadChars(
+  input: DiagramPrepareAnnotationsInput,
+  environmentId: string,
+  revision: number,
+) {
+  const ids = input.annotations.map((annotation) => annotation.id);
+  const coordinate = -123_456.789_012_345_67;
+  const bounds = { x: coordinate, y: coordinate, w: coordinate, h: coordinate };
+  const image = (role: "overview" | "detail", annotationIds: readonly string[]) => ({
+    role,
+    annotationIds,
+    bounds,
+    width: 2048,
+    height: 2048,
+    contextId: "image_00000000-0000-0000-0000-000000000000",
+  });
+  const detailCount = DIAGRAM_ANNOTATION_MAX_IMAGES - 1;
+  const details = Array.from({ length: detailCount }, (_, slot) =>
+    ids.filter((_, index) => index % detailCount === slot),
+  ).filter((group) => group.length > 0);
+  return JSON.stringify({
+    environmentId,
+    projectId: input.projectId,
+    diagramId: input.diagramId,
+    pageId: input.pageId,
+    annotations: input.annotations,
+    capture: {
+      revision,
+      resolved: ids.map((id) => ({ id, bounds, marker: { x: coordinate, y: coordinate } })),
+      images: [image("overview", ids), ...details.map((group) => image("detail", group))],
+    },
+  }).length;
+}
 
 function record(value: unknown, embeddedAsset = false): TLRecord {
   try {
@@ -760,6 +832,7 @@ export const make = Effect.gen(function* () {
       value: unknown;
       clientId?: string;
       threadId?: ThreadId;
+      timeout?: Duration.Input;
     },
   ) {
     const host = [...hosts.values()]
@@ -798,7 +871,7 @@ export const make = Effect.gen(function* () {
             });
     };
     const response = yield* Deferred.await(result).pipe(
-      Effect.timeoutOption(20_000),
+      Effect.timeoutOption(input.timeout ?? 20_000),
       Effect.ensuring(Effect.sync(() => pending.delete(requestId))),
       Effect.onExit((exit) => (Exit.isFailure(exit) ? Effect.sync(release) : Effect.void)),
     );
@@ -1128,7 +1201,7 @@ export const make = Effect.gen(function* () {
               records,
               diagram.revision,
               {
-                limit: 40,
+                limit: CONTEXT_STRUCTURE_SHAPES,
                 ...(scope.kind === "selection"
                   ? { recordIds: scope.shapeIds, pageId: scope.pageId }
                   : scope.kind === "viewport"
@@ -1141,7 +1214,7 @@ export const make = Effect.gen(function* () {
               scope.kind === "selection" &&
               structure.shapes.length !==
                 Math.min(
-                  40,
+                  CONTEXT_STRUCTURE_SHAPES,
                   scope.shapeIds.filter(
                     (id) => !compositions.isMember(id) && !compositions.compositionOf(id),
                   ).length,
@@ -1154,29 +1227,7 @@ export const make = Effect.gen(function* () {
             );
             if (structureBudget < 1024)
               throw new DiagramOperationError({ code: "scope-unavailable" });
-            // Shapes and compositions are sorted focused page first, so popping drops other pages
-            // first; the focused page's shapes outrank other pages' compositions. Selected
-            // members go before the summaries that name them.
-            const elsewhere = (item: { pageId: string } | undefined) =>
-              item !== undefined && item.pageId !== scope.pageId;
-            while (Buffer.byteLength(encodeJson(structure)) > structureBudget) {
-              const trimmable = structure.compositions.findLastIndex(
-                (item) => item.selectedMembers !== undefined,
-              );
-              if (structure.bindings.length) structure.bindings.pop();
-              else if (elsewhere(structure.shapes.at(-1))) structure.shapes.pop();
-              else if (elsewhere(structure.compositions.at(-1))) structure.compositions.pop();
-              else if (structure.shapes.length) structure.shapes.pop();
-              else if (structure.pages.length) structure.pages.pop();
-              else if (trimmable !== -1) {
-                const { selectedMembers = [], ...summary } = structure.compositions[trimmable]!;
-                structure.compositions[trimmable] =
-                  selectedMembers.length > 1
-                    ? { ...summary, selectedMembers: selectedMembers.slice(0, -1) }
-                    : summary;
-              } else structure.compositions.pop();
-              structure.truncated = true;
-            }
+            fitStructure(structure, structureBudget, scope.pageId);
             return { diagram, structure };
           }),
         ),
@@ -1215,6 +1266,102 @@ export const make = Effect.gen(function* () {
       structure: after.structure,
       image: captured,
     } satisfies DiagramPreparedContext;
+  });
+  /** Fails before any host is asked when the page or a target shape is gone from it. */
+  const annotatedPage = (input: DiagramPrepareAnnotationsInput) =>
+    targetMetadata(input).pipe(
+      Effect.andThen(
+        attempt(() => {
+          const diagram = metadata(input);
+          const records = database.read(input.diagramId);
+          const byId = new Map(records.map((item) => [item.id as string, item]));
+          if (byId.get(input.pageId)?.typeName !== "page")
+            throw new DiagramOperationError({ code: "scope-unavailable" });
+          const issues = input.annotations.flatMap(({ number, target }) =>
+            target.kind === "shapes" &&
+            target.shapeIds.some((id) => shapePageId(byId, id) !== input.pageId)
+              ? [
+                  {
+                    path: `annotations/${number}`,
+                    message: `Comment ${number} targets a shape that was deleted or moved to another page. Retarget or delete it.`,
+                  },
+                ]
+              : [],
+          );
+          if (issues.length)
+            throw new DiagramOperationError({
+              code: "scope-unavailable",
+              // The error schema carries at most 20 issues.
+              details: { issues: issues.slice(0, 20) },
+            });
+          return { diagram, records };
+        }),
+      ),
+    );
+  const captureAnnotated = Effect.fn("DiagramService.captureAnnotated")(function* (
+    input: DiagramPrepareAnnotationsInput,
+  ) {
+    const { diagram } = yield* annotatedPage(input);
+    if (![...hosts.values()].some((host) => host.operations.includes("annotate")))
+      return yield* new DiagramOperationError({
+        code: "no-editor",
+        details: {
+          issues: [
+            {
+              path: "editor",
+              message: hosts.size > 0 ? OUTDATED_EDITORS_MESSAGE : NO_EDITOR_MESSAGE,
+            },
+          ],
+        },
+      });
+    const response = yield* invoke({
+      projectId: input.projectId,
+      diagramId: input.diagramId,
+      operation: "annotate",
+      value: { pageId: input.pageId, revision: diagram.revision, annotations: input.annotations },
+      timeout: "45 seconds",
+    });
+    const captured = yield* attempt(() => decodeAnnotatedCapture(response.value));
+    return yield* attempt(() => {
+      const current = metadata(input);
+      if (
+        captured.diagramId !== input.diagramId ||
+        captured.pageId !== input.pageId ||
+        captured.revision !== current.revision ||
+        encodeJson(encodeAnnotations(captured.annotations)) !==
+          encodeJson(encodeAnnotations(input.annotations))
+      )
+        throw new DiagramOperationError({ code: "stale" });
+      return captured;
+    });
+  });
+  const prepareAnnotations = Effect.fn("DiagramService.prepareAnnotations")(function* (
+    input: DiagramPrepareAnnotationsInput,
+  ) {
+    const { diagram, records } = yield* annotatedPage(input);
+    const structure = yield* attempt(() => {
+      const structure = diagramStructure(records, diagram.revision, {
+        limit: CONTEXT_STRUCTURE_SHAPES,
+        pageId: input.pageId,
+        focus: {
+          shapeIds: input.annotations.flatMap(({ target }) =>
+            target.kind === "shapes" ? target.shapeIds : [],
+          ),
+          regions: input.annotations.flatMap(({ target }) =>
+            target.kind === "region" ? [target.bounds] : [],
+          ),
+        },
+      });
+      const budget = 60_000 - annotationsPayloadChars(input, environmentId, diagram.revision);
+      if (budget < 1024) throw new DiagramOperationError({ code: "too-large" });
+      fitStructure(structure, budget, input.pageId);
+      return structure;
+    });
+    const capture = yield* captureAnnotated(input);
+    const after = yield* targetMetadata(input);
+    if (capture.revision !== diagram.revision || after.revision !== diagram.revision)
+      return yield* new DiagramOperationError({ code: "stale" });
+    return { diagram: after, structure, capture } satisfies DiagramPreparedAnnotations;
   });
   const signAsset = (input: DiagramTarget & { assetId: string }) => {
     const payload = Buffer.from(encodeJson({ ...input, expires: now() + 3_600_000 })).toString(
@@ -1314,6 +1461,8 @@ export const make = Effect.gen(function* () {
     receipt,
     capture,
     prepareContext,
+    captureAnnotated,
+    prepareAnnotations,
     cachedPreview,
     preview,
     importDocument,

@@ -48,6 +48,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.diagramsReceipt]: AuthOrchestrationReadScope,
   [WS_METHODS.diagramsCapture]: AuthOrchestrationReadScope,
   [WS_METHODS.diagramsPrepareContext]: AuthOrchestrationReadScope,
+  [WS_METHODS.diagramsPrepareAnnotations]: AuthOrchestrationReadScope,
   [WS_METHODS.diagramsImport]: AuthOrchestrationOperateScope,
   [WS_METHODS.diagramsExport]: AuthOrchestrationReadScope,
   [WS_METHODS.diagramsCount]: AuthOrchestrationReadScope,
