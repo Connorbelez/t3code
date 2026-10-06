@@ -26,6 +26,7 @@ function portsFor(records: readonly TLRecord[]): ComposePorts {
       return { w: 8 * Math.max(...lines.map((line) => line.length)), h: 22 * lines.length };
     },
     rehearse: rehearse(records),
+    parseMermaid: () => Promise.reject(new Error("not expected")),
   };
 }
 
@@ -263,7 +264,11 @@ describe("compose", () => {
       throw new Error("not expected");
     };
     expect(
-      await compose({ spec: CHECKOUT }, records, { measureText: fail, rehearse: fail }),
+      await compose({ spec: CHECKOUT }, records, {
+        measureText: fail,
+        rehearse: fail,
+        parseMermaid: fail,
+      }),
     ).toEqual({
       changes: null,
       counts: { created: 0, updated: 0, kept: 6, removed: 0 },
@@ -336,6 +341,7 @@ const failingPorts: ComposePorts = {
   measureText: () => {
     throw new Error("measured");
   },
+  parseMermaid: () => Promise.reject(new Error("parsed")),
   rehearse: () => {
     throw new Error("rehearsed");
   },
@@ -642,7 +648,7 @@ describe("validateComposeRequest", () => {
           {
             path: "spec.nodes[0].kind",
             message:
-              'unknown kind "proces" for kit flow; valid kinds: start, end, process, decision, io, subprocess',
+              'unknown kind "proces" for kit flow; valid kinds: start, end, process, decision, io, subprocess, group, note',
           },
           { path: "spec.nodes[1].body", message: 'kind "process" takes no body fields' },
           { path: "spec.nodes[2].key", message: 'duplicate key "a"' },
@@ -692,5 +698,214 @@ describe("readCompositions", () => {
     expect(view.compositionOf("shape:pasted")).toBeUndefined();
     expect(view.compositionOf(original?.id ?? "")?.key).toBe("checkout");
     expect(view.summaries[0]?.memberCount).toBe(6);
+  });
+});
+
+const MACHINE: DiagramSpec = {
+  kit: "state",
+  key: "machine",
+  nodes: [
+    { key: "start", kind: "initial" },
+    { key: "idle" },
+    { key: "busy", kind: "composite", label: "Busy" },
+    { key: "loading", parent: "busy" },
+    { key: "saving", parent: "busy" },
+    { key: "hint", kind: "note", label: "Polls", body: { on: "loading" } },
+  ],
+  edges: [
+    ["start", "idle"],
+    ["idle", "loading", "fetch [online] / spin"],
+    ["loading", "saving"],
+    ["busy", "saving", "save"],
+  ],
+};
+
+describe("boundaries, notes and the state kit", () => {
+  const byKey = (result: DiagramHostComposeResult, key: string) =>
+    shapes(result).find((shape) => memberKey(shape) === key);
+
+  it("nests members in boundary frames and parents arrows the way tldraw would", async () => {
+    const result = await run(MACHINE);
+    const frame = shapes(result).find((shape) => shape.type === "frame" && !memberKey(shape));
+    const busy = byKey(result, "busy");
+    expect(busy && { type: busy.type, parentId: busy.parentId, props: busy.props }).toEqual({
+      type: "frame",
+      parentId: frame?.id,
+      props: { w: 232, h: 264, name: "Busy", color: "black" },
+    });
+    expect(byKey(result, "loading")?.parentId).toBe(busy?.id);
+    expect(byKey(result, "saving")?.parentId).toBe(busy?.id);
+    // Across frames the arrow goes to the common ancestor; into a boundary from that boundary, to it.
+    expect(byKey(result, "idle→loading:transition")?.parentId).toBe(frame?.id);
+    expect(byKey(result, "loading→saving:transition")?.parentId).toBe(busy?.id);
+    expect(byKey(result, "busy→saving:transition")?.parentId).toBe(busy?.id);
+    // A boundary always encloses its children, so only genuine collisions are reported.
+    expect(result.overlaps).toEqual([]);
+  });
+
+  it("draws markers without labels and notes as tldraw notes with a dashed attach line", async () => {
+    const result = await run(MACHINE);
+    expect(byKey(result, "start")?.props).toMatchObject({
+      geo: "ellipse",
+      fill: "fill",
+      w: 32,
+      h: 32,
+      richText: { type: "doc", content: [{ type: "paragraph" }] },
+    });
+    expect(byKey(result, "hint")).toMatchObject({
+      type: "note",
+      props: {
+        color: "yellow",
+        growY: 0,
+        fontSizeAdjustment: 1,
+        textLastEditedBy: null,
+        richText: { content: [{ content: [{ text: "Polls" }] }] },
+      },
+    });
+    const line = byKey(result, "hint→loading:attach");
+    expect(line?.props).toMatchObject({
+      kind: "arc",
+      dash: "dashed",
+      color: "grey",
+      arrowheadStart: "none",
+      arrowheadEnd: "none",
+    });
+    const ends = ((result.changes?.puts ?? []) as TLRecord[]).flatMap((record) =>
+      record.typeName === "binding" && record.fromId === line?.id ? [record.toId] : [],
+    );
+    expect(ends).toEqual([byKey(result, "hint")?.id, byKey(result, "loading")?.id]);
+  });
+
+  it("treats an omitted note body like an empty one", async () => {
+    const note = (body?: object): DiagramSpec => ({
+      kit: "flow",
+      key: "notes",
+      nodes: [{ key: "n", kind: "note", ...(body ? { body } : {}) }],
+    });
+    expect(await run(note())).toEqual(await run(note({})));
+  });
+
+  it("grows a kept boundary to hold a child added later, without marking it edited", async () => {
+    const records = applied(BASE, await run(MACHINE));
+    const result = await run(
+      {
+        ...MACHINE,
+        nodes: [...MACHINE.nodes, { key: "retrying", parent: "busy" }],
+        edges: [...(MACHINE.edges ?? []), ["saving", "retrying", "failed"]],
+      },
+      records,
+    );
+    expect(result.counts).toEqual({ created: 2, updated: 0, kept: 11, removed: 0 });
+    const busy = byKey(result, "busy");
+    expect(busy?.props).toMatchObject({ w: 232, h: 400 });
+    const after = applied(records, result);
+    expect(readCompositions(after).summaries[0]?.editedCount).toBe(0);
+    expect(byKey(result, "retrying")?.parentId).toBe(busy?.id);
+  });
+
+  it("relays out a dragged-out member back into its boundary, and again to no change", async () => {
+    const first = await run(MACHINE);
+    const frameId = shapes(first).find((shape) => shape.type === "frame" && !memberKey(shape))?.id;
+    const loadingId = byKey(first, "loading")?.id;
+    const records = applied(BASE, first).map((record) =>
+      record.id === loadingId && record.typeName === "shape" && frameId
+        ? { ...record, parentId: frameId, x: 600, y: 600 }
+        : record,
+    );
+    const relaid = await compose({ spec: MACHINE, relayout: true }, records, portsFor(records));
+    expect(byKey(relaid, "loading")).toMatchObject({ parentId: byKey(first, "busy")?.id });
+    const after = applied(records, relaid);
+    expect(
+      (await compose({ spec: MACHINE, relayout: true }, after, portsFor(after))).changes,
+    ).toBeNull();
+  });
+
+  it("composes Mermaid through the host's parser into the same batch as the spec", async () => {
+    const seen: unknown[] = [];
+    const source = { key: "machine", text: "stateDiagram-v2" };
+    const result = await compose({ mermaid: source }, BASE, {
+      ...portsFor(BASE),
+      parseMermaid: (input) => {
+        seen.push(input);
+        return Promise.resolve(MACHINE);
+      },
+    });
+    expect(seen).toEqual([source]);
+    expect(result).toEqual(await run(MACHINE));
+  });
+});
+
+describe("validating boundaries, notes and sources", () => {
+  const issuesOf = (request: Parameters<typeof validateComposeRequest>[0]) => {
+    try {
+      validateComposeRequest(request);
+    } catch (cause) {
+      return cause;
+    }
+    return undefined;
+  };
+
+  it("teaches valid parents, note fields and attach targets", () => {
+    expect(
+      issuesOf({
+        spec: {
+          kit: "state",
+          key: "bad",
+          nodes: [
+            { key: "a", kind: "composite", parent: "b" },
+            { key: "b", kind: "composite", parent: "a" },
+            { key: "c", parent: "d" },
+            { key: "d" },
+            { key: "e", parent: "zz" },
+            { key: "n", kind: "note", body: { on: "zz" } },
+            { key: "m", kind: "note", body: "a" },
+            { key: "k", kind: "note", body: { color: "red" } },
+          ],
+        },
+      }),
+    ).toMatchObject({
+      code: "invalid-spec",
+      details: {
+        issues: [
+          { path: "spec.nodes[6].body", message: "body must be an object with fields: on" },
+          {
+            path: "spec.nodes[7].body.color",
+            message: 'unknown field "color" for kind "note"; valid fields: on',
+          },
+          { path: "spec.nodes[0].parent", message: "parents loop: a → b → a" },
+          { path: "spec.nodes[1].parent", message: "parents loop: b → a → b" },
+          {
+            path: "spec.nodes[2].parent",
+            message: '"d" is a state, which cannot hold nodes; parents must be composite nodes',
+          },
+          {
+            path: "spec.nodes[4].parent",
+            message: 'unknown parent "zz"; valid parents are composite nodes: a, b',
+          },
+          {
+            path: "spec.nodes[5].body.on",
+            message: 'unknown node "zz"; valid nodes: a, b, c, d, e, m, k',
+          },
+        ],
+      },
+    });
+  });
+
+  it("returns the Mermaid key without parsing and needs exactly one source", () => {
+    expect(validateComposeRequest({ mermaid: { key: "flow", text: "not parsed here" } })).toBe(
+      "flow",
+    );
+    expect(issuesOf({})).toMatchObject({
+      code: "invalid-spec",
+      details: {
+        issues: [
+          { path: "spec", message: "pass a spec, or Mermaid as mermaid: { key, text, title? }" },
+        ],
+      },
+    });
+    expect(issuesOf({ spec: CHECKOUT, mermaid: { key: "x", text: "" } })).toMatchObject({
+      code: "invalid-spec",
+      details: { issues: [{ path: "mermaid", message: "pass either spec or mermaid, not both" }] },
+    });
   });
 });

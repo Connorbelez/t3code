@@ -23,7 +23,7 @@ const StoredNode = Schema.Struct({
   label: Schema.String,
   parent: Schema.NullOr(Schema.String),
   ref: Schema.NullOr(DiagramSpecRef),
-  body: Schema.Null,
+  body: Schema.NullOr(Schema.JsonObject),
 });
 const StoredEdge = Schema.Struct({
   role: Schema.Literal("edge"),

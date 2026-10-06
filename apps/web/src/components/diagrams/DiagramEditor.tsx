@@ -396,6 +396,7 @@ function MountedDiagramEditor(props: DiagramEditorProps & { onAdoptionLost: () =
           },
           rehearse: (puts, deletes) =>
             new Map(Object.entries(rehearseDiagramChanges(editor, records, puts, deletes))),
+          parseMermaid: async (source) => (await import("./mermaidSpec")).mermaidToSpec(source),
         });
       },
     };

@@ -4,12 +4,13 @@ import {
   type TLArrowShape,
   type TLFrameShape,
   type TLGeoShape,
+  type TLNoteShape,
   type TLParentId,
   type TLRecord,
   type TLShape,
 } from "@tldraw/tlschema";
 
-import { compareIndex, originOf, pageIdOf, type RecordIndex, shapeOf } from "./canvas.ts";
+import { compareIndex, originOf, pageBox, pageIdOf, type RecordIndex, shapeOf } from "./canvas.ts";
 import {
   encodeMeta,
   fingerprint,
@@ -21,9 +22,9 @@ import {
   type PartName,
   type StoredMember,
 } from "./identity.ts";
-import { indexBetween, indexesAbove, type IndexKey } from "./indexKeys.ts";
-import { LOOKS } from "./kit.ts";
-import type { Placement } from "./layout.ts";
+import { indexBetween, type IndexKey } from "./indexKeys.ts";
+import { edgeKindOf, LOOKS } from "./kit.ts";
+import { NOTE_SIZE, type Placement } from "./layout.ts";
 import type { Decision } from "./merge.ts";
 import type { CurrentComposition, CurrentMember } from "./membership.ts";
 import type { ComposeSpec } from "./spec.ts";
@@ -106,60 +107,124 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
   const written = decisions.flatMap((decision) =>
     decision.do === "create" || decision.do === "overwrite" ? [decision] : [],
   );
-  const createdNodes = written.filter(
-    (decision) => decision.do === "create" && decision.draft.spec.role === "node",
-  ).length;
-  const newIndexes = indexesAbove(maxChildIndex(final, frame.id), createdNodes).values();
+  const lastIndex = new Map<string, IndexKey | null>();
+  /** New children go above everything already in their parent, in member order. */
+  const nextIndex = (parentId: string): IndexKey => {
+    const index = indexBetween(lastIndex.get(parentId) ?? maxChildIndex(final, parentId), null);
+    lastIndex.set(parentId, index);
+    return index;
+  };
+  const shapeIdOf = (key: string | null) => (key === null ? frame.id : at(key, "main"));
   const nodes: TLShape[] = [];
-  for (const decision of written) {
-    const node = decision.draft.spec;
+  // Boundaries before what they hold, so every parent exists when its children are placed.
+  const parents = new Map(spec.nodes.map((node) => [node.key, node.parent]));
+  const depthOf = (key: string): number => {
+    let depth = 0;
+    for (let parent = parents.get(key); parent; parent = parents.get(parent)) depth++;
+    return depth;
+  };
+  const writtenNodes = written
+    .flatMap((decision) => {
+      const node = decision.draft.spec;
+      return node.role === "node" ? [{ decision, node, depth: depthOf(node.key) }] : [];
+    })
+    .sort((a, b) => a.depth - b.depth);
+  for (const { decision, node } of writtenNodes) {
     const box = placement.nodes.get(node.key);
-    if (node.role !== "node" || !box) continue;
     const kind = spec.kit.nodeKinds[node.kind];
-    if (!kind) continue;
+    if (!box || !kind) continue;
     const base = decision.do === "overwrite" ? mainShape(decision.current) : undefined;
-    const index = base?.index ?? newIndexes.next().value;
-    if (!index) continue;
-    const record: TLGeoShape = {
+    const moved = placement.parents.get(node.key);
+    const parentId = moved === undefined ? (base?.parentId ?? frame.id) : shapeIdOf(moved);
+    const shape = {
       id: at(node.key, "main"),
       typeName: "shape",
-      type: "geo",
       x: box.x,
       y: box.y,
       rotation: base?.rotation ?? 0,
-      index,
-      parentId: base?.parentId ?? frame.id,
+      index: base?.parentId === parentId ? base.index : nextIndex(parentId),
+      parentId,
       isLocked: base?.isLocked ?? false,
       opacity: base?.opacity ?? 1,
       meta: base?.meta ?? {},
-      props: {
-        geo: kind.geo,
-        dash: kind.dash ?? look.dash,
-        url: "",
-        w: box.w,
-        h: box.h,
-        growY: 0,
-        scale: 1,
-        flipX: false,
-        flipY: false,
-        labelColor: "black",
-        color: kind.color,
-        fill: look.fill,
-        size: "m",
-        font: look.font,
-        align: "middle",
-        verticalAlign: "middle",
-        richText: toRichText(node.label),
-      },
-    };
+    } as const;
+    const record = ((): TLShape => {
+      switch (kind.shape) {
+        case "geo":
+          return {
+            ...shape,
+            type: "geo",
+            props: {
+              geo: kind.geo,
+              dash: kind.dash ?? look.dash,
+              url: "",
+              w: box.w,
+              h: box.h,
+              growY: 0,
+              scale: 1,
+              flipX: false,
+              flipY: false,
+              labelColor: "black",
+              color: kind.color,
+              fill: kind.fill ?? look.fill,
+              size: "m",
+              font: look.font,
+              align: "middle",
+              verticalAlign: "middle",
+              richText: toRichText(kind.hideLabel ? "" : node.label),
+            },
+          } satisfies TLGeoShape;
+        case "frame":
+          return {
+            ...shape,
+            type: "frame",
+            props: { w: box.w, h: box.h, name: node.label, color: "black" },
+          } satisfies TLFrameShape;
+        case "note":
+          return {
+            ...shape,
+            type: "note",
+            props: {
+              color: kind.color,
+              richText: toRichText(node.label),
+              size: "m",
+              font: look.font,
+              align: "middle",
+              verticalAlign: "middle",
+              labelColor: "black",
+              growY: box.h - NOTE_SIZE,
+              fontSizeAdjustment: 1,
+              url: "",
+              scale: 1,
+              textLastEditedBy: null,
+            },
+          } satisfies TLNoteShape;
+        default: {
+          const _exhaustive: never = kind;
+          return _exhaustive;
+        }
+      }
+    })();
     nodes.push(remember(withPartMeta(record, spec.key, epoch, node, "main")));
   }
-  // Relayout moves kept nodes; their content, size and parent stay as the canvas has them.
+  // Relayout moves kept nodes, back into their boundary; a kept boundary also takes its new size
+  // to hold its children. Size is not content, so neither makes a member edited.
   for (const decision of decisions) {
     const box = placement.nodes.get(decision.key);
     const main =
       decision.do === "keep" && decision.current ? mainShape(decision.current) : undefined;
-    if (box && main) nodes.push(remember({ ...main, x: box.x, y: box.y }));
+    if (!box || !main) continue;
+    const moved = placement.parents.get(decision.key);
+    const parentId = moved === undefined ? main.parentId : shapeIdOf(moved);
+    const index = parentId === main.parentId ? main.index : nextIndex(parentId);
+    const record = { ...main, x: box.x, y: box.y, parentId, index };
+    nodes.push(
+      remember(
+        record.type === "frame"
+          ? { ...record, props: { ...record.props, w: box.w, h: box.h } }
+          : record,
+      ),
+    );
   }
 
   const placeArrow = arrowPlacer(final);
@@ -170,7 +235,7 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
     if (edge.role !== "edge") continue;
     const start = shapeOf(final, at(edge.from, "main"));
     const end = shapeOf(final, at(edge.to, "main"));
-    const kind = spec.kit.edgeKinds[edge.kind];
+    const kind = edgeKindOf(spec.kit, edge.kind);
     if (!start || !end || !kind) continue;
     const id = at(edge.key, "main");
     const base = decision.do === "overwrite" ? mainShape(decision.current) : undefined;
@@ -198,7 +263,7 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
       opacity: base?.opacity ?? 1,
       meta: base?.meta ?? {},
       props: {
-        kind: spec.kit.arrowKind,
+        kind: kind.arrowKind ?? spec.kit.arrowKind,
         labelColor: "black",
         color: kind.color,
         fill: "none",
@@ -285,12 +350,8 @@ function maxChildIndex(final: RecordIndex, parentId: string): string | null {
 }
 
 function center(final: RecordIndex, shape: TLShape): { x: number; y: number } {
-  const origin = originOf(final, shape.parentId);
-  const size =
-    shape.type === "geo"
-      ? { w: shape.props.w, h: shape.props.h + shape.props.growY }
-      : { w: 0, h: 0 };
-  return { x: origin.x + shape.x + size.w / 2, y: origin.y + shape.y + size.h / 2 };
+  const box = pageBox(final, shape);
+  return { x: box.x + box.w / 2, y: box.y + box.h / 2 };
 }
 
 function hasAncestor(final: RecordIndex, shape: TLShape, ancestorId: string): boolean {

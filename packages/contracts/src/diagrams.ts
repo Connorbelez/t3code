@@ -393,7 +393,7 @@ export const DiagramMetadataChange = Schema.Struct({
 });
 export type DiagramMetadataChange = typeof DiagramMetadataChange.Type;
 
-export const DIAGRAM_KITS = ["flow"] as const;
+export const DIAGRAM_KITS = ["flow", "state"] as const;
 export const DiagramKit = Schema.Literals(DIAGRAM_KITS);
 export type DiagramKit = typeof DiagramKit.Type;
 
@@ -467,9 +467,21 @@ export const DiagramSpec = Schema.Struct({
 });
 export type DiagramSpec = typeof DiagramSpec.Type;
 
-/** What the editor host needs to compose; the server adds the target and request ID. */
+/** Mermaid text the editor host converts to a spec; its node IDs become member keys. */
+export const DiagramMermaidSource = Schema.Struct({
+  key: DiagramCompositionKey,
+  text: Schema.String.check(Schema.isMaxLength(64 * 1024)),
+  title: Schema.optional(Schema.String.check(Schema.isMaxLength(200))),
+});
+export type DiagramMermaidSource = typeof DiagramMermaidSource.Type;
+
+/**
+ * What the editor host needs to compose, with exactly one of `spec` or `mermaid`; the server adds
+ * the target and request ID.
+ */
 export const DiagramComposeRequest = Schema.Struct({
-  spec: DiagramSpec,
+  spec: Schema.optional(DiagramSpec),
+  mermaid: Schema.optional(DiagramMermaidSource),
   /** Repositions every member; otherwise existing members stay where they are. */
   relayout: Schema.optional(Schema.Boolean),
 });

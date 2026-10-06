@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import type { DiagramComposeRequest } from "@t3tools/contracts";
+import type { DiagramComposeRequest, DiagramHostComposeResult } from "@t3tools/contracts";
 import { compose, type ComposePorts } from "@t3tools/diagram-compose/compose";
 import {
   Editor,
@@ -182,7 +182,7 @@ describe("native batch preflight", () => {
   });
 });
 
-const checkout: DiagramComposeRequest = {
+const checkout = {
   spec: {
     kit: "flow",
     key: "checkout",
@@ -204,19 +204,90 @@ const checkout: DiagramComposeRequest = {
       ["receipt", "end"],
     ],
   },
-};
+} satisfies DiagramComposeRequest;
 const measureText: ComposePorts["measureText"] = (text, font) => {
   const width = text.length * font.fontSize * 0.6;
   const lines = font.maxWidth === null ? 1 : Math.max(1, Math.ceil(width / font.maxWidth));
   return { w: Math.min(width, font.maxWidth ?? width), h: lines * font.fontSize * 1.35 };
 };
+// Nested boundaries, arrows between frames and into them, and notes attached across frames.
+const orders = {
+  spec: {
+    kit: "state",
+    key: "orders",
+    title: "Orders",
+    nodes: [
+      { key: "start", kind: "initial" },
+      { key: "draft" },
+      { key: "open", kind: "composite", label: "Open" },
+      { key: "openStart", kind: "initial", parent: "open" },
+      { key: "paying", parent: "open" },
+      { key: "check", kind: "choice", parent: "open" },
+      { key: "shipping", kind: "composite", label: "Shipping", parent: "open" },
+      { key: "packed", parent: "shipping" },
+      { key: "sent", parent: "shipping" },
+      { key: "done", kind: "final" },
+      { key: "why", kind: "note", label: "Retries card twice", body: { on: "paying" } },
+      {
+        key: "late",
+        kind: "note",
+        label: "Courier picks up at 5pm",
+        parent: "shipping",
+        body: { on: "draft" },
+      },
+    ],
+    edges: [
+      ["start", "draft"],
+      ["draft", "paying", "submit [valid] / reserve"],
+      ["openStart", "paying"],
+      ["paying", "check"],
+      ["check", "packed", "[paid]"],
+      ["check", "draft", "[declined]"],
+      ["packed", "sent", "pickup"],
+      ["sent", "done"],
+      ["open", "draft", "cancel"],
+      ["shipping", "done", "lost"],
+    ],
+  },
+} satisfies DiagramComposeRequest;
+const grouped = {
+  spec: {
+    kit: "flow",
+    key: "grouped",
+    nodes: [
+      { key: "client", kind: "group", label: "Client" },
+      { key: "server", kind: "group", label: "Server" },
+      { key: "click", kind: "start", parent: "client" },
+      { key: "post", parent: "client" },
+      { key: "handle", parent: "server" },
+      { key: "store", kind: "io", parent: "server" },
+      { key: "tip", kind: "note", label: "Idempotent" },
+    ],
+    edges: [
+      ["click", "post"],
+      ["post", "handle", "POST /orders"],
+      ["handle", "store"],
+      ["store", "client", "201"],
+    ],
+  },
+} satisfies DiagramComposeRequest;
 function composeInto(editor: Editor, request: DiagramComposeRequest = checkout) {
   const records = editor.store.serialize("document");
   return compose(request, Object.values(records), {
     measureText,
     rehearse: (puts, deletes) =>
       new Map(Object.entries(rehearseDiagramChanges(editor, records, puts, deletes))),
+    parseMermaid: () => Promise.reject(new Error("not expected")),
   });
+}
+function applyChanges(editor: Editor, changes: NonNullable<DiagramHostComposeResult["changes"]>) {
+  editor.run(
+    () => {
+      editor.store.put(changes.puts.map(parseDocumentRecord));
+      editor.store.remove(changes.deletes as TLRecord["id"][]);
+    },
+    { ignoreShapeLock: true },
+  );
 }
 function addLooseShapes(editor: Editor) {
   const [left, right, arrow] = [
@@ -273,6 +344,74 @@ describe("composed batches", () => {
         .flatMap((shape) => (shape.type === "frame" ? [shape.props.name] : [])),
     ).toEqual(["Checkout"]);
     expect((await composeInto(editor)).changes).toBeNull();
+  });
+
+  it.each([
+    ["a state machine with nested composites and notes", orders, "Orders"],
+    ["a flowchart with groups", grouped, "grouped"],
+  ])("pass the preflight for %s and recompose to no change", async (_, request, title) => {
+    const editor = mount();
+    addLooseShapes(editor);
+    const { changes } = await composeInto(editor, request);
+    assert(changes, "a new composition must produce changes");
+    expect(() => validateDiagramBatch(editor, { requestId: "nested", ...changes })).not.toThrow();
+    applyChanges(editor, changes);
+    expect(
+      editor
+        .getCurrentPageShapes()
+        .flatMap((shape) =>
+          shape.type === "frame" && shape.parentId === editor.getCurrentPageId()
+            ? [shape.props.name]
+            : [],
+        ),
+    ).toEqual([title]);
+    expect((await composeInto(editor, request)).changes).toBeNull();
+  });
+
+  it("moves a node between boundaries and absorbs tldraw's reparenting of a human arrow", async () => {
+    const editor = mount();
+    const { changes } = await composeInto(editor, grouped);
+    assert(changes, "a new composition must produce changes");
+    applyChanges(editor, changes);
+    const shapeOf = (key: string) =>
+      editor
+        .getCurrentPageShapes()
+        .find((shape) => (shape.meta["t3Composition"] as { m?: string } | undefined)?.m === key);
+    const handle = shapeOf("handle");
+    const click = shapeOf("click");
+    assert(handle && click, "members must exist");
+    const arrow = createShapeId("human-arrow");
+    editor.createShape({ id: arrow, type: "arrow" });
+    editor.createBindings(
+      (["start", "end"] as const).map((terminal) => ({
+        type: "arrow",
+        fromId: arrow,
+        toId: terminal === "start" ? click.id : handle.id,
+        props: {
+          terminal,
+          normalizedAnchor: { x: 0.5, y: 0.5 },
+          isExact: false,
+          isPrecise: false,
+          snap: "none",
+        },
+      })),
+    );
+    const moved = await composeInto(editor, {
+      spec: {
+        ...grouped.spec,
+        nodes: grouped.spec.nodes.map((node) =>
+          node.key === "handle" ? { ...node, parent: "client" } : node,
+        ),
+      },
+    });
+    const movedChanges = moved.changes;
+    assert(movedChanges, "moving a node must produce changes");
+    expect(() =>
+      validateDiagramBatch(editor, { requestId: "move", ...movedChanges }),
+    ).not.toThrow();
+    applyChanges(editor, movedChanges);
+    expect(editor.getShape(handle.id)?.parentId).toBe(editor.getShape(click.id)?.parentId);
+    expect(editor.getShape(arrow)?.parentId).toBe(editor.getShape(click.id)?.parentId);
   });
 });
 

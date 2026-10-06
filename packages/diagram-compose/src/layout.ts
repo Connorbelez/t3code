@@ -1,9 +1,9 @@
 import { DiagramOperationError, type DiagramLayoutDirection } from "@t3tools/contracts";
-import type { TLParentId, TLShape } from "@tldraw/tlschema";
+import type { TLParentId } from "@tldraw/tlschema";
 import type { ELK, ElkNode } from "elkjs/lib/elk-api.js";
 
-import { originOf, pageBox, pagesInOrder, type RecordIndex, unionOf } from "./canvas.ts";
-import { LOOKS, type NodeKind, type Size } from "./kit.ts";
+import { localBox, pageBox, pagesInOrder, type RecordIndex, unionOf } from "./canvas.ts";
+import { type GeoKind, LOOKS, type Size } from "./kit.ts";
 import type { Decision } from "./merge.ts";
 import type { CurrentComposition } from "./membership.ts";
 import { listOf, type ComposeSpec } from "./spec.ts";
@@ -23,24 +23,29 @@ interface Box extends Size {
   readonly y: number;
 }
 
-/** tldraw's geo label: base font size 16 scaled for size `m`, inside 16px of padding per side. */
+/** tldraw's geo and note label: base font size 16 scaled for size `m`, inside 16px of padding per side. */
 const LABEL_FONT_SIZE_M = 16 * 1.375;
 const LABEL_PADDING = 16;
 const LABEL_MAX_WIDTH = 240;
+/** tldraw notes are a fixed 200px square that grows down to fit its text. */
+export const NOTE_SIZE = 200;
 const GRID = 8;
 const FRAME_PADDING = 48;
+/** Inside a boundary; its title sits above the frame, outside it. */
+const BOUNDARY_PADDING = 32;
+const EMPTY_BOUNDARY: Size = { w: 160, h: 96 };
 /** Space between a new composition and the content to its left. */
 const PLACEMENT_GAP = 160;
 
 /** Rounded up to the grid so sub-pixel font differences between hosts rarely change a size. */
-function nodeSize(
-  kind: NodeKind,
+function geoSize(
+  kind: GeoKind,
   label: string,
   family: TextFont["family"],
   measure: MeasureText,
 ): Size {
   const text =
-    label.trim() === ""
+    kind.hideLabel || label.trim() === ""
       ? { w: 0, h: 0 }
       : measure(label, { family, fontSize: LABEL_FONT_SIZE_M, maxWidth: LABEL_MAX_WIDTH });
   const room = kind.labelRoom ?? 1;
@@ -50,58 +55,92 @@ function nodeSize(
   };
 }
 
+/** The height tldraw's note gives its label, so a later human edit does not make it jump. */
+function noteSize(label: string, family: TextFont["family"], measure: MeasureText): Size {
+  if (label.trim() === "") return { w: NOTE_SIZE, h: NOTE_SIZE };
+  // tldraw leaves a pixel of slack inside the padding.
+  const maxWidth = NOTE_SIZE - 2 * LABEL_PADDING - 1;
+  const text = measure(label, { family, fontSize: LABEL_FONT_SIZE_M, maxWidth });
+  return { w: NOTE_SIZE, h: Math.max(NOTE_SIZE, Math.ceil(text.h + 2 * LABEL_PADDING)) };
+}
+
 function snap(value: number): number {
   return Math.ceil(value / GRID) * GRID;
 }
 
 const ELK_DIRECTIONS = { down: "DOWN", right: "RIGHT", up: "UP", left: "LEFT" } as const;
 
-interface LayeredResult {
-  /** Top-left per node, relative to the composition frame. */
-  readonly positions: ReadonlyMap<string, { readonly x: number; readonly y: number }>;
-  /** The frame size that holds every node with padding. */
-  readonly size: Size;
+interface LayeredNode {
+  readonly key: string;
+  /** A boundary's key, or null for the composition frame. */
+  readonly parent: string | null;
+  /** Null for a boundary, which ELK sizes around its children. */
+  readonly size: Size | null;
 }
 
-/** Deterministic: fixed seed, input in spec order, model order respected, coordinates rounded. */
+/**
+ * Parent-relative boxes, boundaries sized around their children. Deterministic: fixed seed, input
+ * in spec order, model order respected, coordinates rounded.
+ */
 async function layoutLayered(
-  nodes: ReadonlyArray<{ readonly key: string; readonly size: Size }>,
+  nodes: readonly LayeredNode[],
   edges: ReadonlyArray<readonly [string, string]>,
   direction: DiagramLayoutDirection,
-): Promise<LayeredResult> {
+): Promise<Map<string, Box>> {
   // CommonJS: Node and Vite both resolve the default import to the constructor, but NodeNext and
   // Bundler type resolution disagree about it.
   const { default: Elk } = (await import("elkjs/lib/elk.bundled.js")) as unknown as {
     default: new () => ELK;
   };
+  const children = new Map<string | null, LayeredNode[]>();
+  for (const node of nodes) children.set(node.parent, [...(children.get(node.parent) ?? []), node]);
+  const nested = nodes.some((node) => node.parent !== null);
+  const options = (padding: number) => ({
+    "elk.algorithm": "layered",
+    "elk.direction": ELK_DIRECTIONS[direction],
+    "elk.randomSeed": "1",
+    "elk.edgeRouting": "ORTHOGONAL",
+    "elk.spacing.nodeNode": "48",
+    "elk.layered.spacing.nodeNodeBetweenLayers": "72",
+    // Edges pointing back in spec order are the loops, as a reader of the spec expects. ELK 0.12
+    // crashes on any model-order option across a hierarchy, so nested graphs break cycles
+    // depth-first from the first node, which also follows spec order.
+    "elk.layered.considerModelOrder.strategy": nested ? "NONE" : "NODES_AND_EDGES",
+    "elk.layered.cycleBreaking.strategy": nested ? "DEPTH_FIRST" : "MODEL_ORDER",
+    "elk.padding": `[top=${padding},left=${padding},bottom=${padding},right=${padding}]`,
+  });
+  const toElk = (node: LayeredNode): ElkNode => {
+    const inner = children.get(node.key) ?? [];
+    if (inner.length === 0) {
+      const size = node.size ?? EMPTY_BOUNDARY;
+      return { id: node.key, width: size.w, height: size.h };
+    }
+    return { id: node.key, layoutOptions: options(BOUNDARY_PADDING), children: inner.map(toElk) };
+  };
   const graph: ElkNode = {
     id: "root",
     layoutOptions: {
-      "elk.algorithm": "layered",
-      "elk.direction": ELK_DIRECTIONS[direction],
-      "elk.randomSeed": "1",
-      "elk.edgeRouting": "ORTHOGONAL",
-      "elk.spacing.nodeNode": "48",
-      "elk.layered.spacing.nodeNodeBetweenLayers": "72",
-      "elk.layered.considerModelOrder.strategy": "NODES_AND_EDGES",
-      // Edges pointing back in spec order are the loops, as a reader of the spec expects.
-      "elk.layered.cycleBreaking.strategy": "MODEL_ORDER",
-      "elk.padding": `[top=${FRAME_PADDING},left=${FRAME_PADDING},bottom=${FRAME_PADDING},right=${FRAME_PADDING}]`,
+      ...options(FRAME_PADDING),
+      ...(nested ? { "elk.hierarchyHandling": "INCLUDE_CHILDREN" } : {}),
     },
-    children: nodes.map((node) => ({ id: node.key, width: node.size.w, height: node.size.h })),
+    children: (children.get(null) ?? []).map(toElk),
     edges: edges.map(([from, to], i) => ({ id: `e${i}`, sources: [from], targets: [to] })),
   };
   const laid = await new Elk().layout(graph);
-  const positions = new Map(
-    (laid.children ?? []).map((child): [string, { x: number; y: number }] => [
-      child.id,
-      { x: Math.round(child.x ?? 0), y: Math.round(child.y ?? 0) },
-    ]),
-  );
-  return {
-    positions,
-    size: { w: Math.ceil(laid.width ?? 0), h: Math.ceil(laid.height ?? 0) },
+  const boxes = new Map<string, Box>();
+  const collect = (node: ElkNode) => {
+    for (const child of node.children ?? []) {
+      boxes.set(child.id, {
+        x: Math.round(child.x ?? 0),
+        y: Math.round(child.y ?? 0),
+        w: Math.ceil(child.width ?? 0),
+        h: Math.ceil(child.height ?? 0),
+      });
+      collect(child);
+    }
   };
+  collect(laid);
+  return boxes;
 }
 
 export interface Placement {
@@ -109,15 +148,24 @@ export interface Placement {
   /** Page-space for a new frame; an existing frame keeps its position and only grows. */
   readonly frame: Box;
   /**
-   * Boxes of the nodes this compose writes, in the coordinates of each node's parent: the frame
-   * for new nodes, the current parent otherwise. Kept nodes appear only when relaid out.
+   * Boxes of the nodes this compose writes or moves, in the coordinates of each node's parent:
+   * its boundary (or the frame) when placed, its current parent otherwise. Kept nodes appear only
+   * when relaid out, and kept boundaries also when they grow to hold their children.
    */
   readonly nodes: ReadonlyMap<string, Box>;
+  /**
+   * Where placed nodes go: a boundary's key, or null for the composition frame. Every other node
+   * stays in whatever frame it is in now, wherever a human dragged it.
+   */
+  readonly parents: ReadonlyMap<string, string | null>;
 }
 
 /**
- * Existing nodes stay where they are and are obstacles for new ones; `relayout` lays out every
- * node from scratch. Layout works in frame space. ELK loads only when something needs placing.
+ * Existing nodes stay where they are and are obstacles for new ones in the same boundary;
+ * `relayout` lays out every node from scratch, back inside the boundary its spec names. Nodes the
+ * spec moves to another boundary are placed like new ones. Each boundary, and the frame, works in
+ * its own coordinates and grows to hold what is inside it. ELK loads only when something needs
+ * placing.
  */
 export async function place(
   spec: ComposeSpec,
@@ -128,111 +176,173 @@ export async function place(
   relayout: boolean,
 ): Promise<Placement> {
   const family = LOOKS[spec.kit.look].font;
-  const frameOrigin = current ? originOf(index, current.frame.id) : { x: 0, y: 0 };
   const sizes = new Map<string, Size>();
-  /** Frame-space boxes of nodes on the canvas, with their canvas size. */
-  const canvas = new Map<string, Box & { readonly shape: TLShape }>();
+  /** Parent-relative boxes of nodes on the canvas, with their canvas size. */
+  const canvas = new Map<string, Box & { readonly parentId: string }>();
+  const written = new Set<string>();
+  const moved = new Set<string>();
   for (const decision of decisions) {
     if (decision.do === "create" || decision.do === "overwrite") {
       const node = decision.draft.spec;
-      const kind = node.role === "node" ? spec.kit.nodeKinds[node.kind] : undefined;
-      if (node.role === "node" && kind)
-        sizes.set(node.key, nodeSize(kind, node.label, family, measure));
+      if (node.role !== "node") continue;
+      written.add(node.key);
+      const kind = spec.kit.nodeKinds[node.kind];
+      if (kind?.shape === "geo") sizes.set(node.key, geoSize(kind, node.label, family, measure));
+      if (kind?.shape === "note") sizes.set(node.key, noteSize(node.label, family, measure));
+      const stored = decision.do === "overwrite" ? decision.current.stored : null;
+      if (stored?.role === "node" && stored.parent !== node.parent) moved.add(node.key);
     }
-    const shape =
-      decision.do === "keep" || decision.do === "overwrite"
-        ? decision.current?.parts.get("main")
-        : undefined;
-    if (shape?.typeName === "shape" && shape.type !== "arrow") {
-      const box = pageBox(index, shape);
+    const member = decision.do === "keep" || decision.do === "overwrite" ? decision.current : null;
+    const shape = member?.parts.get("main");
+    if (shape?.typeName === "shape" && member?.stored.role === "node") {
+      const box = localBox(shape);
       canvas.set(decision.key, {
-        ...box,
-        x: box.x - frameOrigin.x,
-        y: box.y - frameOrigin.y,
-        shape,
+        x: shape.x,
+        y: shape.y,
+        w: box.w,
+        h: box.h,
+        parentId: shape.parentId,
       });
     }
   }
-  const sizeOf = (key: string) => sizes.get(key) ?? canvas.get(key);
+  const sizeOf = (key: string): Size | undefined => sizes.get(key) ?? canvas.get(key);
+  const kinds = new Map(spec.nodes.map((node) => [node.key, node.kind]));
+  const isBoundary = (key: string) => spec.kit.nodeKinds[kinds.get(key) ?? ""]?.shape === "frame";
 
-  const laid = relayout
-    ? spec.nodes.filter((node) => sizeOf(node.key))
-    : spec.nodes.filter((node) => sizes.has(node.key) && !canvas.has(node.key));
-  const framed = new Map<string, Box>();
+  const present = spec.nodes.flatMap((node) =>
+    written.has(node.key) || canvas.has(node.key) ? [node.key] : [],
+  );
+  const presentKeys = new Set(present);
+  const specParents = new Map(spec.nodes.map((node) => [node.key, node.parent]));
+  // A boundary a human deleted is gone, so its children fall back to the next boundary up.
+  // Validation rules out parent loops.
+  const scopeOf = (key: string): string | null => {
+    let parent = specParents.get(key) ?? null;
+    while (parent !== null && !presentKeys.has(parent)) parent = specParents.get(parent) ?? null;
+    return parent;
+  };
+
+  const nodes = new Map<string, Box>();
+  const parents = new Map<string, string | null>();
+  const keyOfShape = new Map<string | undefined, string>(
+    Array.from(canvas.keys(), (key) => [current?.members.get(key)?.parts.get("main")?.id, key]),
+  );
+  /**
+   * The boundary a node sits in after this compose: null for the composition frame, undefined
+   * when a human dragged it out of the composition.
+   */
+  const hostOf = (key: string): string | null | undefined => {
+    if (parents.has(key)) return parents.get(key);
+    const parentId = canvas.get(key)?.parentId;
+    if (parentId === undefined) return undefined;
+    return parentId === current?.frame.id ? null : keyOfShape.get(parentId);
+  };
+
+  const laid = present.filter((key) => relayout || !canvas.has(key) || moved.has(key));
   if (laid.length > 0) {
-    const present = spec.nodes.flatMap((node) => {
-      const size = sizeOf(node.key);
-      return size ? [{ key: node.key, size: { w: size.w, h: size.h } }] : [];
-    });
-    const keys = new Set(present.map((node) => node.key));
     const links = spec.edges.flatMap((edge): [string, string][] =>
-      keys.has(edge.from) && keys.has(edge.to) ? [[edge.from, edge.to]] : [],
+      presentKeys.has(edge.from) && presentKeys.has(edge.to) ? [[edge.from, edge.to]] : [],
     );
-    const elk = await layoutLayered(present, links, spec.direction);
-    const boxes = new Map(
-      present.flatMap((node): [string, Box][] => {
-        const at = elk.positions.get(node.key);
-        return at ? [[node.key, { ...at, ...node.size }]] : [];
-      }),
+    const holders = new Set(present.map(scopeOf));
+    const elk = await layoutLayered(
+      present.map((key) => ({
+        key,
+        parent: scopeOf(key),
+        size: isBoundary(key) && holders.has(key) ? null : (sizeOf(key) ?? EMPTY_BOUNDARY),
+      })),
+      links,
+      spec.direction,
     );
     if (relayout) {
-      for (const [key, box] of boxes) framed.set(key, box);
-    } else {
-      const fixed = new Map<string, Box>();
-      for (const [key, box] of canvas) {
-        const size = sizeOf(key) ?? box;
-        fixed.set(key, { x: box.x, y: box.y, w: size.w, h: size.h });
+      for (const key of present) {
+        const box = elk.get(key);
+        if (!box) continue;
+        const size = isBoundary(key) ? box : (sizeOf(key) ?? box);
+        nodes.set(key, { x: box.x, y: box.y, w: size.w, h: size.h });
+        parents.set(key, scopeOf(key));
       }
-      const placed = placeAround({
-        added: laid.map((node) => node.key),
-        elk: boxes,
-        fixed,
-        links,
-        direction: spec.direction,
-      });
-      for (const [key, box] of placed) framed.set(key, box);
+    } else {
+      // Each boundary is its own coordinate space, so new nodes are fitted per boundary.
+      for (const scope of new Set(laid.map(scopeOf))) {
+        const inScope = new Set(present.filter((key) => scopeOf(key) === scope));
+        const fixed = new Map<string, Box>();
+        for (const [key, box] of canvas) {
+          if (moved.has(key) || hostOf(key) !== scope) continue;
+          const size = isBoundary(key) ? box : (sizeOf(key) ?? box);
+          fixed.set(key, { x: box.x, y: box.y, w: size.w, h: size.h });
+        }
+        const placed = placeAround({
+          added: laid.filter((key) => scopeOf(key) === scope),
+          elk: new Map(
+            Array.from(inScope).flatMap((key): [string, Box][] => {
+              const box = elk.get(key);
+              return box ? [[key, box]] : [];
+            }),
+          ),
+          fixed,
+          links: links.filter(([from, to]) => inScope.has(from) && inScope.has(to)),
+          direction: spec.direction,
+          padding: scope === null ? FRAME_PADDING : BOUNDARY_PADDING,
+        });
+        for (const [key, box] of placed) {
+          nodes.set(key, box);
+          parents.set(key, scope);
+        }
+      }
+    }
+  }
+  // Rewritten content keeps its top-left and takes its new size.
+  for (const [key, size] of sizes) {
+    const at = canvas.get(key);
+    if (at && !nodes.has(key)) nodes.set(key, { x: at.x, y: at.y, ...size });
+  }
+
+  const boxOf = (key: string): Box | undefined => {
+    const box = nodes.get(key);
+    if (box) return box;
+    const at = canvas.get(key);
+    return at && { x: at.x, y: at.y, w: at.w, h: at.h };
+  };
+  const fitAround = (host: string | null, padding: number): Size => {
+    const inside = present.flatMap((key) => {
+      const box = hostOf(key) === host ? boxOf(key) : undefined;
+      return box ? [box] : [];
+    });
+    return {
+      w: Math.max(2 * padding, ...inside.map((box) => box.x + box.w + padding)),
+      h: Math.max(2 * padding, ...inside.map((box) => box.y + box.h + padding)),
+    };
+  };
+  // Deepest boundaries first, so each parent fits its grown children.
+  const depthOf = (key: string): number => {
+    let depth = 0;
+    for (let at = scopeOf(key); at !== null; at = scopeOf(at)) depth++;
+    return depth;
+  };
+  const boundaries = present.filter(isBoundary).sort((a, b) => depthOf(b) - depthOf(a));
+  for (const key of boundaries) {
+    const box = boxOf(key);
+    if (!box) continue;
+    const fit = fitAround(key, BOUNDARY_PADDING);
+    if (fit.w > box.w || fit.h > box.h || nodes.has(key) || written.has(key)) {
+      nodes.set(key, { ...box, w: Math.max(box.w, fit.w), h: Math.max(box.h, fit.h) });
     }
   }
 
-  const frameId = current?.frame.id;
-  const nodes = new Map<string, Box>();
-  const inFrame: Box[] = [];
-  for (const node of spec.nodes) {
-    const size = sizes.get(node.key);
-    const onCanvas = canvas.get(node.key);
-    const box = framed.get(node.key);
-    if (box) {
-      // Laid out in frame space; a node a human moved into another parent keeps that parent.
-      const parentOrigin = onCanvas ? originOf(index, onCanvas.shape.parentId) : frameOrigin;
-      nodes.set(node.key, {
-        ...box,
-        x: box.x + frameOrigin.x - parentOrigin.x,
-        y: box.y + frameOrigin.y - parentOrigin.y,
-      });
-    } else if (onCanvas && size) {
-      // Rewritten content keeps its top-left and takes its new size.
-      nodes.set(node.key, { x: onCanvas.shape.x, y: onCanvas.shape.y, ...size });
-    }
-    // Nodes a human dragged out of the frame do not grow it, unless relayout moved them back.
-    const final = box ?? (onCanvas && { ...onCanvas, ...size });
-    if (final && (relayout || !onCanvas || onCanvas.shape.parentId === frameId))
-      inFrame.push(final);
-  }
-  const fit = {
-    w: Math.max(2 * FRAME_PADDING, ...inFrame.map((box) => box.x + box.w + FRAME_PADDING)),
-    h: Math.max(2 * FRAME_PADDING, ...inFrame.map((box) => box.y + box.h + FRAME_PADDING)),
-  };
+  // Nodes a human dragged out of the frame do not grow it, unless relayout moved them back.
+  const fit = fitAround(null, FRAME_PADDING);
   if (current) {
     const { x, y, props } = current.frame;
     return {
       pageId: current.pageId,
       frame: { x, y, w: Math.max(props.w, fit.w), h: Math.max(props.h, fit.h) },
       nodes,
+      parents,
     };
   }
   const pageId = targetPage(spec, index);
   const at = spec.position ?? besideContent(index, pageId);
-  return { pageId, frame: { x: at.x, y: at.y, ...fit }, nodes };
+  return { pageId, frame: { x: at.x, y: at.y, ...fit }, nodes, parents };
 }
 
 /** Gap kept between a new node and anything already placed. */
@@ -250,6 +360,8 @@ function placeAround(input: {
   readonly fixed: ReadonlyMap<string, Box>;
   readonly links: ReadonlyArray<readonly [string, string]>;
   readonly direction: DiagramLayoutDirection;
+  /** Inner padding of the frame or boundary the nodes are placed in. */
+  readonly padding: number;
 }): Map<string, Box> {
   const { added, elk, fixed, links } = input;
   const across = input.direction === "down" || input.direction === "up" ? "x" : "y";
@@ -287,8 +399,8 @@ function placeAround(input: {
       return box ? [{ key, box: follow ? moveBy(box, follow.x, follow.y) : box }] : [];
     });
     const intoFrame = {
-      x: Math.max(0, FRAME_PADDING - Math.min(...boxes.map(({ box }) => box.x))),
-      y: Math.max(0, FRAME_PADDING - Math.min(...boxes.map(({ box }) => box.y))),
+      x: Math.max(0, input.padding - Math.min(...boxes.map(({ box }) => box.x))),
+      y: Math.max(0, input.padding - Math.min(...boxes.map(({ box }) => box.y))),
     };
     boxes = boxes.map(({ key, box }) => ({ key, box: moveBy(box, intoFrame.x, intoFrame.y) }));
 

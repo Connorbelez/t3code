@@ -27,6 +27,7 @@ import {
   type DiagramHostConnectInput,
   type DiagramHostOperation,
   type DiagramComposeInput,
+  type DiagramComposeRequest,
   type DiagramComposeResult,
   type ProjectId,
   type ThreadId,
@@ -875,11 +876,15 @@ export const make = Effect.gen(function* () {
   ) {
     const diagram = yield* targetMetadata(input);
     if (diagram.archivedAt) return yield* new DiagramOperationError({ code: "archived" });
-    const request = { spec: input.spec, ...(input.relayout ? { relayout: true } : {}) };
-    yield* attempt(() => validateComposeRequest(request));
+    const request: DiagramComposeRequest = {
+      ...(input.spec ? { spec: input.spec } : {}),
+      ...(input.mermaid ? { mermaid: input.mermaid } : {}),
+      ...(input.relayout ? { relayout: true } : {}),
+    };
+    // Mermaid text can only be checked by the host's parser.
+    const compositionKey = yield* attempt(() => validateComposeRequest(request));
     const composed = yield* invoke({ ...input, operation: "compose", value: request });
     const result = yield* attempt(() => decodeHostComposeResult(composed.value));
-    const compositionKey = input.spec.key;
     if (!result.changes)
       return {
         requestId: null,

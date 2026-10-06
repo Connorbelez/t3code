@@ -11,15 +11,20 @@ import { indexRecords } from "./canvas.ts";
 import { referenceOf } from "./kit.ts";
 import { KITS } from "./kits/index.ts";
 import { type DetailPage, detail, scanCompositions, summarize } from "./membership.ts";
-import { parseSpec } from "./spec.ts";
+import { parseSpec, sourceOf } from "./spec.ts";
 
 /**
  * Light entry: validation, membership and kit vocabulary. Safe for the server; never loads ELK.
  */
 
-/** Throws `DiagramOperationError` with code `invalid-spec` and path-addressed `details.issues`. */
-export function validateComposeRequest(request: DiagramComposeRequest): void {
-  parseSpec(request.spec);
+/**
+ * Returns the composition key, or throws `DiagramOperationError` with code `invalid-spec` and
+ * path-addressed `details.issues`. Mermaid text is only parsed in the editor host.
+ */
+export function validateComposeRequest(request: DiagramComposeRequest): string {
+  const source = sourceOf(request);
+  if ("mermaid" in source) return source.mermaid.key;
+  return parseSpec(source.spec).key;
 }
 
 export interface CompositionsView {

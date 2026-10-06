@@ -56,9 +56,11 @@ const apply = Tool.make("t3_diagram_apply", {
   .annotate(Tool.Idempotent, true);
 
 const composeGuidance = [
-  "Compose a structured diagram such as a flowchart from a spec of nodes and edges. T3 Code lays it out and draws editable stock shapes inside a frame named by the composition key.",
+  "Compose a structured diagram such as a flowchart or state machine from a spec of nodes and edges. T3 Code lays it out and draws editable stock shapes inside a frame named by the composition key.",
   "Prefer this over t3_diagram_apply for structured diagrams, and describe content, not coordinates: labels default to keys, kinds default per kit, and edges accept [from, to, label?]. t3_diagram_kit lists a kit's vocabulary and an example; invalid specs fail listing the valid options.",
-  "The spec replaces the whole composition with that key. Before recomposing an existing key, read it with t3_diagram_read compositionKey and build the new spec from the member specs there.",
+  'Group nodes inside a boundary kind (flow group, state composite) by setting parent to its key. Every kit has a note kind; body { "on": "<node key>" } attaches it to that node.',
+  "Instead of spec you may pass Mermaid flowchart or stateDiagram text as mermaid: { key, text, title? }. Node IDs become member keys, so composing the same Mermaid again updates in place; subgraphs and composite states become boundaries, and styling is ignored. Other Mermaid types fail unsupported-mermaid.",
+  "The spec or Mermaid replaces the whole composition with that key. Before recomposing an existing key, read it with t3_diagram_read compositionKey and build the new spec from the member specs there.",
   "Recomposing keeps every existing position, places new members around them, keeps human edits to members your spec leaves unchanged, and rewrites only unedited members whose spec changed.",
   "If your spec changes or drops a member that someone else also edited, nothing changes and the call fails with conflict listing those keys in details.members; merge their current text into your spec, or leave those members as they were, and retry.",
   "Set relayout: true only when the user asks to rearrange the diagram, because it moves every member. The result lists overlapping member pairs; mention them rather than relaying out unasked.",

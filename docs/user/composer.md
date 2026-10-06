@@ -55,8 +55,8 @@ permanently deletes its active and archived diagrams; export them first to keep 
 
 ### Ask the agent for a diagram
 
-Ask the agent for a flowchart, for example "draw the checkout flow in the
-architecture diagram". The agent describes what the diagram contains, and T3 Code
+Ask the agent for a flowchart or a state machine, for example "draw the checkout
+flow in the architecture diagram". The agent describes what the diagram contains, and T3 Code
 lays it out and draws it as ordinary shapes inside a named frame, placed to the
 right of what is already on the first page. Everything stays editable, and the
 whole drawing is one Undo step. A diagram can hold several generated drawings
@@ -70,6 +70,17 @@ to change that same shape. In that case it stops without changing anything,
 reads your edits, and tries again with them merged in. Shapes you draw inside a
 generated drawing's frame are never touched. To tidy up, ask the agent to lay
 the drawing out again. That moves every generated shape but keeps your edits.
+
+Groups such as flowchart subgraphs and composite states are drawn as frames inside
+the drawing, so you can drag a whole group. Moving a shape into or out of a group
+frame doesn't change which group the agent thinks it belongs to. The agent can
+also add sticky notes, optionally linked to a shape by a dashed line.
+
+The agent can also send Mermaid flowchart or state diagram text, for example
+"turn the Mermaid in your last answer into a diagram". The result is the same
+editable drawing, and asking again with changed Mermaid updates it in place.
+Mermaid styling is not carried over, and other Mermaid diagram types are not
+supported yet.
 
 ## Send while the agent is working
 

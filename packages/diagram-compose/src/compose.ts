@@ -4,6 +4,8 @@ import {
   type DiagramComposeCounts,
   type DiagramComposeRequest,
   type DiagramHostComposeResult,
+  type DiagramMermaidSource,
+  type DiagramSpec,
 } from "@t3tools/contracts";
 import type { TLRecord } from "@tldraw/tlschema";
 
@@ -13,7 +15,7 @@ import { frameShapeId, memberShapeId } from "./identity.ts";
 import { type MeasureText, place } from "./layout.ts";
 import { decideReplace, type Decision, draftsOf, nextLedger } from "./merge.ts";
 import { scanCompositions } from "./membership.ts";
-import { type ComposeSpec, parseSpec } from "./spec.ts";
+import { type ComposeSpec, parseSpec, sourceOf } from "./spec.ts";
 
 /**
  * Pipeline entry for the editor host. Import lazily; layout loads ELK on first use.
@@ -24,6 +26,8 @@ export type { TextFont } from "./layout.ts";
 export interface ComposePorts {
   /** Real editor text measurement, unpadded. */
   readonly measureText: MeasureText;
+  /** Mermaid's parser needs a DOM, so the editor host converts Mermaid text to a spec. */
+  readonly parseMermaid: (source: DiagramMermaidSource) => Promise<DiagramSpec>;
   /**
    * Applies puts and deletes to a scratch editor seeded with the current document and returns
    * every document record afterwards, so tldraw's own rewrites of non-member records are known.
@@ -36,14 +40,16 @@ export interface ComposePorts {
 
 /**
  * Turns a compose request plus the current document into one batch's worth of changes.
- * Throws `DiagramOperationError` (`invalid-spec`, `conflict`, `too-large`, `invalid-records`).
+ * Throws `DiagramOperationError` (`invalid-spec`, `unsupported-mermaid`, `conflict`, `too-large`,
+ * `invalid-records`).
  */
 export async function compose(
   request: DiagramComposeRequest,
   records: readonly TLRecord[],
   ports: ComposePorts,
 ): Promise<DiagramHostComposeResult> {
-  const spec = parseSpec(request.spec);
+  const source = sourceOf(request);
+  const spec = parseSpec("spec" in source ? source.spec : await ports.parseMermaid(source.mermaid));
   // The frame, one shape per node, and an arrow with two bindings per edge.
   const recordCount = 1 + spec.nodes.length + 3 * spec.edges.length;
   if (recordCount > DIAGRAM_MAX_BATCH_RECORDS) throw tooLarge(recordCount);
@@ -87,8 +93,16 @@ export async function compose(
 
 const MAX_OVERLAPS = 50;
 
-/** Node members whose page boxes intersect, in spec order. Arrows and non-members never count. */
+/**
+ * Node members whose page boxes intersect, in spec order. Arrows and non-members never count, and
+ * neither does a boundary holding its own descendant.
+ */
 function overlapsOf(spec: ComposeSpec, epoch: number, index: RecordIndex): [string, string][] {
+  const parents = new Map(spec.nodes.map((node) => [node.key, node.parent]));
+  const encloses = (outer: string, inner: string) => {
+    for (let at = parents.get(inner); at; at = parents.get(at)) if (at === outer) return true;
+    return false;
+  };
   const boxes = spec.nodes.flatMap((node) => {
     const shape = shapeOf(index, memberShapeId(spec.key, epoch, node.key, "main"));
     return shape ? [{ key: node.key, box: pageBox(index, shape) }] : [];
@@ -97,6 +111,7 @@ function overlapsOf(spec: ComposeSpec, epoch: number, index: RecordIndex): [stri
   for (const [i, a] of boxes.entries()) {
     for (const b of boxes.slice(i + 1)) {
       if (pairs.length === MAX_OVERLAPS) return pairs;
+      if (encloses(a.key, b.key) || encloses(b.key, a.key)) continue;
       if (
         a.box.x < b.box.x + b.box.w &&
         b.box.x < a.box.x + a.box.w &&

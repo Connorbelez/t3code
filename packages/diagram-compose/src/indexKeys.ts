@@ -17,13 +17,6 @@ export function indexBetween(low: string | null, high: string | null): IndexKey 
   return keyBetween(low, high) as IndexKey;
 }
 
-/** `count` increasing keys above `low`. */
-export function indexesAbove(low: string | null, count: number): IndexKey[] {
-  const keys: IndexKey[] = [];
-  for (let i = 0; i < count; i++) keys.push(indexBetween(keys.at(-1) ?? low, null));
-  return keys;
-}
-
 function keyBetween(a: string | null, b: string | null): string {
   if (a === null) {
     if (b === null) return `a${ZERO}`;

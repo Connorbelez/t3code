@@ -1122,6 +1122,7 @@ it.effect("lists large compositions once in structure and attached context", () 
           records,
           {
             measureText: (text) => ({ w: text.length * 8, h: 20 }),
+            parseMermaid: () => Promise.reject(new Error("not expected")),
             rehearse: (puts, deletes) => {
               const after = new Map(records.map((item) => [item.id as string, item]));
               for (const id of deletes) after.delete(id);
@@ -1212,6 +1213,7 @@ const composeRecords = Effect.fn(function* (
   const result = yield* Effect.promise(() =>
     compose({ spec, ...options }, records, {
       measureText: (text) => ({ w: text.length * 8, h: 20 }),
+      parseMermaid: () => Promise.reject(new Error("not expected")),
       rehearse: (puts, deletes) => {
         const after = new Map(records.map((item) => [item.id as string, item]));
         for (const id of deletes) after.delete(id);
@@ -1430,5 +1432,51 @@ it.effect("fails stale and changes nothing when a member changes between compose
         text: "Create session",
       },
     );
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
+// Needs the real validateComposeRequest from @t3tools/diagram-compose.
+it.effect("sends Mermaid to the composing host unparsed and surfaces its Mermaid errors", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    const diagram = yield* service.create({ projectId, name: "Mermaid" });
+    const unsupported = new DiagramOperationError({
+      code: "unsupported-mermaid",
+      details: {
+        issues: [
+          {
+            path: "mermaid.text",
+            message: "pie diagrams are not supported; supported types: flowchart, stateDiagram",
+          },
+        ],
+      },
+    });
+    const host = yield* connect(service, diagram, {
+      operations: allOperations,
+      composeAnswers: [unchanged, unsupported],
+    });
+    const target = { projectId, diagramId: diagram.id, namespace: "provider" };
+    const mermaid = { key: "signup", text: "flowchart TD\n  a --> b" };
+    assert.deepEqual(yield* service.compose({ ...target, mermaid }), {
+      requestId: null,
+      revision: 0,
+      compositionKey: "signup",
+      counts: unchanged.counts,
+      overlaps: unchanged.overlaps,
+    });
+    const failed = yield* Effect.flip(
+      service.compose({ ...target, mermaid: { key: "chart", text: "pie" } }),
+    );
+    assert.deepEqual(
+      { code: failed.code, details: failed.details },
+      {
+        code: unsupported.code,
+        details: unsupported.details,
+      },
+    );
+    const both = yield* Effect.flip(service.compose({ ...target, spec: flowSpec, mermaid }));
+    assert.equal(both.code, "invalid-spec");
+    assert.deepEqual(host.composeInputs, [{ mermaid }, { mermaid: { key: "chart", text: "pie" } }]);
   }).pipe(Effect.scoped, Effect.provide(dependencies)),
 );
