@@ -28,6 +28,7 @@ import {
   type TLComponents,
   type TLRecord,
   type TLShapeId,
+  type TLStateNodeConstructor,
   type TLUiContextMenuProps,
 } from "tldraw";
 import * as Schema from "effect/Schema";
@@ -49,6 +50,14 @@ import { composeOnHost } from "./diagramHostCompose";
 import { renderAnnotatedCapture, resolveAnnotationTargets } from "./diagramAnnotationHost";
 import { blankExportSvg } from "./diagramAnnotationRender";
 import { addCanvasSelectionToChat, registerCanvasSelectionChat } from "./canvasSelectionChat";
+import {
+  ANNOTATE_TOOL_ID,
+  AnnotateTool,
+  annotateSelection,
+  toggleAnnotationMode,
+} from "./annotateTool";
+import type { DiagramAnnotationBinding } from "./diagramAnnotationBinding";
+import { DiagramAnnotationLayer, DiagramAnnotationScopeContext } from "./DiagramAnnotationLayer";
 import "tldraw/tldraw.css";
 
 const assetUrls = getAssetUrlsByImport();
@@ -56,6 +65,7 @@ const shapeUtils = [EmbedShapeUtil.configure({ embedDefinitions: [] })];
 const decodeScope = Schema.decodeSync(DiagramPageScope);
 function ChatContextMenu(props: TLUiContextMenuProps) {
   const editor = useEditor();
+  const annotatable = useContext(DiagramAnnotationScopeContext)?.binding.supported === true;
   const hasSelection = useValue("has selection", () => editor.getSelectedShapeIds().length > 0, [
     editor,
   ]);
@@ -71,6 +81,16 @@ function ChatContextMenu(props: TLUiContextMenuProps) {
               addCanvasSelectionToChat();
             }}
           />
+          {annotatable ? (
+            <TldrawUiMenuItem
+              id="annotate-selection"
+              label="Annotate selection"
+              readonlyOk
+              onSelect={() => {
+                annotateSelection(editor);
+              }}
+            />
+          ) : null}
         </TldrawUiMenuGroup>
       ) : null}
       <DefaultContextMenuContent />
@@ -78,7 +98,13 @@ function ChatContextMenu(props: TLUiContextMenuProps) {
   );
 }
 const hiddenComponents: TLComponents = { SharePanel: null };
-const panelComponents: TLComponents = { SharePanel: null, ContextMenu: ChatContextMenu };
+const panelComponents: TLComponents = {
+  SharePanel: null,
+  ContextMenu: ChatContextMenu,
+  InFrontOfTheCanvas: DiagramAnnotationLayer,
+};
+const hiddenTools: TLStateNodeConstructor[] = [];
+const panelTools: TLStateNodeConstructor[] = [AnnotateTool];
 const canonical = (value: unknown): string => {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
@@ -112,6 +138,8 @@ type DiagramEditorProps = {
   onHostReady?: (host: MountedDiagramHost) => void;
   /** Set by the Canvas panel: its selection can then be added to chat from the canvas. */
   onAddSelectionToChat?: () => void;
+  /** Set by the Canvas panel when the thread's message draft can hold Canvas comments. */
+  annotationBinding?: DiagramAnnotationBinding | undefined;
   visible?: boolean;
 };
 export default function DiagramEditor(props: DiagramEditorProps) {
@@ -208,17 +236,44 @@ function MountedDiagramEditor(props: DiagramEditorProps & { onAdoptionLost: () =
 
   const addSelectionToChat = useEffectEvent(() => props.onAddSelectionToChat?.());
   const chatAttachable = props.onAddSelectionToChat !== undefined;
+  const annotatable = chatAttachable && props.annotationBinding?.supported === true;
   useEffect(() => {
     if (!editor || !chatAttachable) return;
-    const registration = registerCanvasSelectionChat(addSelectionToChat);
-    const stop = react("canvas selection for chat", () =>
-      registration.setHasSelection(editor.getSelectedShapeIds().length > 0),
+    const registration = registerCanvasSelectionChat(
+      addSelectionToChat,
+      annotatable
+        ? { annotate: () => annotateSelection(editor), toggle: () => toggleAnnotationMode(editor) }
+        : null,
     );
+    const stop = react("canvas selection for chat", () => {
+      registration.setHasSelection(editor.getSelectedShapeIds().length > 0);
+      registration.setAnnotating(editor.getCurrentToolId() === ANNOTATE_TOOL_ID);
+    });
     return () => {
       stop();
       registration.unregister();
     };
-  }, [chatAttachable, editor]);
+  }, [annotatable, chatAttachable, editor]);
+  const annotationScope = useMemo(
+    () =>
+      chatAttachable && props.annotationBinding
+        ? {
+            binding: props.annotationBinding,
+            environmentId: props.environmentId,
+            projectId: props.diagram.projectId,
+            diagramId: props.diagram.id,
+            diagramName: props.diagram.name,
+          }
+        : null,
+    [
+      chatAttachable,
+      props.annotationBinding,
+      props.diagram.id,
+      props.diagram.name,
+      props.diagram.projectId,
+      props.environmentId,
+    ],
+  );
 
   useEffect(() => {
     const socket = socketRef.current;
@@ -648,15 +703,18 @@ function MountedDiagramEditor(props: DiagramEditorProps & { onAdoptionLost: () =
         }
       }}
     >
-      <Tldraw
-        shapeUtils={shapeUtils}
-        store={synced}
-        assetUrls={assetUrls}
-        onMount={mount}
-        licenseKey={import.meta.env.VITE_TLDRAW_LICENSE_KEY}
-        options={{ maxPages: 100 }}
-        components={chatAttachable ? panelComponents : hiddenComponents}
-      />
+      <DiagramAnnotationScopeContext value={annotationScope}>
+        <Tldraw
+          shapeUtils={shapeUtils}
+          tools={chatAttachable ? panelTools : hiddenTools}
+          store={synced}
+          assetUrls={assetUrls}
+          onMount={mount}
+          licenseKey={import.meta.env.VITE_TLDRAW_LICENSE_KEY}
+          options={{ maxPages: 100 }}
+          components={chatAttachable ? panelComponents : hiddenComponents}
+        />
+      </DiagramAnnotationScopeContext>
       {fenced ? (
         <div className="absolute inset-0 z-50 cursor-wait" aria-label="Applying diagram changes" />
       ) : null}

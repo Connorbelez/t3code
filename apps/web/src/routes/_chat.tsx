@@ -14,7 +14,10 @@ import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
 import { dispatchPreviewAction } from "../components/preview/previewActionBus";
 import {
   addCanvasSelectionToChat,
+  annotateCanvasSelection,
+  canvasAnnotationState,
   canvasSelectionChatState,
+  toggleCanvasAnnotationMode,
 } from "../components/diagrams/canvasSelectionChat";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useScratchProject } from "../hooks/useScratchProject";
@@ -164,6 +167,23 @@ function ChatRouteGlobalShortcuts() {
         event.preventDefault();
         event.stopPropagation();
         if (!event.repeat) addCanvasSelectionToChat();
+        return;
+      }
+
+      if (command === "canvas.annotateSelection") {
+        if (canvasAnnotationState() === "unavailable" || canvasSelectionChatState() !== "selected")
+          return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (!event.repeat) annotateCanvasSelection();
+        return;
+      }
+
+      if (command === "canvas.toggleAnnotationMode") {
+        if (canvasAnnotationState() === "unavailable") return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (!event.repeat) toggleCanvasAnnotationMode();
         return;
       }
 

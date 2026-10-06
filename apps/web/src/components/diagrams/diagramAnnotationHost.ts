@@ -1,7 +1,9 @@
 import {
   DiagramOperationError,
   type DiagramAnnotatedCapture,
+  type DiagramAnnotationTarget,
   type DiagramAnnotations,
+  type DiagramBounds,
 } from "@t3tools/contracts";
 import { Box, type Editor, type TLShapeId } from "tldraw";
 import {
@@ -18,6 +20,29 @@ const MAX_IMAGES_BASE64 = 15 * 1024 * 1024;
 const MAX_ISSUES = 20;
 
 /**
+ * Where a comment's target is on `pageId`, in page space. Null when any of its shapes is gone or on
+ * another page: the comment is unavailable until it is retargeted or deleted.
+ */
+export function annotationTargetPageBounds(
+  editor: Editor,
+  pageId: string,
+  target: DiagramAnnotationTarget,
+): DiagramBounds | null {
+  if (target.kind === "region") return target.bounds;
+  const boxes: Box[] = [];
+  for (const shapeId of target.shapeIds) {
+    const shape = editor.getShape(shapeId as TLShapeId);
+    const box =
+      shape && editor.getAncestorPageId(shape) === pageId
+        ? editor.getShapePageBounds(shape)
+        : undefined;
+    if (!box) return null;
+    boxes.push(box);
+  }
+  return Box.Common(boxes).toJson();
+}
+
+/**
  * Where each comment's target sits on `pageId` in this editor. A shapes target covers the
  * axis-aligned page bounds of all its shapes, so rotation and group transforms count. Fails
  * scope-unavailable with one issue per comment whose shapes are gone or on another page.
@@ -29,17 +54,8 @@ export function resolveAnnotationTargets(
 ): AnnotationTargetBox[] {
   const issues: { path: string; message: string }[] = [];
   const targets = annotations.flatMap(({ id, number, target }): AnnotationTargetBox[] => {
-    if (target.kind === "region") return [{ id, number, kind: "region", bounds: target.bounds }];
-    const boxes = target.shapeIds.flatMap((shapeId) => {
-      const shape = editor.getShape(shapeId as TLShapeId);
-      const box =
-        shape && editor.getAncestorPageId(shape) === pageId
-          ? editor.getShapePageBounds(shape)
-          : undefined;
-      return box ? [box] : [];
-    });
-    if (boxes.length === target.shapeIds.length)
-      return [{ id, number, kind: "shapes", bounds: Box.Common(boxes).toJson() }];
+    const bounds = annotationTargetPageBounds(editor, pageId, target);
+    if (bounds) return [{ id, number, kind: target.kind, bounds }];
     issues.push({
       path: `annotations/${number}`,
       message: `Comment ${number} targets a shape that was deleted or moved to another page. Retarget or delete it.`,

@@ -7,7 +7,16 @@ import {
   type EnvironmentId,
   type ProjectId,
 } from "@t3tools/contracts";
-import { Archive, ArrowLeft, Copy, Download, Plus, Trash2, Upload } from "lucide-react";
+import {
+  Archive,
+  ArrowLeft,
+  Copy,
+  Download,
+  MessageSquarePlus,
+  Plus,
+  Trash2,
+  Upload,
+} from "lucide-react";
 import {
   lazy,
   Suspense,
@@ -18,10 +27,12 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { AsyncResult } from "effect/reactivity";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
+import { Toggle } from "~/components/ui/toggle";
 import {
   AlertDialog,
   AlertDialogPopup,
@@ -31,7 +42,13 @@ import {
   AlertDialogFooter,
 } from "~/components/ui/alert-dialog";
 import { useServerConfigs } from "~/state/entities";
+import {
+  canvasAnnotationState,
+  subscribeCanvasSelectionChat,
+  toggleCanvasAnnotationMode,
+} from "./canvasSelectionChat";
 import { createDiagramApi, diagramChanges } from "./diagramApi";
+import type { DiagramAnnotationBinding } from "./diagramAnnotationBinding";
 import { findDiagramHost, type DiagramContextReference } from "./diagramHosts";
 import type { DiagramSaveState } from "./diagramSocket";
 
@@ -57,6 +74,8 @@ export type CanvasPanelProps = {
   diagramId: DiagramId | null;
   onSelectDiagram: (diagram: DiagramMetadata) => void;
   onAttach: (reference: DiagramContextReference) => void;
+  /** The thread's message draft, where Canvas comments are saved. Absent: no annotating. */
+  annotationBinding?: DiagramAnnotationBinding;
 };
 export default function CanvasPanel(props: CanvasPanelProps) {
   const capabilities = useServerConfigs().get(props.environmentId)?.environment.capabilities
@@ -83,6 +102,7 @@ function SupportedCanvasPanel(props: CanvasPanelProps) {
   const [scope, setScope] = useState<DiagramPageScope["kind"]>("diagram");
   const [saveState, setSaveState] = useState<DiagramSaveState>("connecting");
   const importRef = useRef<HTMLInputElement>(null);
+  const annotation = useSyncExternalStore(subscribeCanvasSelectionChat, canvasAnnotationState);
   const active = diagrams.find((diagram) => diagram.id === props.diagramId) ?? null;
   const refresh = useCallback(async () => {
     setDiagrams(await api.list({ projectId: props.projectId, includeArchived: true }));
@@ -418,6 +438,19 @@ function SupportedCanvasPanel(props: CanvasPanelProps) {
             >
               Add to context
             </Button>
+            {annotation === "unavailable" ? null : (
+              <Toggle
+                variant="ghost"
+                size="compact"
+                pressed={annotation === "on"}
+                onPressedChange={() => {
+                  toggleCanvasAnnotationMode();
+                }}
+              >
+                <MessageSquarePlus />
+                Annotate
+              </Toggle>
+            )}
             <div className="ml-auto flex items-center gap-1">
               <Button variant="ghost" size="compact" disabled={busy} onClick={exportDocument}>
                 <Download />
@@ -451,6 +484,7 @@ function SupportedCanvasPanel(props: CanvasPanelProps) {
                 diagram={active}
                 onSaveState={reportSaveState}
                 onAddSelectionToChat={() => void attach("selection")}
+                annotationBinding={props.annotationBinding}
               />
             </Suspense>
           </div>

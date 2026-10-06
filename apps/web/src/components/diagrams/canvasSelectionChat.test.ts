@@ -2,8 +2,11 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   addCanvasSelectionToChat,
+  annotateCanvasSelection,
+  canvasAnnotationState,
   canvasSelectionChatState,
   registerCanvasSelectionChat,
+  toggleCanvasAnnotationMode,
 } from "./canvasSelectionChat";
 
 describe("canvas selection chat action", () => {
@@ -32,5 +35,31 @@ describe("canvas selection chat action", () => {
     addCanvasSelectionToChat();
     expect(added).toEqual(["next"]);
     next.unregister();
+  });
+
+  it("annotates only while an editor that can save comments has a selection", () => {
+    const calls: string[] = [];
+    expect(annotateCanvasSelection()).toBe(false);
+    expect(toggleCanvasAnnotationMode()).toBe(false);
+    const plain = registerCanvasSelectionChat(() => calls.push("add"));
+    plain.setHasSelection(true);
+    expect(canvasAnnotationState()).toBe("unavailable");
+    expect(annotateCanvasSelection()).toBe(false);
+    const panel = registerCanvasSelectionChat(() => calls.push("add"), {
+      annotate: () => calls.push("annotate"),
+      toggle: () => calls.push("toggle"),
+    });
+    expect(canvasAnnotationState()).toBe("off");
+    expect(annotateCanvasSelection()).toBe(false);
+    expect(toggleCanvasAnnotationMode()).toBe(true);
+    panel.setAnnotating(true);
+    expect(canvasAnnotationState()).toBe("on");
+    panel.setHasSelection(true);
+    expect(annotateCanvasSelection()).toBe(true);
+    expect(addCanvasSelectionToChat()).toBe(true);
+    expect(calls).toEqual(["toggle", "annotate", "add"]);
+    panel.unregister();
+    plain.unregister();
+    expect(canvasAnnotationState()).toBe("unavailable");
   });
 });
