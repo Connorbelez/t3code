@@ -5,6 +5,7 @@ import { useSync } from "@tldraw/sync";
 import {
   DiagramOperationError,
   DiagramPageScope,
+  type DiagramAnnotatedCapture,
   type DiagramCapture,
   type DiagramMetadata,
   type EnvironmentId,
@@ -18,6 +19,7 @@ import {
   TldrawUiMenuGroup,
   TldrawUiMenuItem,
   getFontFamily,
+  getSvgAsImage,
   react,
   useEditor,
   useValue,
@@ -44,6 +46,8 @@ import { DiagramSocket, parseDocumentRecord, type DiagramSaveState } from "./dia
 import { diagramHostClientId, registerDiagramHost, type MountedDiagramHost } from "./diagramHosts";
 import { rehearseDiagramChanges, validateDiagramBatch } from "./diagramBatchPreflight";
 import { composeOnHost } from "./diagramHostCompose";
+import { renderAnnotatedCapture, resolveAnnotationTargets } from "./diagramAnnotationHost";
+import { blankExportSvg } from "./diagramAnnotationRender";
 import { addCanvasSelectionToChat, registerCanvasSelectionChat } from "./canvasSelectionChat";
 import "tldraw/tldraw.css";
 
@@ -256,6 +260,81 @@ function MountedDiagramEditor(props: DiagramEditorProps & { onAdoptionLost: () =
         throw new DiagramOperationError({ code: "scope-unavailable" });
       return { kind, pageId, shapeIds: [...shapeIds], bounds: bounds.toJson() };
     };
+    /**
+     * Runs `work` on `pageId` while this editor matches the saved document at `expectedRevision`,
+     * and fails stale if the document moved or this editor changed before `work` finished.
+     */
+    const withCommittedSnapshot = async <A,>(
+      pageId: string,
+      expectedRevision: number | undefined,
+      work: (revision: number) => Promise<A>,
+    ): Promise<A> => {
+      // A compose with capture asks as soon as it commits, before this editor adopts the commit.
+      if (held)
+        await new Promise<void>((resolve, reject) => releaseWaiters.add({ resolve, reject }));
+      requireSafe();
+      await socket.waitUntilSaved();
+      requireSafe();
+      const page = editor.store.get(pageId as TLRecord["id"]);
+      if (!page || page.typeName !== "page")
+        throw new DiagramOperationError({ code: "scope-unavailable" });
+      const before = await api.read({ ...target, includeRecords: true, limit: 200 });
+      if (expectedRevision !== undefined && before.diagram.revision !== expectedRevision)
+        throw new DiagramOperationError({ code: "stale" });
+      const authoritative = before.records.map(parseDocumentRecord);
+      let nextOffset = before.nextOffset;
+      while (nextOffset !== null) {
+        const next = await api.read({
+          ...target,
+          includeRecords: true,
+          limit: 200,
+          offset: nextOffset,
+        });
+        if (next.diagram.revision !== before.diagram.revision)
+          throw new DiagramOperationError({ code: "stale" });
+        authoritative.push(...next.records.map(parseDocumentRecord));
+        nextOffset = next.nextOffset;
+      }
+      const baseline = recordFingerprint(documentRecords(editor));
+      if (recordFingerprint(authoritative) !== baseline)
+        throw new DiagramOperationError({ code: "stale" });
+      await document.fonts.ready;
+      const result = await work(before.diagram.revision);
+      const after = await api.read(target);
+      if (
+        before.diagram.revision !== after.diagram.revision ||
+        recordFingerprint(documentRecords(editor)) !== baseline ||
+        socket.getSaveState() !== "saved"
+      )
+        throw new DiagramOperationError({ code: "stale" });
+      return result;
+    };
+    const pageShapeIds = (pageId: string) =>
+      editor.store
+        .allRecords()
+        .flatMap((record) =>
+          record.typeName === "shape" && editor.getAncestorPageId(record) === pageId
+            ? [record.id]
+            : [],
+        );
+    const requireImageAssets = (ids: readonly TLShapeId[]) =>
+      Promise.all(
+        ids.map(async (id) => {
+          const shape = editor.getShape(id);
+          if (shape?.type !== "image") return;
+          const url = await editor.resolveAssetUrl(shape.props.assetId, {
+            shouldResolveToOriginal: true,
+          });
+          if (!url) throw new DiagramOperationError({ code: "assets-unavailable" });
+          const image = new Image();
+          image.src = url;
+          try {
+            await image.decode();
+          } catch {
+            throw new DiagramOperationError({ code: "assets-unavailable" });
+          }
+        }),
+      );
     const host: MountedDiagramHost = {
       onReleased: null,
       saveState: socket.getSaveState,
@@ -293,152 +372,129 @@ function MountedDiagramEditor(props: DiagramEditorProps & { onAdoptionLost: () =
         }
       },
       capture: async (rawScope, format, expectedRevision) => {
-        // A compose with capture asks as soon as it commits, before this editor adopts the commit.
-        if (held)
-          await new Promise<void>((resolve, reject) => releaseWaiters.add({ resolve, reject }));
-        requireSafe();
-        await socket.waitUntilSaved();
-        requireSafe();
         const scope = decodeScope(rawScope);
-        const page = editor.store.get(scope.pageId as TLRecord["id"]);
-        if (!page || page.typeName !== "page")
-          throw new DiagramOperationError({ code: "scope-unavailable" });
-        const before = await api.read({ ...target, includeRecords: true, limit: 200 });
-        if (expectedRevision !== undefined && before.diagram.revision !== expectedRevision)
-          throw new DiagramOperationError({ code: "stale" });
-        const authoritative = before.records.map(parseDocumentRecord);
-        let nextOffset = before.nextOffset;
-        while (nextOffset !== null) {
-          const next = await api.read({
-            ...target,
-            includeRecords: true,
-            limit: 200,
-            offset: nextOffset,
-          });
-          if (next.diagram.revision !== before.diagram.revision)
-            throw new DiagramOperationError({ code: "stale" });
-          authoritative.push(...next.records.map(parseDocumentRecord));
-          nextOffset = next.nextOffset;
-        }
-        const baseline = recordFingerprint(documentRecords(editor));
-        if (recordFingerprint(authoritative) !== baseline)
-          throw new DiagramOperationError({ code: "stale" });
-        await document.fonts.ready;
-        const ids =
-          scope.kind === "selection"
-            ? scope.shapeIds.map((id) => id as TLShapeId)
-            : editor.store
-                .allRecords()
-                .flatMap((record) =>
-                  record.typeName === "shape" && editor.getAncestorPageId(record) === scope.pageId
-                    ? [record.id]
-                    : [],
-                );
-        if (
-          scope.kind === "selection" &&
-          ids.some((id) => {
-            const shape = editor.getShape(id);
-            return !shape || editor.getAncestorPageId(shape) !== scope.pageId;
-          })
-        )
-          throw new DiagramOperationError({ code: "scope-unavailable" });
-        await Promise.all(
-          ids.map(async (id) => {
-            const shape = editor.getShape(id);
-            if (shape?.type !== "image") return;
-            const url = await editor.resolveAssetUrl(shape.props.assetId, {
-              shouldResolveToOriginal: true,
-            });
-            if (!url) throw new DiagramOperationError({ code: "assets-unavailable" });
-            const image = new Image();
-            image.src = url;
-            try {
-              await image.decode();
-            } catch {
-              throw new DiagramOperationError({ code: "assets-unavailable" });
+        return withCommittedSnapshot(scope.pageId, expectedRevision, async (revision) => {
+          const ids =
+            scope.kind === "selection"
+              ? scope.shapeIds.map((id) => id as TLShapeId)
+              : pageShapeIds(scope.pageId);
+          if (
+            scope.kind === "selection" &&
+            ids.some((id) => {
+              const shape = editor.getShape(id);
+              return !shape || editor.getAncestorPageId(shape) !== scope.pageId;
+            })
+          )
+            throw new DiagramOperationError({ code: "scope-unavailable" });
+          await requireImageAssets(ids);
+          const exportBounds =
+            scope.kind === "diagram"
+              ? ids.length > 0
+                ? Box.Common(
+                    ids.flatMap((id) => {
+                      const box = editor.getShapePageBounds(id);
+                      return box ? [box] : [];
+                    }),
+                  )
+                : new Box(0, 0, 512, 320)
+              : Box.From(scope.bounds);
+          let image:
+            | { blob: Blob; width: number; height: number }
+            | { svg: string; width: number; height: number }
+            | undefined;
+          if (ids.length === 0) {
+            const scale = Math.min(1, 2048 / Math.max(exportBounds.w, exportBounds.h, 1));
+            const width = Math.max(1, Math.round(exportBounds.w * scale));
+            const height = Math.max(1, Math.round(exportBounds.h * scale));
+            if (format === "svg")
+              image = {
+                svg: `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="100%" height="100%" fill="white"/></svg>`,
+                width,
+                height,
+              };
+            else {
+              const canvas = document.createElement("canvas");
+              canvas.width = width;
+              canvas.height = height;
+              const context = canvas.getContext("2d");
+              if (!context) throw new DiagramOperationError({ code: "assets-unavailable" });
+              context.fillStyle = "white";
+              context.fillRect(0, 0, width, height);
+              const blob = await new Promise<Blob>((resolve, reject) =>
+                canvas.toBlob(
+                  (result) =>
+                    result
+                      ? resolve(result)
+                      : reject(new DiagramOperationError({ code: "assets-unavailable" })),
+                  "image/png",
+                ),
+              );
+              image = { blob, width, height };
             }
-          }),
-        );
-        const exportBounds =
-          scope.kind === "diagram"
-            ? ids.length > 0
-              ? Box.Common(
-                  ids.flatMap((id) => {
-                    const box = editor.getShapePageBounds(id);
-                    return box ? [box] : [];
-                  }),
-                )
-              : new Box(0, 0, 512, 320)
-            : Box.From(scope.bounds);
-        let image:
-          | { blob: Blob; width: number; height: number }
-          | { svg: string; width: number; height: number }
-          | undefined;
-        if (ids.length === 0) {
-          const scale = Math.min(1, 2048 / Math.max(exportBounds.w, exportBounds.h, 1));
-          const width = Math.max(1, Math.round(exportBounds.w * scale));
-          const height = Math.max(1, Math.round(exportBounds.h * scale));
-          if (format === "svg")
-            image = {
-              svg: `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="100%" height="100%" fill="white"/></svg>`,
-              width,
-              height,
-            };
-          else {
-            const canvas = document.createElement("canvas");
-            canvas.width = width;
-            canvas.height = height;
-            const context = canvas.getContext("2d");
-            if (!context) throw new DiagramOperationError({ code: "assets-unavailable" });
-            context.fillStyle = "white";
-            context.fillRect(0, 0, width, height);
-            const blob = await new Promise<Blob>((resolve, reject) =>
-              canvas.toBlob(
-                (result) =>
-                  result
-                    ? resolve(result)
-                    : reject(new DiagramOperationError({ code: "assets-unavailable" })),
-                "image/png",
-              ),
-            );
-            image = { blob, width, height };
-          }
-        } else
-          image =
-            format === "svg"
-              ? await editor.getSvgString(ids, {
-                  ...(exportBounds ? { bounds: exportBounds } : {}),
-                  padding: 0,
-                })
-              : await editor.toImage(ids, {
-                  format: "png",
-                  pixelRatio: 1,
-                  scale: Math.min(1, 2048 / Math.max(exportBounds.w, exportBounds.h, 1)),
-                  bounds: exportBounds,
-                  padding: 0,
-                });
-        if (!image) throw new DiagramOperationError({ code: "assets-unavailable" });
-        const blob =
-          "blob" in image ? image.blob : new Blob([image.svg], { type: "image/svg+xml" });
-        const base64 = await blobBase64(blob);
-        const after = await api.read(target);
-        if (
-          before.diagram.revision !== after.diagram.revision ||
-          recordFingerprint(documentRecords(editor)) !== baseline ||
-          socket.getSaveState() !== "saved"
-        )
-          throw new DiagramOperationError({ code: "stale" });
-        return {
-          diagramId: target.diagramId,
-          revision: after.diagram.revision,
-          scope,
-          bounds: (exportBounds ?? new Box(0, 0, image.width, image.height)).toJson(),
-          width: Math.round(image.width),
-          height: Math.round(image.height),
-          mimeType: format === "svg" ? "image/svg+xml" : "image/png",
-          base64,
-        } satisfies DiagramCapture;
+          } else
+            image =
+              format === "svg"
+                ? await editor.getSvgString(ids, {
+                    ...(exportBounds ? { bounds: exportBounds } : {}),
+                    padding: 0,
+                  })
+                : await editor.toImage(ids, {
+                    format: "png",
+                    pixelRatio: 1,
+                    scale: Math.min(1, 2048 / Math.max(exportBounds.w, exportBounds.h, 1)),
+                    bounds: exportBounds,
+                    padding: 0,
+                  });
+          if (!image) throw new DiagramOperationError({ code: "assets-unavailable" });
+          const blob =
+            "blob" in image ? image.blob : new Blob([image.svg], { type: "image/svg+xml" });
+          const base64 = await blobBase64(blob);
+          return {
+            diagramId: target.diagramId,
+            revision,
+            scope,
+            bounds: (exportBounds ?? new Box(0, 0, image.width, image.height)).toJson(),
+            width: Math.round(image.width),
+            height: Math.round(image.height),
+            mimeType: format === "svg" ? "image/svg+xml" : "image/png",
+            base64,
+          } satisfies DiagramCapture;
+        });
       },
+      annotate: (input) =>
+        withCommittedSnapshot(input.pageId, input.revision, async (revision) => {
+          const targets = resolveAnnotationTargets(editor, input.pageId, input.annotations);
+          const ids = pageShapeIds(input.pageId);
+          await requireImageAssets(ids);
+          const rendered = await renderAnnotatedCapture(targets, {
+            exportSvg: async (image) => {
+              // An empty id list would export the current page instead of this one.
+              const exported =
+                ids.length > 0
+                  ? await editor.getSvgString(ids, {
+                      bounds: Box.From(image.bounds),
+                      scale: image.scale,
+                      padding: 0,
+                      background: true,
+                      darkMode: false,
+                    })
+                  : undefined;
+              return exported?.svg ?? blankExportSvg(image.bounds, image.width, image.height);
+            },
+            rasterize: async (svg, width, height) => {
+              const blob = await getSvgAsImage(svg, { type: "png", width, height, pixelRatio: 1 });
+              if (!blob) throw new DiagramOperationError({ code: "assets-unavailable" });
+              return blobBase64(blob);
+            },
+          });
+          return {
+            diagramId: target.diagramId,
+            revision,
+            pageId: input.pageId,
+            annotations: input.annotations,
+            ...rendered,
+          } satisfies DiagramAnnotatedCapture;
+        }),
       compose: async (request) => {
         requireSafe();
         await socket.waitUntilSaved();
