@@ -56,9 +56,9 @@ const apply = Tool.make("t3_diagram_apply", {
   .annotate(Tool.Idempotent, true);
 
 const composeGuidance = [
-  "Compose a structured diagram such as a flowchart, state machine, UML class diagram or ER diagram from a spec of nodes and edges. T3 Code lays it out and draws editable stock shapes inside a frame named by the composition key.",
+  "Compose a structured diagram such as a flowchart, state machine, UML class diagram, ER diagram, C4 view or architecture diagram from a spec of nodes and edges. T3 Code lays it out and draws editable stock shapes inside a frame named by the composition key.",
   "Prefer this over t3_diagram_apply for structured diagrams, and describe content, not coordinates: labels default to keys, kinds default per kit, and edges accept [from, to, label?]. t3_diagram_kit lists a kit's vocabulary and an example; invalid specs fail listing the valid options.",
-  'Group nodes inside a boundary kind (flow group, state composite, uml-class package) by setting parent to its key. Every kit has a note kind; body { "on": "<node key>" } attaches it to that node.',
+  'Group nodes inside a boundary kind (flow group, state composite, uml-class package, c4 boundary, architecture zone) by setting parent to its key; boundaries nest. Every kit has a note kind; body { "on": "<node key>" } attaches it to that node.',
   "Instead of spec you may pass Mermaid flowchart, stateDiagram, classDiagram or erDiagram text as mermaid: { key, text, title? }. Node IDs become member keys, so composing the same Mermaid again updates in place; subgraphs, composite states and namespaces become boundaries, and styling is ignored. Other Mermaid types fail unsupported-mermaid.",
   "By default the spec or Mermaid replaces the whole composition with that key. Before recomposing an existing key, read it with t3_diagram_read compositionKey and build the new spec from the member specs there.",
   'For small changes to an existing composition, send mode "patch" with a spec of only the nodes and edges to add or change, plus removeKeys for members to delete (a removed node takes its edges with it); every other member stays as it is. Mermaid always replaces. A shorthand edge in a patch is matched by its derived key from→to:kind, so give key to change a repeated edge.',

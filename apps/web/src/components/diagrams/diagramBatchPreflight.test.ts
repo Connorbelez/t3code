@@ -359,6 +359,65 @@ const shop = {
     ],
   },
 } satisfies DiagramComposeRequest;
+// Components in a container boundary inside a system boundary, with multi-line labels and external elements.
+const containers = {
+  spec: {
+    kit: "c4",
+    key: "banking",
+    title: "Banking components",
+    nodes: [
+      { key: "customer", kind: "person", label: "Customer" },
+      { key: "bank", kind: "boundary", label: "Internet Banking" },
+      { key: "api", kind: "boundary", label: "API", parent: "bank" },
+      {
+        key: "signin",
+        kind: "component",
+        label: "Sign In",
+        parent: "api",
+        body: { technology: "Express", description: "Checks credentials" },
+      },
+      { key: "db", label: "Database", parent: "bank", body: { technology: "PostgreSQL" } },
+      { key: "mail", kind: "system", label: "Email", body: { external: true } },
+    ],
+    edges: [
+      ["customer", "signin", "Signs in [HTTPS]"],
+      ["signin", "db", "Reads [SQL]"],
+      ["signin", "mail", "Sends [SMTP]"],
+    ],
+  },
+} satisfies DiagramComposeRequest;
+const system = {
+  spec: {
+    kit: "architecture",
+    key: "system",
+    title: "System",
+    nodes: [
+      { key: "web", kind: "client", label: "Browser" },
+      { key: "cloud", kind: "zone", label: "Cloud" },
+      { key: "private", kind: "zone", label: "Private subnet", parent: "cloud" },
+      { key: "gw", kind: "gateway", parent: "cloud" },
+      { key: "lb", kind: "loadBalancer", parent: "private" },
+      { key: "api", parent: "private", body: { technology: "Go" } },
+      { key: "db", kind: "datastore", parent: "private" },
+      { key: "cache", kind: "cache", parent: "private" },
+      { key: "jobs", kind: "queue", parent: "cloud" },
+      { key: "worker", kind: "function", parent: "cloud" },
+      { key: "blobs", kind: "storage", parent: "cloud" },
+      { key: "pay", kind: "external", label: "Payments" },
+    ],
+    edges: [
+      ["web", "gw", "HTTPS"],
+      ["gw", "lb"],
+      ["lb", "api"],
+      ["api", "db", "SQL"],
+      ["api", "cache"],
+      ["api", "jobs", "AMQP"],
+      ["jobs", "worker"],
+      ["worker", "blobs"],
+      ["api", "pay", "HTTPS"],
+    ],
+  },
+} satisfies DiagramComposeRequest;
 function composeInto(editor: Editor, request: DiagramComposeRequest = checkout) {
   const records = editor.store.serialize("document");
   return compose(request, Object.values(records), {
@@ -439,6 +498,8 @@ describe("composed batches", () => {
     ["a flowchart with groups", grouped, "grouped"],
     ["a class diagram with a package, notes and a self-association", library, "Library"],
     ["an ER diagram with notes", shop, "Shop"],
+    ["a C4 component view with nested boundaries", containers, "Banking components"],
+    ["an architecture diagram with nested zones", system, "System"],
   ])("pass the preflight for %s and recompose to no change", async (_, request, title) => {
     const editor = mount();
     addLooseShapes(editor);

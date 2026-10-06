@@ -55,9 +55,9 @@ permanently deletes its active and archived diagrams; export them first to keep 
 
 ### Ask the agent for a diagram
 
-Ask the agent for a flowchart, a state machine, a class diagram of your models, or
-an ER diagram of your database schema, for example "draw the checkout
-flow in the architecture diagram". The agent describes what the diagram contains, and T3 Code
+Ask the agent for a flowchart, a state machine, a class diagram of your models,
+an ER diagram of your database schema, a C4 view or a system architecture diagram,
+for example "draw the checkout flow in the architecture diagram". The agent describes what the diagram contains, and T3 Code
 lays it out and draws it as ordinary shapes inside a named frame, placed to the
 right of what is already on the first page. Everything stays editable, and the
 whole drawing is one Undo step. A diagram can hold several generated drawings

@@ -4,7 +4,14 @@ import type { ELK, ElkNode } from "elkjs/lib/elk-api.js";
 
 import { localBox, pageBox, pagesInOrder, type RecordIndex, unionOf } from "./canvas.ts";
 import type { StoredNode } from "./identity.ts";
-import { type CompartmentsKind, compartmentTexts, type GeoKind, LOOKS, type Size } from "./kit.ts";
+import {
+  type CompartmentsKind,
+  compartmentTexts,
+  type GeoKind,
+  geoDrawing,
+  LOOKS,
+  type Size,
+} from "./kit.ts";
 import type { Decision } from "./merge.ts";
 import { type CurrentComposition, topShape } from "./membership.ts";
 import { listOf, type ComposeSpec } from "./spec.ts";
@@ -47,7 +54,7 @@ function geoSize(
   measure: MeasureText,
 ): Size {
   const text =
-    kind.hideLabel || label.trim() === ""
+    label.trim() === ""
       ? { w: 0, h: 0 }
       : measure(label, { family, fontSize: LABEL_FONT_SIZE_M, maxWidth: LABEL_MAX_WIDTH });
   const room = kind.labelRoom ?? 1;
@@ -224,7 +231,11 @@ export async function place(
       if (node.role !== "node") continue;
       written.add(node.key);
       const kind = spec.kit.nodeKinds[node.kind];
-      if (kind?.shape === "geo") sizes.set(node.key, geoSize(kind, node.label, family, measure));
+      if (kind?.shape === "geo")
+        sizes.set(
+          node.key,
+          geoSize(kind, geoDrawing(kind, node.label, node.body).label, family, measure),
+        );
       if (kind?.shape === "note") sizes.set(node.key, noteSize(node.label, family, measure));
       if (kind?.shape === "compartments") {
         const measured = compartmentsSize(kind, node, family, measure);

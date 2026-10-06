@@ -406,7 +406,7 @@ export const DiagramMetadataChange = Schema.Struct({
 });
 export type DiagramMetadataChange = typeof DiagramMetadataChange.Type;
 
-export const DIAGRAM_KITS = ["flow", "state", "uml-class", "er"] as const;
+export const DIAGRAM_KITS = ["flow", "state", "uml-class", "er", "c4", "architecture"] as const;
 export const DiagramKit = Schema.Literals(DIAGRAM_KITS);
 export type DiagramKit = typeof DiagramKit.Type;
 

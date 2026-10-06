@@ -24,7 +24,7 @@ import {
   type StoredMember,
 } from "./identity.ts";
 import { indexBetween, type IndexKey } from "./indexKeys.ts";
-import { compartmentTexts, edgeKindOf, LOOKS } from "./kit.ts";
+import { compartmentTexts, edgeKindOf, geoDrawing, LOOKS } from "./kit.ts";
 import { NOTE_SIZE, type Placement } from "./layout.ts";
 import type { Decision } from "./merge.ts";
 import { type CurrentComposition, type CurrentMember, topShape } from "./membership.ts";
@@ -192,13 +192,14 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
     }
     const record = ((): TLShape => {
       switch (kind.shape) {
-        case "geo":
+        case "geo": {
+          const drawing = geoDrawing(kind, node.label, node.body);
           return {
             ...shape,
             type: "geo",
             props: {
               geo: kind.geo,
-              dash: kind.dash ?? look.dash,
+              dash: drawing.dash ?? look.dash,
               url: "",
               w: box.w,
               h: box.h,
@@ -207,15 +208,16 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
               flipX: false,
               flipY: false,
               labelColor: "black",
-              color: kind.color,
+              color: drawing.color,
               fill: kind.fill ?? look.fill,
               size: "m",
               font: look.font,
               align: "middle",
               verticalAlign: "middle",
-              richText: toRichText(kind.hideLabel ? "" : node.label),
+              richText: toRichText(drawing.label),
             },
           } satisfies TLGeoShape;
+        }
         case "frame":
           return {
             ...shape,

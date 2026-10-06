@@ -47,6 +47,28 @@ export interface GeoKind extends KindBase {
   readonly labelRoom?: number;
   /** Markers such as initial and final states draw no label. */
   readonly hideLabel?: true;
+  /** Draws the body: extra label lines and, for an external element, its style. */
+  readonly draw?: (label: string, body: Schema.JsonObject) => GeoDrawing;
+}
+
+export interface GeoDrawing {
+  readonly label: string;
+  readonly color?: TLDefaultColorStyle;
+  readonly dash?: TLDefaultDashStyle;
+}
+
+/** A geo node's text and style as drawn; layout measures exactly what emit writes. */
+export function geoDrawing(kind: GeoKind, label: string, body: Schema.JsonObject | null) {
+  const drawing: GeoDrawing = kind.hideLabel
+    ? { label: "" }
+    : kind.draw && body
+      ? kind.draw(label, body)
+      : { label };
+  return {
+    label: drawing.label,
+    color: drawing.color ?? kind.color,
+    dash: drawing.dash ?? kind.dash,
+  };
 }
 
 /** A boundary: a frame titled by the label that holds every node whose `parent` names it. */
