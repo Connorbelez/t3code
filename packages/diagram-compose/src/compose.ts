@@ -13,7 +13,6 @@ import { compareIndex, indexRecords, pageBox, type RecordIndex, shapeOf } from "
 import { emit, emitRelease } from "./emit.ts";
 import {
   frameShapeId,
-  MEMBER_PARTS,
   memberBindingId,
   memberShapeId,
   type StoredEdge,
@@ -21,6 +20,7 @@ import {
   type StoredNode,
 } from "./identity.ts";
 import { indexBetween } from "./indexKeys.ts";
+import { partsOf } from "./kit.ts";
 import { type MeasureText, place } from "./layout.ts";
 import {
   type Decision,
@@ -226,9 +226,12 @@ function resulting(spec: ComposeSpec, decisions: readonly Decision[]): ComposeSp
   };
 }
 
-/** The frame, one shape per node, and an arrow with two bindings per edge. */
+/** The frame plus every part of every member, before anything is measured or laid out. */
 function checkSize(spec: ComposeSpec): void {
-  const recordCount = 1 + spec.nodes.length + 3 * spec.edges.length;
+  const recordCount = [...spec.nodes, ...spec.edges].reduce(
+    (count, member) => count + partsOf(spec.kit, member).length,
+    1,
+  );
   if (recordCount > DIAGRAM_MAX_BATCH_RECORDS) throw tooLarge(recordCount);
 }
 
@@ -293,11 +296,11 @@ function freeEpoch(spec: ComposeSpec, index: RecordIndex): number {
     const taken =
       index.has(frameShapeId(spec.key, epoch)) ||
       members.some((member) =>
-        MEMBER_PARTS[member.role].some((part) =>
+        partsOf(spec.kit, member).some((part) =>
           index.has(
-            part === "main"
-              ? memberShapeId(spec.key, epoch, member.key, part)
-              : memberBindingId(spec.key, epoch, member.key, part),
+            part === "start" || part === "end"
+              ? memberBindingId(spec.key, epoch, member.key, part)
+              : memberShapeId(spec.key, epoch, member.key, part),
           ),
         ),
       );

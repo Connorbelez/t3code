@@ -4,6 +4,7 @@ import {
   type TLArrowShape,
   type TLFrameShape,
   type TLGeoShape,
+  type TLGroupShape,
   type TLNoteShape,
   type TLParentId,
   type TLRecord,
@@ -23,10 +24,10 @@ import {
   type StoredMember,
 } from "./identity.ts";
 import { indexBetween, type IndexKey } from "./indexKeys.ts";
-import { edgeKindOf, LOOKS } from "./kit.ts";
+import { compartmentTexts, edgeKindOf, LOOKS } from "./kit.ts";
 import { NOTE_SIZE, type Placement } from "./layout.ts";
 import type { Decision } from "./merge.ts";
-import type { CurrentComposition, CurrentMember } from "./membership.ts";
+import { type CurrentComposition, type CurrentMember, topShape } from "./membership.ts";
 import type { ComposeSpec } from "./spec.ts";
 
 /**
@@ -126,7 +127,7 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
     const box = placement.nodes.get(node.key);
     const kind = spec.kit.nodeKinds[node.kind];
     if (!box || !kind) continue;
-    const base = decision.do === "overwrite" ? mainShape(decision.current) : undefined;
+    const base = decision.do === "overwrite" ? topShape(decision.current) : undefined;
     const moved = placement.parents.get(node.key);
     const parentId = moved === undefined ? (base?.parentId ?? frame.id) : shapeIdOf(moved);
     const shape = {
@@ -141,6 +142,54 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
       opacity: base?.opacity ?? 1,
       meta: base?.meta ?? {},
     } as const;
+    if (kind.shape === "compartments") {
+      // The group places the node; the header box spans it and each compartment covers one band.
+      const group = { ...shape, id: at(node.key, "group"), type: "group", props: {} } as const;
+      nodes.push(remember(withPartMeta<TLGroupShape>(group, spec.key, epoch, node, "group")));
+      const rows = placement.rows.get(node.key) ?? [];
+      let y = 0;
+      let index: IndexKey | null = null;
+      for (const [i, text] of compartmentTexts(kind, node.label, node.body).entries()) {
+        const part = i === 0 ? "main" : (`c${i}` as const);
+        const prior = decision.do === "overwrite" ? decision.current.parts.get(part) : undefined;
+        index = indexBetween(index, null);
+        const geo: TLGeoShape = {
+          id: at(node.key, part),
+          typeName: "shape",
+          type: "geo",
+          x: 0,
+          y,
+          rotation: 0,
+          index,
+          parentId: group.id,
+          isLocked: false,
+          opacity: 1,
+          meta: prior?.meta ?? {},
+          props: {
+            geo: "rectangle",
+            dash: look.dash,
+            url: "",
+            w: box.w,
+            h: i === 0 ? box.h : (rows[i] ?? 0),
+            growY: 0,
+            scale: 1,
+            flipX: false,
+            flipY: false,
+            labelColor: "black",
+            color: kind.color,
+            fill: i === 0 ? look.fill : "none",
+            size: i === 0 ? "m" : "s",
+            font: look.font,
+            align: i === 0 ? "middle" : "start",
+            verticalAlign: "start",
+            richText: toRichText(text),
+          },
+        };
+        y += rows[i] ?? 0;
+        nodes.push(remember(withPartMeta(geo, spec.key, epoch, node, part)));
+      }
+      continue;
+    }
     const record = ((): TLShape => {
       switch (kind.shape) {
         case "geo":
@@ -204,13 +253,12 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
   // to hold its children. Size is not content, so neither makes a member edited.
   for (const decision of decisions) {
     const box = placement.nodes.get(decision.key);
-    const main =
-      decision.do === "keep" && decision.current ? mainShape(decision.current) : undefined;
-    if (!box || !main) continue;
+    const top = decision.do === "keep" && decision.current ? topShape(decision.current) : undefined;
+    if (!box || !top) continue;
     const moved = placement.parents.get(decision.key);
-    const parentId = moved === undefined ? main.parentId : shapeIdOf(moved);
-    const index = parentId === main.parentId ? main.index : nextIndex(parentId);
-    const record = { ...main, x: box.x, y: box.y, parentId, index };
+    const parentId = moved === undefined ? top.parentId : shapeIdOf(moved);
+    const index = parentId === top.parentId ? top.index : nextIndex(parentId);
+    const record = { ...top, x: box.x, y: box.y, parentId, index };
     nodes.push(
       remember(
         record.type === "frame"
@@ -232,6 +280,7 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
     if (!start || !end || !kind) continue;
     const id = at(edge.key, "main");
     const base = decision.do === "overwrite" ? mainShape(decision.current) : undefined;
+    const drawing = kind.draw && edge.body ? kind.draw(edge.label, edge.body) : null;
     const parentId = arrowParent(final, start, end);
     const index = placeArrow(
       id,
@@ -259,16 +308,16 @@ export function emit(input: EmitInput): { puts: TLRecord[]; deletes: string[] } 
         kind: kind.arrowKind ?? spec.kit.arrowKind,
         labelColor: "black",
         color: kind.color,
-        fill: "none",
+        fill: kind.fill ?? "none",
         dash: kind.dash ?? look.dash,
         size: "m",
         arrowheadStart: kind.arrowheadStart,
-        arrowheadEnd: kind.arrowheadEnd,
+        arrowheadEnd: drawing?.arrowheadEnd ?? kind.arrowheadEnd,
         font: look.font,
         start: { x: 0, y: 0 },
         end: { x: to.x - from.x, y: to.y - from.y },
         bend: 0,
-        richText: toRichText(edge.label),
+        richText: toRichText(drawing?.label ?? edge.label),
         labelPosition: 0.5,
         scale: 1,
         elbowMidPoint: 0.5,

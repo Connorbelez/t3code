@@ -273,6 +273,92 @@ const grouped = {
     ],
   },
 } satisfies DiagramComposeRequest;
+// Classes are groups inside a package frame; arrows bind to header boxes across groups, into the
+// package, and back onto the same class.
+const library = {
+  spec: {
+    kit: "uml-class",
+    key: "library",
+    title: "Library",
+    nodes: [
+      { key: "catalog", kind: "package", label: "Catalog" },
+      {
+        key: "Item",
+        kind: "abstract",
+        parent: "catalog",
+        body: {
+          attributes: [{ visibility: "protected", name: "id", type: "string" }],
+          methods: [{ visibility: "public", name: "title", returns: "string" }],
+        },
+      },
+      {
+        key: "Book",
+        parent: "catalog",
+        body: { attributes: [{ visibility: "private", name: "isbn", type: "string" }] },
+      },
+      {
+        key: "Loanable",
+        kind: "interface",
+        body: { methods: [{ name: "lend", params: "to: Member", returns: "Loan" }] },
+      },
+      {
+        key: "Member",
+        body: {
+          attributes: [{ visibility: "public", name: "limit", type: "int", static: true }],
+        },
+      },
+      { key: "Status", kind: "enum", body: { values: ["OUT", "IN"] } },
+      { key: "why", kind: "note", label: "Members borrow up to 5 books", body: { on: "Member" } },
+    ],
+    edges: [
+      { from: "Book", to: "Item", kind: "inheritance" },
+      { from: "Item", to: "Loanable", kind: "realization" },
+      {
+        from: "Member",
+        to: "Book",
+        label: "borrows",
+        body: { from: "1", to: "0..5", directed: true },
+      },
+      { from: "Book", to: "catalog", kind: "composition" },
+      { from: "Member", to: "Member", label: "refers" },
+      { from: "Item", to: "Status", kind: "dependency" },
+    ],
+  },
+} satisfies DiagramComposeRequest;
+const shop = {
+  spec: {
+    kit: "er",
+    key: "shop",
+    title: "Shop",
+    nodes: [
+      {
+        key: "users",
+        body: {
+          columns: [
+            { name: "id", type: "uuid", pk: true },
+            { name: "email", type: "text" },
+          ],
+        },
+      },
+      {
+        key: "orders",
+        body: {
+          columns: [
+            { name: "id", type: "uuid", pk: true },
+            { name: "user_id", type: "uuid", fk: true },
+            { name: "note", type: "text", nullable: true },
+          ],
+        },
+      },
+      { key: "items", body: { columns: [{ name: "order_id", type: "uuid", pk: true, fk: true }] } },
+      { key: "tip", kind: "note", label: "Soft-deleted rows stay", body: { on: "orders" } },
+    ],
+    edges: [
+      { from: "users", to: "orders", label: "places", body: { from: "one", to: "many" } },
+      { from: "orders", to: "items", body: { from: "one", to: "oneOrMany" } },
+    ],
+  },
+} satisfies DiagramComposeRequest;
 function composeInto(editor: Editor, request: DiagramComposeRequest = checkout) {
   const records = editor.store.serialize("document");
   return compose(request, Object.values(records), {
@@ -351,6 +437,8 @@ describe("composed batches", () => {
   it.each([
     ["a state machine with nested composites and notes", orders, "Orders"],
     ["a flowchart with groups", grouped, "grouped"],
+    ["a class diagram with a package, notes and a self-association", library, "Library"],
+    ["an ER diagram with notes", shop, "Shop"],
   ])("pass the preflight for %s and recompose to no change", async (_, request, title) => {
     const editor = mount();
     addLooseShapes(editor);
@@ -580,6 +668,75 @@ describe("patch, remove and detach batches", () => {
     applyComposed(editor, again.changes);
     expect(compositionShapes(editor)).toHaveLength(13);
     expect(strip(before.flatMap((shape) => editor.getShape(shape.id) ?? []))).toEqual(before);
+  });
+});
+
+describe("compartment nodes", () => {
+  it("patch one class and its multiplicities, drop another, then remove the class diagram", async () => {
+    const editor = mount();
+    const first = await composeInto(editor, library);
+    assert(first.changes, "a new composition must produce changes");
+    applyComposed(editor, first.changes);
+
+    const patch: DiagramComposeRequest = {
+      mode: "patch",
+      spec: {
+        kit: "uml-class",
+        key: "library",
+        nodes: [
+          {
+            key: "Book",
+            parent: "catalog",
+            body: {
+              attributes: [
+                { visibility: "private", name: "isbn", type: "string" },
+                { visibility: "private", name: "pages", type: "int" },
+              ],
+            },
+          },
+        ],
+        edges: [
+          {
+            from: "Member",
+            to: "Book",
+            label: "borrows",
+            body: { from: "1", to: "0..3", directed: true },
+          },
+        ],
+      },
+      removeKeys: ["Status"],
+    };
+    const patched = await composeInto(editor, patch);
+    expect(patched.counts).toEqual({ created: 0, updated: 2, kept: 10, removed: 2 });
+    assert(patched.changes, "the patch must produce changes");
+    applyComposed(editor, patched.changes);
+    const book = editor.getCurrentPageShapes().find((shape) => {
+      const meta = shape.meta["t3Composition"] as { m?: string; p?: string } | undefined;
+      return meta?.m === "Book" && meta.p === "c1";
+    });
+    expect(book?.props).toMatchObject({
+      richText: toRichText("- isbn: string\n- pages: int"),
+    });
+    expect((await composeInto(editor, patch)).changes).toBeNull();
+
+    const remove: DiagramComposeRequest = { operation: "remove", key: "library" };
+    const removed = await composeInto(editor, remove);
+    assert(removed.changes, "removing must produce changes");
+    applyComposed(editor, removed.changes);
+    expect(compositionShapes(editor)).toEqual([]);
+    expect(editor.getCurrentPageShapes()).toEqual([]);
+  });
+
+  it("detach leaves each class grouped as ordinary shapes", async () => {
+    const editor = mount();
+    const first = await composeInto(editor, shop);
+    assert(first.changes, "a new composition must produce changes");
+    applyComposed(editor, first.changes);
+    const detached = await composeInto(editor, { operation: "detach", key: "shop" });
+    assert(detached.changes, "detaching must produce changes");
+    applyComposed(editor, detached.changes);
+    expect(compositionShapes(editor)).toEqual([]);
+    expect(editor.getCurrentPageShapes().filter((shape) => shape.type === "group")).toHaveLength(3);
   });
 });
 

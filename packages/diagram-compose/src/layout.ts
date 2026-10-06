@@ -3,9 +3,10 @@ import type { TLParentId } from "@tldraw/tlschema";
 import type { ELK, ElkNode } from "elkjs/lib/elk-api.js";
 
 import { localBox, pageBox, pagesInOrder, type RecordIndex, unionOf } from "./canvas.ts";
-import { type GeoKind, LOOKS, type Size } from "./kit.ts";
+import type { StoredNode } from "./identity.ts";
+import { type CompartmentsKind, compartmentTexts, type GeoKind, LOOKS, type Size } from "./kit.ts";
 import type { Decision } from "./merge.ts";
-import type { CurrentComposition } from "./membership.ts";
+import { type CurrentComposition, topShape } from "./membership.ts";
 import { listOf, type ComposeSpec } from "./spec.ts";
 
 /** Geometry the pipeline owns: node sizes from measured labels and layered positions from ELK. */
@@ -25,6 +26,7 @@ interface Box extends Size {
 
 /** tldraw's geo and note label: base font size 16 scaled for size `m`, inside 16px of padding per side. */
 const LABEL_FONT_SIZE_M = 16 * 1.375;
+const LABEL_FONT_SIZE_S = 16 * 1.125;
 const LABEL_PADDING = 16;
 const LABEL_MAX_WIDTH = 240;
 /** tldraw notes are a fixed 200px square that grows down to fit its text. */
@@ -62,6 +64,38 @@ function noteSize(label: string, family: TextFont["family"], measure: MeasureTex
   const maxWidth = NOTE_SIZE - 2 * LABEL_PADDING - 1;
   const text = measure(label, { family, fontSize: LABEL_FONT_SIZE_M, maxWidth });
   return { w: NOTE_SIZE, h: Math.max(NOTE_SIZE, Math.ceil(text.h + 2 * LABEL_PADDING)) };
+}
+
+/** Compartment text wraps past this width, so one long signature does not stretch the node. */
+const COMPARTMENT_MAX_WIDTH = 480;
+const COMPARTMENTS_MIN_WIDTH = 160;
+/** An empty compartment still shows as a band. */
+const EMPTY_COMPARTMENT = 24;
+
+/**
+ * Header text at size `m` and compartments at size `s`, each row tall enough that tldraw never
+ * grows it; the rows stack into the node's height.
+ */
+function compartmentsSize(
+  kind: CompartmentsKind,
+  node: StoredNode,
+  family: TextFont["family"],
+  measure: MeasureText,
+): { readonly size: Size; readonly rows: readonly number[] } {
+  const texts = compartmentTexts(kind, node.label, node.body).map((text, i) =>
+    text.trim() === ""
+      ? null
+      : measure(text, {
+          family,
+          fontSize: i === 0 ? LABEL_FONT_SIZE_M : LABEL_FONT_SIZE_S,
+          maxWidth: COMPARTMENT_MAX_WIDTH,
+        }),
+  );
+  const rows = texts.map((text) => (text ? snap(text.h + 2 * LABEL_PADDING) : EMPTY_COMPARTMENT));
+  const w = snap(
+    Math.max(COMPARTMENTS_MIN_WIDTH, ...texts.map((text) => (text?.w ?? 0) + 2 * LABEL_PADDING)),
+  );
+  return { size: { w, h: rows.reduce((sum, row) => sum + row, 0) }, rows };
 }
 
 function snap(value: number): number {
@@ -158,6 +192,8 @@ export interface Placement {
    * stays in whatever frame it is in now, wherever a human dragged it.
    */
   readonly parents: ReadonlyMap<string, string | null>;
+  /** Header and compartment heights, top to bottom, of the compartments nodes this compose writes. */
+  readonly rows: ReadonlyMap<string, readonly number[]>;
 }
 
 /**
@@ -177,6 +213,7 @@ export async function place(
 ): Promise<Placement> {
   const family = LOOKS[spec.kit.look].font;
   const sizes = new Map<string, Size>();
+  const rows = new Map<string, readonly number[]>();
   /** Parent-relative boxes of nodes on the canvas, with their canvas size. */
   const canvas = new Map<string, Box & { readonly parentId: string }>();
   const written = new Set<string>();
@@ -189,20 +226,21 @@ export async function place(
       const kind = spec.kit.nodeKinds[node.kind];
       if (kind?.shape === "geo") sizes.set(node.key, geoSize(kind, node.label, family, measure));
       if (kind?.shape === "note") sizes.set(node.key, noteSize(node.label, family, measure));
+      if (kind?.shape === "compartments") {
+        const measured = compartmentsSize(kind, node, family, measure);
+        sizes.set(node.key, measured.size);
+        rows.set(node.key, measured.rows);
+      }
       const stored = decision.do === "overwrite" ? decision.current.stored : null;
       if (stored?.role === "node" && stored.parent !== node.parent) moved.add(node.key);
     }
     const member = decision.do === "keep" || decision.do === "overwrite" ? decision.current : null;
     const shape = member?.parts.get("main");
-    if (shape?.typeName === "shape" && member?.stored.role === "node") {
+    const top = member && topShape(member);
+    if (shape?.typeName === "shape" && top && member?.stored.role === "node") {
+      // A compartments node's header box spans it, inside the group that places it.
       const box = localBox(shape);
-      canvas.set(decision.key, {
-        x: shape.x,
-        y: shape.y,
-        w: box.w,
-        h: box.h,
-        parentId: shape.parentId,
-      });
+      canvas.set(decision.key, { x: top.x, y: top.y, w: box.w, h: box.h, parentId: top.parentId });
     }
   }
   const sizeOf = (key: string): Size | undefined => sizes.get(key) ?? canvas.get(key);
@@ -338,11 +376,12 @@ export async function place(
       frame: { x, y, w: Math.max(props.w, fit.w), h: Math.max(props.h, fit.h) },
       nodes,
       parents,
+      rows,
     };
   }
   const pageId = targetPage(spec, index);
   const at = spec.position ?? besideContent(index, pageId);
-  return { pageId, frame: { x: at.x, y: at.y, ...fit }, nodes, parents };
+  return { pageId, frame: { x: at.x, y: at.y, ...fit }, nodes, parents, rows };
 }
 
 /** Gap kept between a new node and anything already placed. */

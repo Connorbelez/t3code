@@ -7,10 +7,11 @@ import {
 } from "@t3tools/contracts";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
+import * as SchemaAST from "effect/SchemaAST";
 import * as SchemaIssue from "effect/SchemaIssue";
 
 import type { StoredEdge, StoredNode } from "./identity.ts";
-import { ATTACH_EDGE_KIND, type BodySchema, type Kit, type NodeKind, NOTE_KIND } from "./kit.ts";
+import { ATTACH_EDGE_KIND, type BodySchema, type Kit, NOTE_KIND } from "./kit.ts";
 import { KITS } from "./kits/index.ts";
 
 /** The spec in full form: every default applied and every edge keyed. Nothing downstream sees shorthand. */
@@ -163,7 +164,7 @@ export function parseSpec(spec: DiagramSpec, outside: OutsideNodes = new Map()):
       label: node.label ?? node.key,
       parent: node.parent ?? null,
       ref: node.ref ?? null,
-      body: row ? parseBody(row, kind, node.body, `${path}.body`, issues) : null,
+      body: row ? parseBody(row.body, `kind "${kind}"`, node.body, `${path}.body`, issues) : null,
     };
   });
 
@@ -184,6 +185,7 @@ export function parseSpec(spec: DiagramSpec, outside: OutsideNodes = new Map()):
             label: edge[2],
             key: undefined,
             kind: undefined,
+            body: undefined,
             paths: { from: `${path}[0]`, to: `${path}[1]`, kind: `${path}.kind` },
           };
     for (const end of ["from", "to"] as const) {
@@ -195,7 +197,8 @@ export function parseSpec(spec: DiagramSpec, outside: OutsideNodes = new Map()):
       }
     }
     const kind = full.kind ?? kit.defaultEdgeKind;
-    if (!(kind in kit.edgeKinds)) {
+    const row = kit.edgeKinds[kind];
+    if (!row) {
       issues.push({
         path: full.paths.kind,
         message: `unknown edge kind "${kind}" for kit ${kit.name}; valid edge kinds: ${listOf(Object.keys(kit.edgeKinds))}`,
@@ -204,7 +207,17 @@ export function parseSpec(spec: DiagramSpec, outside: OutsideNodes = new Map()):
     const key = full.key ?? derivedKey(`${full.from}→${full.to}:${kind}`, derivedCounts);
     if (keys.has(key)) issues.push({ path: `${path}.key`, message: `duplicate key "${key}"` });
     keys.add(key);
-    return { role: "edge", key, from: full.from, to: full.to, kind, label: full.label ?? "" };
+    const body =
+      row && parseBody(row.body, `edge kind "${kind}"`, full.body, `${path}.body`, issues);
+    return {
+      role: "edge",
+      key,
+      from: full.from,
+      to: full.to,
+      kind,
+      label: full.label ?? "",
+      ...(body ? { body } : {}),
+    };
   });
 
   // A note's `body.on` is its attach line, keyed like any derived edge so it merges like one.
@@ -251,44 +264,78 @@ const formatIssue = SchemaIssue.makeFormatterStandardSchemaV1();
 
 /**
  * Kinds with a body schema always store an object, so an omitted body and `{}` are the same spec.
- * Kinds without one take no body.
+ * Kinds without one take no body. `kind` names the kind in messages, e.g. `edge kind "flow"`.
  */
 function parseBody(
-  row: NodeKind,
+  schema: BodySchema | undefined,
   kind: string,
   body: unknown,
   path: string,
   issues: SpecIssue[],
 ): Schema.JsonObject | null {
-  if (!row.body) {
-    if (body !== undefined) issues.push({ path, message: `kind "${kind}" takes no body fields` });
+  if (!schema) {
+    if (body !== undefined) issues.push({ path, message: `${kind} takes no body fields` });
     return null;
   }
-  const fields = Object.keys(row.body.fields);
+  const fields = Object.keys(schema.fields);
   const input = body ?? {};
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
     issues.push({ path, message: `body must be an object with fields: ${listOf(fields)}` });
     return null;
   }
-  const unknown = Object.keys(input).filter((field) => !fields.includes(field));
-  for (const field of unknown) {
-    issues.push({
-      path: `${path}.${field}`,
-      message: `unknown field "${field}" for kind "${kind}"; valid fields: ${listOf(fields)}`,
-    });
-  }
-  const decoded = bodyDecoder(row.body)(input);
+  const unknown = unknownFields(schema.ast, input, path, kind);
+  issues.push(...unknown);
+  const decoded = bodyDecoder(schema)(input);
   if (Result.isFailure(decoded)) {
     for (const issue of formatIssue(decoded.failure.issue).issues) {
       const at = (issue.path ?? []).map((segment) => {
         const key = typeof segment === "object" ? segment.key : segment;
         return typeof key === "number" ? `[${key}]` : `.${String(key)}`;
       });
-      issues.push({ path: `${path}${at.join("")}`, message: issue.message });
+      const field = issue.path?.at(-1);
+      const message =
+        issue.message === "Missing key" && field !== undefined
+          ? `missing required field "${String(typeof field === "object" ? field.key : field)}"`
+          : issue.message;
+      issues.push({ path: `${path}${at.join("")}`, message });
     }
     return null;
   }
   return unknown.length > 0 ? null : decodeJsonObject(decoded.success);
+}
+
+/**
+ * Fields the schema does not name, at any depth: in the body, in its nested objects and in their
+ * array items. Decoding alone would drop them silently, so a typo would lose content.
+ */
+function unknownFields(
+  ast: SchemaAST.AST,
+  value: unknown,
+  path: string,
+  kind: string,
+): SpecIssue[] {
+  // Optional fields are unions with undefined; nothing else in a body schema is a union.
+  if (SchemaAST.isUnion(ast)) {
+    return ast.types.flatMap((member) => unknownFields(member, value, path, kind));
+  }
+  if (SchemaAST.isArrays(ast) && Array.isArray(value)) {
+    const item = ast.rest[0];
+    return item
+      ? value.flatMap((element, i) => unknownFields(item, element, `${path}[${i}]`, kind))
+      : [];
+  }
+  if (!SchemaAST.isObjects(ast) || typeof value !== "object" || value === null) return [];
+  const fields = new Map(ast.propertySignatures.map((field) => [String(field.name), field.type]));
+  return Object.entries(value).flatMap(([field, item]) => {
+    const type = fields.get(field);
+    if (type) return unknownFields(type, item, `${path}.${field}`, kind);
+    return [
+      {
+        path: `${path}.${field}`,
+        message: `unknown field "${field}" for ${kind}; valid fields: ${listOf(Array.from(fields.keys()))}`,
+      },
+    ];
+  });
 }
 
 /** Parents must exist, be a container kind, and never loop back. */

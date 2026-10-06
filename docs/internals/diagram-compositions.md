@@ -2,7 +2,7 @@
 
 ## Default shapes only
 
-Compositions are built from stock tldraw shapes and bindings, tagged through `meta`, rather than custom shape utilities. Custom shapes would have to exist identically in the server room, the batch preflight rehearsal, every client editor, and import migration, would make us own their migrations, and would break exported documents outside T3 Code and older clients connected to newer servers. The accepted cost is notation fidelity: UML aggregation and composition share the stock diamond arrowhead, and ER cardinality is one combined midpoint arrow label rather than crow's feet. Revisit this decision if that fidelity becomes the blocker, not to make generated shapes resize themselves.
+Compositions are built from stock tldraw shapes and bindings, tagged through `meta`, rather than custom shape utilities. Custom shapes would have to exist identically in the server room, the batch preflight rehearsal, every client editor, and import migration, would make us own their migrations, and would break exported documents outside T3 Code and older clients connected to newer servers. The accepted cost is notation fidelity: UML relationships use stock arrowheads (the arrow's `fill` makes aggregation's diamond hollow and composition's filled), and ER cardinality is one combined midpoint arrow label rather than crow's feet. Revisit this decision if that fidelity becomes the blocker, not to make generated shapes resize themselves.
 
 ## Membership and regeneration
 

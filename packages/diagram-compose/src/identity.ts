@@ -32,6 +32,8 @@ const StoredEdge = Schema.Struct({
   to: Schema.String,
   kind: Schema.String,
   label: Schema.String,
+  /** Only edge kinds with a body schema store one, so other edges hash as they always have. */
+  body: Schema.optional(Schema.JsonObject),
 });
 /** A member exactly as normalized from the spec. Its hash decides whether the spec changed it. */
 const StoredMember = Schema.Union([StoredNode, StoredEdge]);
@@ -39,8 +41,15 @@ export type StoredNode = typeof StoredNode.Type;
 export type StoredEdge = typeof StoredEdge.Type;
 export type StoredMember = typeof StoredMember.Type;
 
-/** Record roles within a member. `main` carries the stored spec and decides whether the member exists. */
-export type PartName = "main" | "start" | "end";
+/**
+ * Record roles within a member. `main` carries the stored spec and decides whether the member
+ * exists. A compartments node adds its `group` and one `c1`, `c2`, … geo per compartment.
+ */
+const PartName = Schema.Union([
+  Schema.Literals(["main", "start", "end", "group"]),
+  Schema.TemplateLiteral(["c", Schema.Int]),
+]);
+export type PartName = typeof PartName.Type;
 export const MEMBER_PARTS = {
   node: ["main"],
   edge: ["main", "start", "end"],
@@ -51,7 +60,7 @@ const PartMeta = Schema.Struct({
   c: Schema.String,
   e: Schema.Int,
   m: Schema.String,
-  p: Schema.Literals(["main", "start", "end"]),
+  p: PartName,
   f: Schema.String,
   spec: Schema.optional(StoredMember),
 });

@@ -12,12 +12,12 @@ import * as Schema from "effect/Schema";
 import mermaid from "mermaid";
 
 /**
- * Mermaid flowchart and stateDiagram text to a composition spec. Mermaid's parsed databases are
+ * Mermaid flowchart, stateDiagram, classDiagram and erDiagram text to a composition spec. Mermaid's parsed databases are
  * semi-internal API, so mermaid is pinned exactly and each supported type has fixtures. Import
  * this module lazily: mermaid is large and needs a DOM.
  */
 
-const SUPPORTED = "flowchart, stateDiagram";
+const SUPPORTED = "flowchart, stateDiagram, classDiagram, erDiagram";
 const TEXT_PATH = "mermaid.text";
 
 interface Content {
@@ -33,6 +33,9 @@ const MAPPERS: Record<string, { readonly kit: DiagramKit; readonly map: (db: obj
     "flowchart-elk": { kit: "flow", map: flowchart },
     stateDiagram: { kit: "state", map: stateDiagram },
     state: { kit: "state", map: stateDiagram },
+    class: { kit: "uml-class", map: classDiagram },
+    classDiagram: { kit: "uml-class", map: classDiagram },
+    er: { kit: "er", map: erDiagram },
   };
 
 export async function mermaidToSpec(source: DiagramMermaidSource): Promise<DiagramSpec> {
@@ -246,6 +249,297 @@ function stateDiagram(db: object): Content {
   };
 }
 
+const ClassMember = Schema.Struct({
+  id: Schema.String,
+  visibility: Schema.String,
+  classifier: Schema.String,
+  parameters: Schema.optional(Schema.String),
+  returnType: Schema.optional(Schema.String),
+});
+const ClassNode = Schema.Struct({
+  id: Schema.String,
+  type: Schema.String,
+  label: Schema.String,
+  members: Schema.Array(ClassMember),
+  methods: Schema.Array(ClassMember),
+  annotations: Schema.Array(Schema.String),
+  parent: Schema.optional(Schema.String),
+});
+const End = Schema.Union([Schema.Number, Schema.String]);
+const ClassRelation = Schema.Struct({
+  id1: Schema.String,
+  id2: Schema.String,
+  relationTitle1: Schema.String,
+  relationTitle2: Schema.String,
+  title: Schema.optional(Schema.String),
+  relation: Schema.Struct({ type1: End, type2: End, lineType: Schema.Number }),
+});
+const ClassNote = Schema.Struct({
+  id: Schema.String,
+  class: Schema.optional(Schema.String),
+  text: Schema.String,
+});
+const Namespace = Schema.Struct({ id: Schema.String, parent: Schema.optional(Schema.String) });
+const decodeClassNodes = Schema.decodeUnknownSync(Schema.Array(ClassNode));
+const decodeClassRelations = Schema.decodeUnknownSync(Schema.Array(ClassRelation));
+const decodeClassNotes = Schema.decodeUnknownSync(Schema.Array(ClassNote));
+const decodeNamespaces = Schema.decodeUnknownSync(Schema.Array(Namespace));
+
+const VISIBILITIES: Record<string, string> = {
+  "+": "public",
+  "-": "private",
+  "#": "protected",
+  "~": "package",
+};
+const CLASS_KINDS: Record<string, string> = {
+  interface: "interface",
+  abstract: "abstract",
+  enumeration: "enum",
+  enum: "enum",
+};
+/** Mermaid's relation end types; "none" is a plain end. */
+const RELATION_ENDS: Record<number, string> = {
+  0: "aggregation",
+  1: "extension",
+  2: "composition",
+  3: "arrow",
+  4: "lollipop",
+};
+const DOTTED = 1;
+/**
+ * Mermaid ranks a relation's first class higher, as in `Animal <|-- Dog`, while the kit lays out
+ * subclass-to-superclass edges bottom to top; so Mermaid's TB is the kit's up.
+ */
+const CLASS_DIRECTIONS: Record<string, DiagramLayoutDirection> = {
+  TB: "up",
+  TD: "up",
+  BT: "down",
+  LR: "left",
+  RL: "right",
+};
+
+function classDiagram(db: object): Content {
+  const classes = decodeClassNodes(Array.from(mapValues(call(db, "getClasses"))));
+  const namespaces = decodeNamespaces(Array.from(mapValues(call(db, "getNamespaces"))));
+  const notes = decodeClassNotes(Array.from(mapValues(call(db, "getNotes"))));
+  const parentOf = new Map(classes.map((item) => [item.id, item.parent]));
+  const noteCounts = new Map<string, number>();
+  const nodes = [
+    ...namespaces.map((namespace) =>
+      node(namespace.id, { kind: "package", parent: namespace.parent }),
+    ),
+    ...classes.map((item) => {
+      const annotation = item.annotations[0]?.toLowerCase();
+      const kind = annotation === undefined ? undefined : CLASS_KINDS[annotation];
+      const stereotype =
+        annotation !== undefined && kind === undefined ? item.annotations[0] : undefined;
+      const body =
+        kind === "enum"
+          ? { values: item.members.map((member) => generics(member.id)) }
+          : {
+              ...(stereotype === undefined ? {} : { stereotype }),
+              attributes: item.members.flatMap((member) => attribute(member) ?? []),
+              methods: item.methods.flatMap((member) => method(member) ?? []),
+            };
+      const label = item.type === "" ? item.label : `${item.label}<${generics(item.type)}>`;
+      return node(item.id, { kind, label, parent: item.parent, body: compact(body) });
+    }),
+    ...notes.map((note) => {
+      if (note.class === undefined) return node(note.id, { kind: "note", label: note.text });
+      const count = (noteCounts.get(note.class) ?? 0) + 1;
+      noteCounts.set(note.class, count);
+      return node(`${note.class}-note${count === 1 ? "" : count}`, {
+        kind: "note",
+        label: note.text,
+        parent: parentOf.get(note.class),
+        body: { on: memberKey(note.class) },
+      });
+    }),
+  ];
+  return {
+    direction: CLASS_DIRECTIONS[stringOrEmpty(call(db, "getDirection"))],
+    nodes,
+    edges: decodeClassRelations(call(db, "getRelations")).map(relation),
+  };
+}
+
+/** `name: Type` or Mermaid's Java-style `Type name`. */
+function attribute(member: typeof ClassMember.Type) {
+  const text = generics(member.id).trim();
+  const colon = text.indexOf(":");
+  const space = text.lastIndexOf(" ");
+  const [name, type] =
+    colon > 0
+      ? [text.slice(0, colon), text.slice(colon + 1)]
+      : space > 0
+        ? [text.slice(space + 1), text.slice(0, space)]
+        : [text, ""];
+  return compact({
+    ...memberFlags(member),
+    name: name.trim(),
+    type: type.trim(),
+  });
+}
+
+function method(member: typeof ClassMember.Type) {
+  return compact({
+    ...memberFlags(member),
+    name: member.id,
+    params: generics(member.parameters ?? ""),
+    returns: generics(member.returnType ?? ""),
+  });
+}
+
+/** Mermaid's `$` classifier is static; `*` (abstract) has no field and is dropped. */
+function memberFlags(member: typeof ClassMember.Type) {
+  const visibility = VISIBILITIES[member.visibility];
+  return {
+    ...(visibility === undefined ? {} : { visibility }),
+    ...(member.classifier === "$" ? { static: true } : {}),
+  };
+}
+
+/** The decorated end becomes `to`, so `Animal <|-- Dog` is Dog's inheritance of Animal. */
+function relation(item: typeof ClassRelation.Type): DiagramSpecEdge {
+  const [start, end] = [item.relation.type1, item.relation.type2].map((type) =>
+    typeof type === "number" ? RELATION_ENDS[type] : undefined,
+  );
+  const between = `the relation between ${item.id1} and ${item.id2}`;
+  // `<-->` is navigable both ways, which UML draws as a plain association.
+  const bothArrows = start === "arrow" && end === "arrow";
+  if (start !== undefined && end !== undefined && !bothArrows) {
+    throw unmappable(`${between} is decorated at both ends; draw it as two relations`);
+  }
+  const reversed = start !== undefined && end === undefined;
+  const decoration = bothArrows ? undefined : reversed ? start : end;
+  const [from, to] = reversed ? [item.id2, item.id1] : [item.id1, item.id2];
+  const titles = [item.relationTitle1, item.relationTitle2].map((title) =>
+    title === "none" || title.trim() === "" ? undefined : title.trim(),
+  );
+  const [fromTitle, toTitle] = reversed ? titles.toReversed() : titles;
+  const dotted = item.relation.lineType === DOTTED;
+  const kind = ((): string | undefined => {
+    switch (decoration) {
+      case undefined:
+        return undefined;
+      case "arrow":
+        return dotted ? "dependency" : undefined;
+      case "extension":
+        return dotted ? "realization" : "inheritance";
+      case "aggregation":
+      case "composition":
+        return decoration;
+      default:
+        throw unmappable(
+          "lollipop interfaces (()--) cannot be drawn; declare an <<interface>> class and relate to it with ..|>",
+        );
+    }
+  })();
+  const multiplicities = kind === undefined || kind === "aggregation" || kind === "composition";
+  const body = compact({
+    ...(multiplicities ? { from: fromTitle, to: toTitle } : {}),
+    ...(kind === undefined && decoration === "arrow" ? { directed: true } : {}),
+  });
+  const label = cleanLabel(item.title ?? "");
+  if (kind === undefined && body === undefined) return link(from, to, label);
+  return {
+    from: memberKey(from),
+    to: memberKey(to),
+    ...(kind === undefined ? {} : { kind }),
+    ...(label === "" ? {} : { label }),
+    ...(body === undefined ? {} : { body }),
+  };
+}
+
+const ErAttribute = Schema.Struct({
+  type: Schema.String,
+  name: Schema.String,
+  keys: Schema.Array(Schema.String),
+});
+const ErEntity = Schema.Struct({
+  id: Schema.String,
+  label: Schema.String,
+  alias: Schema.String,
+  attributes: Schema.Array(ErAttribute),
+});
+const ErRelationship = Schema.Struct({
+  entityA: Schema.String,
+  entityB: Schema.String,
+  roleA: Schema.String,
+  relSpec: Schema.Struct({ cardA: Schema.String, cardB: Schema.String }),
+});
+const decodeEntities = Schema.decodeUnknownSync(Schema.Array(ErEntity));
+const decodeRelationships = Schema.decodeUnknownSync(Schema.Array(ErRelationship));
+
+const CARDINALITIES: Record<string, string> = {
+  ONLY_ONE: "one",
+  ZERO_OR_ONE: "zeroOrOne",
+  ZERO_OR_MORE: "many",
+  ONE_OR_MORE: "oneOrMany",
+};
+
+function erDiagram(db: object): Content {
+  const entities = decodeEntities(Array.from(mapValues(call(db, "getEntities"))));
+  const names = new Map(entities.map((entity) => [entity.id, entity.label]));
+  const nameOf = (id: string) => names.get(id) ?? id;
+  const cardinality = (value: string, entity: string) => {
+    const mapped = CARDINALITIES[value];
+    if (mapped) return mapped;
+    throw unmappable(
+      `a relationship of ${nameOf(entity)} has cardinality ${value}, which the er kit cannot draw; valid cardinalities: ||, |o, }o, }|`,
+    );
+  };
+  return {
+    direction: DIRECTIONS[stringOrEmpty(call(db, "getDirection"))],
+    nodes: entities.map((entity) =>
+      node(entity.label, {
+        label: entity.alias === "" ? undefined : entity.alias,
+        body: compact({
+          columns: entity.attributes.flatMap((column) =>
+            compact({
+              name: column.name,
+              type: column.type,
+              ...(column.keys.includes("PK") ? { pk: true } : {}),
+              ...(column.keys.includes("FK") ? { fk: true } : {}),
+            }),
+          ),
+        }),
+      }),
+    ),
+    // Mermaid stores each end's cardinality on the opposite side: cardB belongs to entityA.
+    edges: decodeRelationships(call(db, "getRelationships")).map((item) => {
+      const label = cleanLabel(item.roleA);
+      return {
+        from: memberKey(nameOf(item.entityA)),
+        to: memberKey(nameOf(item.entityB)),
+        ...(label === "" ? {} : { label }),
+        body: {
+          from: cardinality(item.relSpec.cardB, item.entityA),
+          to: cardinality(item.relSpec.cardA, item.entityB),
+        },
+      };
+    }),
+  };
+}
+
+/** Mermaid writes generics as `List~String~`. */
+function generics(text: string): string {
+  return text.replace(/~([^~]*)~/g, "<$1>");
+}
+
+/** Drops empty fields, and returns undefined when none are left, so specs stay as short as the Mermaid. */
+function compact<T extends Record<string, unknown>>(fields: T): Partial<T> | undefined {
+  const kept = Object.entries(fields).filter(
+    ([, value]) =>
+      value !== undefined && value !== "" && !(Array.isArray(value) && value.length === 0),
+  );
+  return kept.length === 0 ? undefined : (Object.fromEntries(kept) as Partial<T>);
+}
+
+function mapValues(value: unknown): Iterable<unknown> {
+  return value instanceof Map ? value.values() : [];
+}
+
 /** Spec defaults keep the output as short as the Mermaid: labels equal to keys are dropped. */
 function node(
   id: string,
@@ -253,7 +547,7 @@ function node(
     readonly kind?: string | undefined;
     readonly label?: string | undefined;
     readonly parent?: string | undefined;
-    readonly body?: { readonly on: string };
+    readonly body?: DiagramSpecNode["body"];
   },
 ): DiagramSpecNode {
   const key = memberKey(id);

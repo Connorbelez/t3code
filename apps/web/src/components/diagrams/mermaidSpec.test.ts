@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vite-plus/test";
 
+import { validateComposeRequest } from "@t3tools/diagram-compose/model";
+
 import { mermaidToSpec } from "./mermaidSpec";
 
 const toSpec = (text: string) => mermaidToSpec({ key: "m", text });
@@ -157,6 +159,169 @@ describe("Mermaid stateDiagram", () => {
   });
 });
 
+describe("Mermaid classDiagram", () => {
+  it("maps classes, members, stereotypes, namespaces, notes and every relation", async () => {
+    const spec = await toSpec(`classDiagram
+  class Animal {
+    <<abstract>>
+    +String name
+    -int age$
+    #List~String~ tags
+    id: string
+    +eat(food: Food) bool
+    +sleep()$ void
+    +move()*
+  }
+  class Shape~T~
+  class Color {
+    <<enumeration>>
+    RED
+    GREEN
+  }
+  class Pet {
+    <<interface>>
+  }
+  class Repo {
+    <<service>>
+  }
+  Animal <|-- Dog : extends
+  Dog "1" *-- "4" Leg
+  Dog o-- Toy
+  Dog --> Owner : belongs
+  Dog ..> Food
+  Dog ..|> Pet
+  Owner "1" -- "0..*" Dog : owns
+  Dog <-- Cat
+  Cat <--> Owner
+  note for Dog "good boy"
+  namespace Zoo {
+    class Keeper
+  }
+  style Dog fill:#f9f`);
+    expect(validateComposeRequest({ spec })).toBe("m");
+    expect(spec).toEqual({
+      kit: "uml-class",
+      key: "m",
+      direction: "up",
+      nodes: [
+        { key: "Zoo", kind: "package" },
+        {
+          key: "Animal",
+          kind: "abstract",
+          body: {
+            attributes: [
+              { visibility: "public", name: "name", type: "String" },
+              { visibility: "private", static: true, name: "age", type: "int" },
+              { visibility: "protected", name: "tags", type: "List<String>" },
+              { name: "id", type: "string" },
+            ],
+            methods: [
+              { visibility: "public", name: "eat", params: "food: Food", returns: "bool" },
+              { visibility: "public", static: true, name: "sleep", returns: "void" },
+              { visibility: "public", name: "move" },
+            ],
+          },
+        },
+        { key: "Shape", label: "Shape<T>" },
+        { key: "Color", kind: "enum", body: { values: ["RED", "GREEN"] } },
+        { key: "Pet", kind: "interface" },
+        { key: "Repo", body: { stereotype: "service" } },
+        { key: "Dog" },
+        { key: "Leg" },
+        { key: "Toy" },
+        { key: "Owner" },
+        { key: "Food" },
+        { key: "Cat" },
+        { key: "Keeper", parent: "Zoo" },
+        { key: "Dog-note", kind: "note", label: "good boy", body: { on: "Dog" } },
+      ],
+      edges: [
+        { from: "Dog", to: "Animal", kind: "inheritance", label: "extends" },
+        { from: "Leg", to: "Dog", kind: "composition", body: { from: "4", to: "1" } },
+        { from: "Toy", to: "Dog", kind: "aggregation" },
+        { from: "Dog", to: "Owner", label: "belongs", body: { directed: true } },
+        { from: "Dog", to: "Food", kind: "dependency" },
+        { from: "Dog", to: "Pet", kind: "realization" },
+        { from: "Owner", to: "Dog", label: "owns", body: { from: "1", to: "0..*" } },
+        { from: "Cat", to: "Dog", body: { directed: true } },
+        ["Cat", "Owner"],
+      ],
+    });
+  });
+
+  it.each([
+    ["direction TB", "up"],
+    ["direction BT", "down"],
+    ["direction LR", "left"],
+    ["direction RL", "right"],
+  ])("lays out %s with superclasses where Mermaid puts them (%s)", async (line, direction) => {
+    expect((await toSpec(`classDiagram\n  ${line}\n  A <|-- B`)).direction).toBe(direction);
+  });
+});
+
+describe("Mermaid erDiagram", () => {
+  it("maps entities, aliases, keyed columns and both cardinalities of each relationship", async () => {
+    const spec = await toSpec(`erDiagram
+  direction LR
+  CUSTOMER ||--o{ ORDER : places
+  ORDER ||--|{ LINE_ITEM : contains
+  CUSTOMER }|..|{ ADDRESS : uses
+  PRODUCT |o--o| LINE_ITEM : "is in"
+  CUSTOMER {
+    string id PK "the id"
+    string name
+    string orgId FK, UK
+  }
+  p[Person] {
+    string name
+  }`);
+    expect(validateComposeRequest({ spec })).toBe("m");
+    expect(spec).toEqual({
+      kit: "er",
+      key: "m",
+      direction: "right",
+      nodes: [
+        {
+          key: "CUSTOMER",
+          body: {
+            columns: [
+              { name: "id", type: "string", pk: true },
+              { name: "name", type: "string" },
+              { name: "orgId", type: "string", fk: true },
+            ],
+          },
+        },
+        { key: "ORDER" },
+        { key: "LINE_ITEM" },
+        { key: "ADDRESS" },
+        { key: "PRODUCT" },
+        { key: "p", label: "Person", body: { columns: [{ name: "name", type: "string" }] } },
+      ],
+      edges: [
+        { from: "CUSTOMER", to: "ORDER", label: "places", body: { from: "one", to: "many" } },
+        {
+          from: "ORDER",
+          to: "LINE_ITEM",
+          label: "contains",
+          body: { from: "one", to: "oneOrMany" },
+        },
+        {
+          from: "CUSTOMER",
+          to: "ADDRESS",
+          label: "uses",
+          body: { from: "oneOrMany", to: "oneOrMany" },
+        },
+        {
+          from: "PRODUCT",
+          to: "LINE_ITEM",
+          label: "is in",
+          body: { from: "zeroOrOne", to: "zeroOrOne" },
+        },
+      ],
+    });
+  });
+});
+
 describe("Mermaid errors", () => {
   it.each([
     ["sequenceDiagram\n  A->>B: hi", "sequence diagrams are not supported"],
@@ -167,7 +332,10 @@ describe("Mermaid errors", () => {
       code: "unsupported-mermaid",
       details: {
         issues: [
-          { path: "mermaid.text", message: `${reason}; supported types: flowchart, stateDiagram` },
+          {
+            path: "mermaid.text",
+            message: `${reason}; supported types: flowchart, stateDiagram, classDiagram, erDiagram`,
+          },
         ],
       },
     });
@@ -181,6 +349,14 @@ describe("Mermaid errors", () => {
     [
       "stateDiagram-v2\n  state f <<fork>>\n  [*] --> f",
       'state "f" is a fork, which the state kit cannot draw; valid state types: state, [*], <<choice>>, composite states and notes',
+    ],
+    [
+      "classDiagram\n  A <|--|> B",
+      "the relation between A and B is decorated at both ends; draw it as two relations",
+    ],
+    [
+      "classDiagram\n  A ()-- B",
+      "lollipop interfaces (()--) cannot be drawn; declare an <<interface>> class and relate to it with ..|>",
     ],
     [
       "stateDiagram-v2\n  state P {\n    [*] --> A\n    --\n    [*] --> B\n  }",

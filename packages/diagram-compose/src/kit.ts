@@ -15,6 +15,8 @@ import type {
 } from "@tldraw/tlschema";
 import * as Schema from "effect/Schema";
 
+import { MEMBER_PARTS, type PartName, type StoredMember } from "./identity.ts";
+
 /** A kit is vocabulary plus style rows. Lowering, layout and emission stay generic. */
 
 export interface Size {
@@ -58,7 +60,25 @@ export interface NoteKind extends KindBase {
   readonly color: TLDefaultColorStyle;
 }
 
-export type NodeKind = GeoKind | FrameKind | NoteKind;
+/** The lines of one compartment, from the node's validated body. */
+export type CompartmentLines = (body: Schema.JsonObject) => readonly string[];
+
+/**
+ * A UML class or a table: a header box spanning the whole node with stacked compartments of
+ * multiline text over its lower part, grouped so the node moves as one unit. Arrows bind to the
+ * header box, so they end at the node's outline.
+ */
+export interface CompartmentsKind extends KindBase {
+  readonly shape: "compartments";
+  readonly body: BodySchema;
+  readonly color: TLDefaultColorStyle;
+  /** Lines above the label, such as «interface». */
+  readonly heading: (body: Schema.JsonObject) => readonly string[];
+  /** Always drawn, empty or not, so a kind's parts are fixed. */
+  readonly compartments: readonly [CompartmentLines, ...CompartmentLines[]];
+}
+
+export type NodeKind = GeoKind | FrameKind | NoteKind | CompartmentsKind;
 
 export interface EdgeKind {
   readonly description: string;
@@ -66,8 +86,19 @@ export interface EdgeKind {
   readonly arrowheadStart: TLArrowShapeArrowheadStyle;
   readonly arrowheadEnd: TLArrowShapeArrowheadStyle;
   readonly dash?: TLDefaultDashStyle;
+  /** Fills closed arrowheads; `none` draws them hollow. */
+  readonly fill?: TLDefaultFillStyle;
   /** Overrides the kit's arrow kind. */
   readonly arrowKind?: "elbow" | "arc";
+  /** Edge kinds without a body schema take no body. */
+  readonly body?: BodySchema;
+  /** Draws the body: the arrow's text and, for a directed association, its head. */
+  readonly draw?: (label: string, body: Schema.JsonObject) => EdgeDrawing;
+}
+
+export interface EdgeDrawing {
+  readonly label: string;
+  readonly arrowheadEnd?: TLArrowShapeArrowheadStyle;
 }
 
 export const LOOKS = {
@@ -127,6 +158,32 @@ export function defineKit<N extends string, E extends string>(kit: Kit<N, E>): K
 
 export function edgeKindOf(kit: Kit, kind: string): EdgeKind | undefined {
   return kind === ATTACH_EDGE_KIND ? attach : kit.edgeKinds[kind];
+}
+
+/** Every part a member is drawn with, `main` first. A member missing one of them was edited. */
+export function partsOf(kit: Kit, member: StoredMember): readonly PartName[] {
+  const kind = member.role === "node" ? kit.nodeKinds[member.kind] : undefined;
+  if (kind?.shape !== "compartments") return MEMBER_PARTS[member.role];
+  return ["main", "group", ...kind.compartments.map((_, i) => `c${i + 1}` as const)];
+}
+
+/** The header box's text, then each compartment's, as drawn. */
+export function compartmentTexts(
+  kind: CompartmentsKind,
+  label: string,
+  body: Schema.JsonObject | null,
+): string[] {
+  const fields = body ?? {};
+  return [
+    [...kind.heading(fields), label].join("\n"),
+    ...kind.compartments.map((lines) => lines(fields).join("\n")),
+  ];
+}
+
+/** One midpoint label for an edge and what sits at its two ends, e.g. "1 ── places ── 0..*". */
+export function endsLabel(from: string | undefined, label: string, to: string | undefined): string {
+  if (from === undefined && to === undefined) return label;
+  return [from, label, to].filter((part) => part !== undefined && part !== "").join(" ── ");
 }
 
 export function referenceOf(kit: Kit): DiagramKitReference {

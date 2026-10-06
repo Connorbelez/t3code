@@ -55,7 +55,8 @@ permanently deletes its active and archived diagrams; export them first to keep 
 
 ### Ask the agent for a diagram
 
-Ask the agent for a flowchart or a state machine, for example "draw the checkout
+Ask the agent for a flowchart, a state machine, a class diagram of your models, or
+an ER diagram of your database schema, for example "draw the checkout
 flow in the architecture diagram". The agent describes what the diagram contains, and T3 Code
 lays it out and draws it as ordinary shapes inside a named frame, placed to the
 right of what is already on the first page. Everything stays editable, and the
@@ -76,7 +77,7 @@ the drawing, so you can drag a whole group. Moving a shape into or out of a grou
 frame doesn't change which group the agent thinks it belongs to. The agent can
 also add sticky notes, optionally linked to a shape by a dashed line.
 
-The agent can also send Mermaid flowchart or state diagram text, for example
+The agent can also send Mermaid flowchart, state, class, or ER diagram text, for example
 "turn the Mermaid in your last answer into a diagram". The result is the same
 editable drawing, and asking again with changed Mermaid updates it in place.
 Mermaid styling is not carried over, and other Mermaid diagram types are not

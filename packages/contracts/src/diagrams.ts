@@ -406,7 +406,7 @@ export const DiagramMetadataChange = Schema.Struct({
 });
 export type DiagramMetadataChange = typeof DiagramMetadataChange.Type;
 
-export const DIAGRAM_KITS = ["flow", "state"] as const;
+export const DIAGRAM_KITS = ["flow", "state", "uml-class", "er"] as const;
 export const DiagramKit = Schema.Literals(DIAGRAM_KITS);
 export type DiagramKit = typeof DiagramKit.Type;
 
@@ -441,6 +441,8 @@ export const DiagramSpecEdgeObject = Schema.Struct({
   to: DiagramEdgeEndpoint,
   kind: Schema.optional(Schema.String.check(Schema.isMaxLength(64))),
   label: Schema.optional(Schema.String.check(Schema.isMaxLength(500))),
+  /** Validated per kit edge kind, such as multiplicities on a UML association. */
+  body: Schema.optional(boundedJson(4 * 1024)),
 });
 /** Edges accept `[from, to, label?]` with the kit's default edge kind. */
 export const DiagramSpecEdge = Schema.Union([

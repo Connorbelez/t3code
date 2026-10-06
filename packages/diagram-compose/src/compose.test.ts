@@ -1,6 +1,6 @@
 import type { DiagramHostComposeResult, DiagramSpec } from "@t3tools/contracts";
 import { toRichText, type TLRecord, type TLShape } from "@tldraw/tlschema";
-import { describe, expect, it } from "vite-plus/test";
+import { assert, describe, expect, it } from "vite-plus/test";
 
 import { compose, type ComposePorts } from "./compose.ts";
 import { readCompositions, validateComposeRequest } from "./model.ts";
@@ -1186,6 +1186,497 @@ describe("validating boundaries, notes and sources", () => {
     expect(issuesOf({ spec: CHECKOUT, mermaid: { key: "x", text: "" } })).toMatchObject({
       code: "invalid-spec",
       details: { issues: [{ path: "mermaid", message: "pass either spec or mermaid, not both" }] },
+    });
+  });
+});
+
+describe("class and ER kits", () => {
+  const ORDERS: DiagramSpec = {
+    kit: "uml-class",
+    key: "orders",
+    nodes: [
+      {
+        key: "Order",
+        body: {
+          attributes: [
+            { visibility: "private", name: "id", type: "string" },
+            { visibility: "public", name: "count", type: "int", static: true },
+          ],
+          methods: [
+            { visibility: "public", name: "total", params: "tax: number", returns: "number" },
+          ],
+        },
+      },
+      { key: "Payable", kind: "interface" },
+      { key: "Status", kind: "enum", body: { values: ["OPEN", "PAID"] } },
+    ],
+    edges: [
+      { from: "Order", to: "Payable", kind: "realization" },
+      { from: "Order", to: "Status", body: { from: "*", to: "1", directed: true } },
+    ],
+  };
+
+  const issuesOf = (request: Parameters<typeof validateComposeRequest>[0]) => {
+    try {
+      validateComposeRequest(request);
+    } catch (cause) {
+      return cause;
+    }
+    return undefined;
+  };
+
+  /** A member's shapes in put order: part, type, parent part, local box and text. */
+  function drawn(records: readonly TLRecord[], key: string) {
+    const byId = new Map(records.map((record) => [record.id as string, record]));
+    return records.flatMap((record) => {
+      if (record.typeName !== "shape" || memberKey(record) !== key) return [];
+      const parent = byId.get(record.parentId);
+      const props = record.props as Record<string, unknown>;
+      return [
+        {
+          part: part(record),
+          type: record.type,
+          parent: parent && (part(parent) ?? "frame"),
+          ...box(record),
+          ...("richText" in props ? { text: plain(props["richText"]) } : {}),
+        },
+      ];
+    });
+  }
+
+  const plain = (richText: unknown): string =>
+    ((richText as { content: { content?: { text: string }[] }[] }).content ?? [])
+      .map((paragraph) => (paragraph.content ?? []).map((run) => run.text).join(""))
+      .join("\n");
+
+  it("draws a class as a group holding a header box that spans it and one band per compartment", async () => {
+    const puts = ((await run(ORDERS)).changes?.puts ?? []) as TLRecord[];
+    expect(drawn(puts, "Order")).toEqual([
+      { part: "group", type: "group", parent: "frame", x: 48, y: 280, w: 0, h: 0 },
+      { part: "main", type: "geo", parent: "group", x: 0, y: 0, w: 256, h: 192, text: "Order" },
+      {
+        part: "c1",
+        type: "geo",
+        parent: "group",
+        x: 0,
+        y: 56,
+        w: 256,
+        h: 80,
+        text: "- id: string\n+ static count: int",
+      },
+      {
+        part: "c2",
+        type: "geo",
+        parent: "group",
+        x: 0,
+        y: 136,
+        w: 256,
+        h: 56,
+        text: "+ total(tax: number): number",
+      },
+    ]);
+    expect(drawn(puts, "Payable").map((shape) => shape.text)).toEqual([
+      undefined,
+      "«interface»\nPayable",
+      "",
+      "",
+    ]);
+    expect(drawn(puts, "Status").map((shape) => shape.text)).toEqual([
+      undefined,
+      "«enumeration»\nStatus",
+      "OPEN\nPAID",
+    ]);
+    const [, main, attributes] = puts.filter((record) => memberKey(record) === "Order");
+    const geo = {
+      geo: "rectangle",
+      dash: "solid",
+      url: "",
+      growY: 0,
+      scale: 1,
+      flipX: false,
+      flipY: false,
+      labelColor: "black",
+      color: "blue",
+      font: "sans",
+      verticalAlign: "start",
+    };
+    expect(main?.typeName === "shape" && main.props).toEqual({
+      ...geo,
+      w: 256,
+      h: 192,
+      fill: "semi",
+      size: "m",
+      align: "middle",
+      richText: toRichText("Order"),
+    });
+    expect(attributes?.typeName === "shape" && attributes.props).toEqual({
+      ...geo,
+      w: 256,
+      h: 80,
+      fill: "none",
+      size: "s",
+      align: "start",
+      richText: toRichText("- id: string\n+ static count: int"),
+    });
+  });
+
+  it("binds arrows to header boxes and parents them to the frame above both groups", async () => {
+    const puts = ((await run(ORDERS)).changes?.puts ?? []) as TLRecord[];
+    const find = (key: string, name: string) =>
+      puts.find((record) => memberKey(record) === key && part(record) === name);
+    const arrow = find("Order→Payable:realization", "main");
+    const frame = puts.find((record) => record.typeName === "shape" && record.type === "frame");
+    assert(arrow?.typeName === "shape", "the arrow is drawn");
+    expect(arrow.parentId).toBe(frame?.id);
+    expect(
+      ["start", "end"].map((terminal) => {
+        const binding = find("Order→Payable:realization", terminal);
+        return binding?.typeName === "binding" ? binding.toId : null;
+      }),
+    ).toEqual([find("Order", "main")?.id, find("Payable", "main")?.id]);
+    for (const key of ["Order", "Payable"]) {
+      const group = find(key, "group");
+      assert(group?.typeName === "shape", "the group is drawn");
+      expect(arrow.index > group.index).toBe(true);
+    }
+  });
+
+  it("maps UML relationships to arrowheads, dashes and fills, with multiplicities in one label", async () => {
+    const result = await run({
+      kit: "uml-class",
+      key: "links",
+      nodes: [{ key: "A" }, { key: "B" }],
+      edges: [
+        { from: "A", to: "B", kind: "inheritance" },
+        { from: "A", to: "B", kind: "realization" },
+        ["A", "B"],
+        { from: "A", to: "B", label: "owns", body: { from: "1", to: "0..*", directed: true } },
+        { from: "A", to: "B", kind: "aggregation", body: { to: "1" } },
+        { from: "A", to: "B", kind: "composition", label: "has", body: { from: "4", to: "1" } },
+        { from: "A", to: "B", kind: "dependency" },
+      ],
+    });
+    expect(
+      shapes(result).flatMap((shape) =>
+        shape.type === "arrow"
+          ? [
+              [
+                shape.props.arrowheadStart,
+                shape.props.arrowheadEnd,
+                shape.props.dash,
+                shape.props.fill,
+                plain(shape.props.richText),
+              ],
+            ]
+          : [],
+      ),
+    ).toEqual([
+      ["none", "triangle", "solid", "none", ""],
+      ["none", "triangle", "dashed", "none", ""],
+      ["none", "none", "solid", "none", ""],
+      ["none", "arrow", "solid", "none", "1 ── owns ── 0..*"],
+      ["none", "diamond", "solid", "none", "1"],
+      ["none", "diamond", "solid", "fill", "4 ── has ── 1"],
+      ["none", "arrow", "dashed", "none", ""],
+    ]);
+  });
+
+  it("gives a shorthand association and its full form with an empty body the same batch", async () => {
+    const spec = (edge: NonNullable<DiagramSpec["edges"]>[number]): DiagramSpec => ({
+      kit: "uml-class",
+      key: "pair",
+      nodes: [{ key: "A" }, { key: "B" }],
+      edges: [edge],
+    });
+    expect(await run(spec(["A", "B"]))).toEqual(
+      await run(spec({ from: "A", to: "B", kind: "association", label: "", body: {} })),
+    );
+  });
+
+  it("lists ER columns with key and nullable markers and labels relationships with both cardinalities", async () => {
+    const result = await run({
+      kit: "er",
+      key: "shop",
+      nodes: [
+        {
+          key: "users",
+          body: {
+            columns: [
+              { name: "id", type: "uuid", pk: true },
+              { name: "nickname", type: "text", nullable: true },
+            ],
+          },
+        },
+        {
+          key: "orders",
+          label: "Orders",
+          body: {
+            columns: [
+              { name: "id", type: "uuid", pk: true },
+              { name: "user_id", type: "uuid", pk: true, fk: true },
+              { name: "memo", nullable: true },
+            ],
+          },
+        },
+      ],
+      edges: [
+        { from: "users", to: "orders", label: "places", body: { from: "one", to: "many" } },
+        { from: "orders", to: "users", body: { from: "zeroOrOne", to: "oneOrMany" } },
+      ],
+    });
+    const puts = (result.changes?.puts ?? []) as TLRecord[];
+    expect(drawn(puts, "users").map((shape) => shape.text)).toEqual([
+      undefined,
+      "users",
+      "id: uuid {PK}\nnickname: text?",
+    ]);
+    expect(drawn(puts, "orders").map((shape) => shape.text)).toEqual([
+      undefined,
+      "Orders",
+      "id: uuid {PK}\nuser_id: uuid {PK, FK}\nmemo?",
+    ]);
+    expect(
+      shapes(result).flatMap((shape) =>
+        shape.type === "arrow"
+          ? [[shape.props.arrowheadStart, shape.props.arrowheadEnd, plain(shape.props.richText)]]
+          : [],
+      ),
+    ).toEqual([
+      ["none", "none", "1 ── places ── 0..*"],
+      ["none", "none", "0..1 ── 1..*"],
+    ]);
+  });
+
+  it("fits a 40-class, 60-association model in one batch", async () => {
+    const result = await run({
+      kit: "uml-class",
+      key: "model",
+      nodes: Array.from({ length: 40 }, (_, i) => ({
+        key: `C${i}`,
+        body: { attributes: [{ name: "id", type: "string" }], methods: [{ name: "save" }] },
+      })),
+      edges: Array.from({ length: 60 }, (_, i) => ({
+        from: `C${i % 40}`,
+        to: `C${(7 * i + 1) % 40}`,
+        body: { from: "1", to: "*" },
+      })),
+    });
+    expect(result.counts).toEqual({ created: 100, updated: 0, kept: 0, removed: 0 });
+    // The frame, four parts per class, and an arrow with two bindings per association.
+    expect(result.changes?.puts).toHaveLength(1 + 40 * 4 + 60 * 3);
+    expect(result.changes?.deletes).toEqual([]);
+  });
+
+  it("fails too-large counting every part of every class before measuring", async () => {
+    const nodes = Array.from({ length: 125 }, (_, i) => ({ key: `C${i}` }));
+    await expect(
+      compose({ spec: { kit: "uml-class", key: "big", nodes } }, BASE, failingPorts),
+    ).rejects.toMatchObject({
+      code: "too-large",
+      details: {
+        issues: [
+          {
+            path: "spec",
+            message:
+              "needs 501 records but one compose writes at most 500; split it into several compositions",
+          },
+        ],
+      },
+    });
+  });
+
+  it("treats a compartment edit as a human edit and rewrites an unedited class at its moved group", async () => {
+    let records = applied(BASE, await run(ORDERS));
+    expect((await compose({ spec: ORDERS }, records, failingPorts)).changes).toBeNull();
+
+    records = records.map((record) =>
+      record.typeName === "shape" && memberKey(record) === "Order" && part(record) === "c1"
+        ? withProps(record, { richText: toRichText("- id: uuid") })
+        : record.typeName === "shape" && memberKey(record) === "Payable" && part(record) === "group"
+          ? moved(record, 600, 40)
+          : record,
+    );
+    expect(readCompositions(records).summaries[0]?.editedCount).toBe(1);
+    const withMethods = (key: string): DiagramSpec => ({
+      ...ORDERS,
+      nodes: ORDERS.nodes.map((node) =>
+        node.key === key ? { ...node, body: { methods: [{ name: "pay" }] } } : node,
+      ),
+    });
+    await expect(run(withMethods("Order"), records)).rejects.toMatchObject({
+      code: "conflict",
+      details: { members: ["Order"] },
+    });
+
+    const result = await run(withMethods("Payable"), records);
+    expect(result.counts).toEqual({ created: 0, updated: 1, kept: 4, removed: 0 });
+    expect(drawn(applied(records, result), "Payable")).toEqual([
+      { part: "group", type: "group", parent: "frame", x: 600, y: 40, w: 0, h: 0 },
+      {
+        part: "main",
+        type: "geo",
+        parent: "group",
+        x: 0,
+        y: 0,
+        w: 160,
+        h: 160,
+        text: "«interface»\nPayable",
+      },
+      { part: "c1", type: "geo", parent: "group", x: 0, y: 80, w: 160, h: 24, text: "" },
+      { part: "c2", type: "geo", parent: "group", x: 0, y: 104, w: 160, h: 56, text: "pay()" },
+    ]);
+  });
+
+  it("reads bodies back in composition detail, so a rebuilt spec keeps members and multiplicities", async () => {
+    const records = applied(BASE, await run(ORDERS));
+    const members = readCompositions(records).detail({ key: "orders", offset: 0, limit: 10 })
+      .items[0]?.members;
+    expect(members?.map((member) => member.spec)).toEqual([
+      { key: "Order", kind: "class", label: "Order", body: ORDERS.nodes[0]?.body },
+      { key: "Payable", kind: "interface", label: "Payable" },
+      { key: "Status", kind: "enum", label: "Status", body: { values: ["OPEN", "PAID"] } },
+      {
+        key: "Order→Payable:realization",
+        from: "Order",
+        to: "Payable",
+        kind: "realization",
+        label: "",
+      },
+      {
+        key: "Order→Status:association",
+        from: "Order",
+        to: "Status",
+        kind: "association",
+        label: "",
+        body: { from: "*", to: "1", directed: true },
+      },
+    ]);
+  });
+
+  it("fails a typo anywhere inside a body, listing the valid fields at that level", () => {
+    expect(
+      issuesOf({
+        spec: {
+          kit: "uml-class",
+          key: "typo",
+          nodes: [
+            {
+              key: "A",
+              body: {
+                attributes: [{ name: "id" }, { nmae: "count", type: "int" }],
+                methods: [{ name: "save", return: "void" }],
+              },
+            },
+          ],
+        },
+      }),
+    ).toMatchObject({
+      code: "invalid-spec",
+      details: {
+        issues: [
+          {
+            path: "spec.nodes[0].body.attributes[1].nmae",
+            message:
+              'unknown field "nmae" for kind "class"; valid fields: visibility, name, type, static',
+          },
+          {
+            path: "spec.nodes[0].body.methods[0].return",
+            message:
+              'unknown field "return" for kind "class"; valid fields: visibility, name, params, returns, static',
+          },
+          {
+            path: "spec.nodes[0].body.attributes[1].name",
+            message: 'missing required field "name"',
+          },
+        ],
+      },
+    });
+    expect(
+      issuesOf({
+        spec: {
+          kit: "er",
+          key: "typo",
+          nodes: [{ key: "u", body: { columns: [{ name: "id", primary: true }] } }, { key: "o" }],
+          edges: [{ from: "u", to: "o", body: { from: "one", too: "many" } }],
+        },
+      }),
+    ).toMatchObject({
+      code: "invalid-spec",
+      details: {
+        issues: [
+          {
+            path: "spec.nodes[0].body.columns[0].primary",
+            message:
+              'unknown field "primary" for kind "entity"; valid fields: name, type, pk, fk, nullable',
+          },
+          {
+            path: "spec.edges[0].body.too",
+            message: 'unknown field "too" for edge kind "relationship"; valid fields: from, to',
+          },
+        ],
+      },
+    });
+  });
+
+  it("teaches class and ER body fields", () => {
+    expect(
+      issuesOf({
+        spec: {
+          kit: "uml-class",
+          key: "bad",
+          nodes: [
+            { key: "A", body: { fields: [] } },
+            { key: "B", body: { attributes: [{ name: "id", visibility: "privat" }] } },
+            { key: "C", kind: "table" },
+          ],
+          edges: [{ from: "A", to: "B", kind: "inheritance", body: { from: "1" } }],
+        },
+      }),
+    ).toMatchObject({
+      code: "invalid-spec",
+      details: {
+        issues: [
+          {
+            path: "spec.nodes[0].body.fields",
+            message:
+              'unknown field "fields" for kind "class"; valid fields: stereotype, attributes, methods',
+          },
+          {
+            path: "spec.nodes[1].body.attributes[0].visibility",
+            message: 'Expected "public" | "private" | "protected" | "package"',
+          },
+          {
+            path: "spec.nodes[2].kind",
+            message:
+              'unknown kind "table" for kit uml-class; valid kinds: class, interface, abstract, enum, package, note',
+          },
+          { path: "spec.edges[0].body", message: 'edge kind "inheritance" takes no body fields' },
+        ],
+      },
+    });
+    expect(
+      issuesOf({
+        spec: {
+          kit: "er",
+          key: "bad",
+          nodes: [{ key: "u" }, { key: "o", parent: "u" }],
+          edges: [{ from: "u", to: "o", body: { from: "1" } }],
+        },
+      }),
+    ).toMatchObject({
+      code: "invalid-spec",
+      details: {
+        issues: [
+          {
+            path: "spec.nodes[1].parent",
+            message: "kit er has no container kinds, so nodes cannot have a parent",
+          },
+          {
+            path: "spec.edges[0].body.from",
+            message: 'Expected "one" | "zeroOrOne" | "many" | "oneOrMany"',
+          },
+        ],
+      },
     });
   });
 });

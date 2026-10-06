@@ -3,7 +3,7 @@ import type {
   DiagramCompositionSummary,
   DiagramCompositionsPage,
 } from "@t3tools/contracts";
-import type { TLFrameShape, TLParentId, TLRecord } from "@tldraw/tlschema";
+import type { TLFrameShape, TLParentId, TLRecord, TLShape } from "@tldraw/tlschema";
 
 import {
   compareIndex,
@@ -16,13 +16,14 @@ import {
 import {
   fingerprint,
   type FrameMeta,
-  MEMBER_PARTS,
   type PartMeta,
   type PartName,
   readFrameMeta,
   readPartMeta,
   type StoredMember,
 } from "./identity.ts";
+import { partsOf } from "./kit.ts";
+import { KITS } from "./kits/index.ts";
 
 /** A member whose main part is on the canvas. Members a human deleted live only in the ledger. */
 export interface CurrentMember {
@@ -31,6 +32,12 @@ export interface CurrentMember {
   readonly parts: ReadonlyMap<PartName, TLRecord>;
   /** Some part's content differs from what compose wrote, or a part is missing. */
   readonly edited: boolean;
+}
+
+/** The shape that places a node in its parent: a compartments node's group, else its main shape. */
+export function topShape(member: CurrentMember): TLShape | undefined {
+  const top = member.parts.get("group") ?? member.parts.get("main");
+  return top?.typeName === "shape" ? top : undefined;
 }
 
 export interface CurrentComposition {
@@ -99,7 +106,7 @@ export function scanCompositions(index: RecordIndex): CompositionScan {
     }
     const members = new Map<string, CurrentMember>();
     for (const [memberKey, { stored, parts: memberParts }] of present) {
-      const edited = MEMBER_PARTS[stored.role].some((name) => {
+      const edited = partsOf(KITS[meta.kit], stored).some((name) => {
         const part = memberParts.get(name);
         if (part) return fingerprint(part.record) !== part.meta.f;
         // tldraw deletes a binding with its target; a deleted endpoint is not an edit of the edge.
@@ -218,6 +225,7 @@ function memberDetail(member: CurrentMember): DiagramCompositionMember {
           label: stored.label,
           ...(stored.parent === null ? {} : { parent: stored.parent }),
           ...(stored.ref === null ? {} : { ref: stored.ref }),
+          ...bodyOf(stored.body),
         }
       : {
           key: stored.key,
@@ -225,6 +233,7 @@ function memberDetail(member: CurrentMember): DiagramCompositionMember {
           to: stored.to,
           kind: stored.kind,
           label: stored.label,
+          ...bodyOf(stored.body),
         };
   if (!member.edited) return { spec, edited: false };
   const main = member.parts.get("main");
@@ -235,6 +244,11 @@ function memberDetail(member: CurrentMember): DiagramCompositionMember {
     edited: true,
     text: text.length > MAX_TEXT ? `${text.slice(0, MAX_TEXT - 1)}…` : text,
   };
+}
+
+/** Bodies carry class members and columns, so a spec rebuilt from detail keeps them. */
+function bodyOf(body: StoredMember["body"] | null): { body?: StoredMember["body"] } {
+  return body && Object.keys(body).length > 0 ? { body } : {};
 }
 
 const INLINE_BLOCKS = new Set(["paragraph", "heading"]);
