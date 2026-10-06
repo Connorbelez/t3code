@@ -455,6 +455,67 @@ const finalizeWorkspaceFileAsset = Effect.fn("AssetAccess.finalizeWorkspaceFileA
   },
 );
 
+const signAssetUrl = Effect.fn("AssetAccess.signAssetUrl")(function* (input: {
+  resource: AssetResource;
+  claims: AssetClaims;
+  fileName: string;
+}) {
+  const secretStore = yield* ServerSecretStore.ServerSecretStore;
+  const signingSecret = yield* secretStore.getOrCreateRandom(SIGNING_SECRET_NAME, 32).pipe(
+    Effect.mapError(
+      (cause) =>
+        new AssetSigningKeyLoadError({
+          resource: input.resource,
+          cause,
+        }),
+    ),
+  );
+  const encodedPayload = base64UrlEncode(encodeAssetClaims(input.claims));
+  const token = `${encodedPayload}.${signPayload(encodedPayload, signingSecret)}`;
+  return `${ASSET_ROUTE_PREFIX}/${token}/${encodeURIComponent(input.fileName)}`;
+});
+
+export const issueWorkspaceFileAssetUrl = Effect.fn("AssetAccess.issueWorkspaceFileAssetUrl")(
+  function* (input: { workspaceRoot: string; requestedPath: string }) {
+    const path = yield* Path.Path;
+    const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
+    const resource = {
+      _tag: "draft-workspace-file",
+      cwd: input.workspaceRoot,
+      path: input.requestedPath,
+    } satisfies AssetResource;
+    const expiresAt = (yield* Clock.currentTimeMillis) + ASSET_TOKEN_TTL_MS;
+    const relativePath = path.isAbsolute(input.requestedPath)
+      ? path.relative(input.workspaceRoot, input.requestedPath)
+      : input.requestedPath;
+    const outsideRoot =
+      relativePath === ".." ||
+      relativePath.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(relativePath);
+    const finalized = yield* outsideRoot && path.isAbsolute(input.requestedPath)
+      ? finalizeAbsoluteMediaFileAsset({ requestedPath: input.requestedPath, resource, expiresAt })
+      : workspacePaths.normalizeWorkspaceRoot(input.workspaceRoot).pipe(
+          Effect.mapError((cause) => new AssetWorkspaceRootNormalizationError({ resource, cause })),
+          Effect.flatMap((workspaceRoot) =>
+            finalizeWorkspaceFileAsset({
+              workspaceRoot,
+              requestedPath: relativePath,
+              resource,
+              expiresAt,
+            }),
+          ),
+        );
+    return {
+      relativeUrl: yield* signAssetUrl({
+        resource,
+        claims: finalized.claims,
+        fileName: finalized.fileName,
+      }),
+      expiresAt,
+    };
+  },
+);
+
 export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (input: {
   readonly resource: AssetResource;
   readonly workspaceRoot?: string;
@@ -760,16 +821,6 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
     }
   }
 
-  const secretStore = yield* ServerSecretStore.ServerSecretStore;
-  const signingSecret = yield* secretStore.getOrCreateRandom(SIGNING_SECRET_NAME, 32).pipe(
-    Effect.mapError(
-      (cause) =>
-        new AssetSigningKeyLoadError({
-          resource: input.resource,
-          cause,
-        }),
-    ),
-  );
   if (claims.kind === "project-favicon" || claims.kind === "project-favicon-external") {
     const issuedAt = yield* Clock.currentTimeMillis;
     expiresAt =
@@ -777,20 +828,16 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
       PROJECT_FAVICON_TOKEN_BUCKET_MS;
     claims = { ...claims, expiresAt };
   }
-  const encodedPayload = base64UrlEncode(encodeAssetClaims(claims));
-  const token = `${encodedPayload}.${signPayload(encodedPayload, signingSecret)}`;
+  const relativeUrl = yield* signAssetUrl({ resource: input.resource, claims, fileName });
   return {
-    relativeUrl: `${ASSET_ROUTE_PREFIX}/${token}/${encodeURIComponent(fileName)}`,
+    relativeUrl,
     expiresAt,
     ...(sourcePath !== undefined ? { sourcePath } : {}),
     ...(imageDimensions !== null ? { imageDimensions } : {}),
   };
 });
 
-export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
-  token: string,
-  relativePath: string,
-) {
+const readAssetClaims = Effect.fn("AssetAccess.readAssetClaims")(function* (token: string) {
   const [encodedPayload, signature] = token.split(".");
   if (!encodedPayload || !signature) return null;
 
@@ -803,7 +850,77 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
   if (!timingSafeEqualBase64Url(signature, signPayload(encodedPayload, signingSecret))) return null;
 
   const claims = decodeClaims(encodedPayload);
-  if (!claims || claims.expiresAt <= (yield* Clock.currentTimeMillis)) return null;
+  return claims && claims.expiresAt > (yield* Clock.currentTimeMillis) ? claims : null;
+});
+
+const resolveFileAsset = Effect.fn("AssetAccess.resolveFileAsset")(function* (
+  claims: Extract<
+    AssetClaims,
+    { kind: "media-file-exact" | "workspace-file-exact" | "workspace-file" }
+  >,
+  relativePath: string,
+) {
+  const decodedPath = decodeRelativePath(relativePath);
+  if (decodedPath === null) return null;
+  const path = yield* Path.Path;
+  if (claims.kind === "media-file-exact") {
+    if (decodedPath !== path.basename(claims.filePath)) return null;
+    const canonicalFile = yield* resolveCanonicalFile(claims.filePath).pipe(
+      Effect.tapError((cause) =>
+        Effect.logError("Failed to resolve canonical media path.", {
+          filePath: claims.filePath,
+          cause,
+        }),
+      ),
+      Effect.orElseSucceed(() => null),
+    );
+    if (canonicalFile !== claims.filePath) return null;
+    const mimeType = hostPreviewMimeTypeFromExtension(path.extname(canonicalFile));
+    if (!mimeType) return null;
+    const file = yield* openMediaFile(canonicalFile, claims).pipe(
+      Effect.tapError((cause) =>
+        Effect.logError("Failed to open canonical media file.", { filePath: canonicalFile, cause }),
+      ),
+      Effect.orElseSucceed(() => null),
+    );
+    return file
+      ? ({ kind: "file", path: canonicalFile, mimeType, file } satisfies ResolvedAsset)
+      : null;
+  }
+  if (claims.kind === "workspace-file-exact") {
+    if (decodedPath !== path.basename(claims.relativePath)) return null;
+    const exactWorkspaceFile = yield* resolveCanonicalWorkspaceFileForRequest({
+      workspaceRoot: claims.workspaceRoot,
+      relativePath: claims.relativePath,
+    });
+    return exactWorkspaceFile
+      ? ({ kind: "file", path: exactWorkspaceFile } satisfies ResolvedAsset)
+      : null;
+  }
+  const segments = decodedPath.split(/[\\/]/);
+  if (
+    decodedPath.length === 0 ||
+    decodedPath.includes("\0") ||
+    segments.some((segment) => segment === "." || segment === ".." || segment.startsWith(".")) ||
+    !PREVIEW_ASSET_EXTENSIONS.has(path.extname(decodedPath).toLowerCase())
+  ) {
+    return null;
+  }
+  const joinedRelativePath =
+    claims.baseRelativePath === "." ? decodedPath : path.join(claims.baseRelativePath, decodedPath);
+  const workspaceFile = yield* resolveCanonicalWorkspaceFileForRequest({
+    workspaceRoot: claims.workspaceRoot,
+    relativePath: joinedRelativePath,
+  });
+  return workspaceFile ? ({ kind: "file", path: workspaceFile } satisfies ResolvedAsset) : null;
+});
+
+export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
+  token: string,
+  relativePath: string,
+) {
+  const claims = yield* readAssetClaims(token);
+  if (!claims) return null;
 
   if (claims.kind === "attachment") {
     const config = yield* ServerConfig.ServerConfig;
@@ -887,57 +1004,19 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
     return iconPath ? ({ kind: "file", path: iconPath } satisfies ResolvedAsset) : null;
   }
 
-  const decodedPath = decodeRelativePath(relativePath);
-  if (decodedPath === null) return null;
-  const path = yield* Path.Path;
-  if (claims.kind === "media-file-exact") {
-    if (decodedPath !== path.basename(claims.filePath)) return null;
-    const canonicalFile = yield* resolveCanonicalFile(claims.filePath).pipe(
-      Effect.tapError((cause) =>
-        Effect.logError("Failed to resolve canonical media path.", {
-          filePath: claims.filePath,
-          cause,
-        }),
-      ),
-      Effect.orElseSucceed(() => null),
-    );
-    if (canonicalFile !== claims.filePath) return null;
-    const mimeType = hostPreviewMimeTypeFromExtension(path.extname(canonicalFile));
-    if (!mimeType) return null;
-    const file = yield* openMediaFile(canonicalFile, claims).pipe(
-      Effect.tapError((cause) =>
-        Effect.logError("Failed to open canonical media file.", { filePath: canonicalFile, cause }),
-      ),
-      Effect.orElseSucceed(() => null),
-    );
-    return file
-      ? ({ kind: "file", path: canonicalFile, mimeType, file } satisfies ResolvedAsset)
-      : null;
-  }
-  if (claims.kind === "workspace-file-exact") {
-    if (decodedPath !== path.basename(claims.relativePath)) return null;
-    const exactWorkspaceFile = yield* resolveCanonicalWorkspaceFileForRequest({
-      workspaceRoot: claims.workspaceRoot,
-      relativePath: claims.relativePath,
-    });
-    return exactWorkspaceFile
-      ? ({ kind: "file", path: exactWorkspaceFile } satisfies ResolvedAsset)
-      : null;
-  }
-  const segments = decodedPath.split(/[\\/]/);
-  if (
-    decodedPath.length === 0 ||
-    decodedPath.includes("\0") ||
-    segments.some((segment) => segment === "." || segment === ".." || segment.startsWith(".")) ||
-    !PREVIEW_ASSET_EXTENSIONS.has(path.extname(decodedPath).toLowerCase())
-  ) {
-    return null;
-  }
-  const joinedRelativePath =
-    claims.baseRelativePath === "." ? decodedPath : path.join(claims.baseRelativePath, decodedPath);
-  const workspaceFile = yield* resolveCanonicalWorkspaceFileForRequest({
-    workspaceRoot: claims.workspaceRoot,
-    relativePath: joinedRelativePath,
-  });
-  return workspaceFile ? ({ kind: "file", path: workspaceFile } satisfies ResolvedAsset) : null;
+  return yield* resolveFileAsset(claims, relativePath);
 });
+
+export const resolveWorkspaceFileAsset = Effect.fn("AssetAccess.resolveWorkspaceFileAsset")(
+  function* (token: string, relativePath: string) {
+    const claims = yield* readAssetClaims(token);
+    if (
+      !claims ||
+      (claims.kind !== "media-file-exact" &&
+        claims.kind !== "workspace-file" &&
+        claims.kind !== "workspace-file-exact")
+    )
+      return null;
+    return yield* resolveFileAsset(claims, relativePath);
+  },
+);

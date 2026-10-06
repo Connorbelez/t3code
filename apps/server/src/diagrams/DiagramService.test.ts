@@ -1,3 +1,4 @@
+import { createDiagramSchema } from "@t3tools/diagram-compose/schema";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as NodeSqlite from "node:sqlite";
@@ -29,6 +30,7 @@ import {
   type TLRecord,
 } from "@tldraw/tlschema";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
@@ -49,7 +51,7 @@ import { diagramRecordFingerprint } from "./DiagramRoom.ts";
 const environmentId = EnvironmentId.make("environment:diagram-tests");
 const projectId = ProjectId.make("project:diagram-tests");
 const otherProjectId = ProjectId.make("project:diagram-other");
-const sdkSchema = createTLSchema();
+const sdkSchema = createDiagramSchema();
 const encode = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decode = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const dependencies = Layer.mergeAll(
@@ -317,6 +319,236 @@ const connect = Effect.fn(function* (
     annotateHeld,
   };
 });
+
+it.effect("preserves HTML source ownership across restart, duplication and editable export", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const inline = sdkRecord({
+      id: "shape:inline",
+      typeName: "shape",
+      type: "html-artifact",
+      parentId: "page:imported",
+      x: 10,
+      y: 20,
+      rotation: 0,
+      index: "a1",
+      isLocked: false,
+      opacity: 1,
+      meta: {},
+      props: {
+        w: 640,
+        h: 480,
+        title: "Plan",
+        source: { kind: "inline", html: "<button>Plan</button>" },
+      },
+    });
+    const file = sdkRecord({
+      ...inline,
+      id: "shape:file",
+      index: "a2",
+      x: 700,
+      props: { w: 320, h: 240, title: "Mock", source: { kind: "file", path: "mocks/index.html" } },
+    });
+    const target = yield* Effect.scoped(
+      Effect.gen(function* () {
+        const service = yield* DiagramService.make;
+        const base = document();
+        const diagram = yield* service.importDocument({
+          projectId,
+          name: "Artifacts",
+          document: { ...base, records: [...base.records, inline, file] },
+        });
+        return { projectId, diagramId: diagram.id };
+      }),
+    );
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const service = yield* DiagramService.make;
+        const read = yield* service.read({ ...target, includeRecords: true });
+        assert.deepEqual(
+          read.records.filter((record) => sdkRecord(record).typeName === "shape"),
+          [inline, file],
+        );
+        assert.deepEqual(
+          read.structure.shapes.map((shape) => shape.htmlArtifactSource),
+          [
+            { kind: "inline", html: "<button>Plan</button>" },
+            { kind: "file", path: "mocks/index.html" },
+          ],
+        );
+        assert.deepEqual(read.structure.shapes[0]?.bounds, { x: 10, y: 20, w: 640, h: 480 });
+        assert.equal(read.structure.shapes[0]?.label, "Plan");
+        const exported = yield* service.exportDocument(target);
+        const imported = yield* service.importDocument({
+          projectId,
+          name: "Imported artifacts",
+          document: exported,
+        });
+        const duplicate = yield* service.lifecycle({ ...target, operation: "duplicate" });
+        assert.isNotNull(duplicate);
+        for (const diagramId of [imported.id, duplicate!.id]) {
+          const copy = yield* service.read({ projectId, diagramId });
+          assert.deepEqual(
+            copy.structure.shapes.map((shape) => shape.htmlArtifactSource),
+            read.structure.shapes.map((shape) => shape.htmlArtifactSource),
+          );
+        }
+      }),
+    );
+  }).pipe(Effect.provide(dependencies)),
+);
+
+it.effect(
+  "updates inline HTML through durable diagram batches and removes only the canvas record",
+  () =>
+    Effect.gen(function* () {
+      yield* seed;
+      const service = yield* DiagramService.make;
+      const baseDocument = document();
+      const base = {
+        ...baseDocument,
+        records: [
+          ...baseDocument.records,
+          sdkRecord({
+            id: "document:document",
+            typeName: "document",
+            gridSize: 10,
+            name: "",
+            meta: {},
+          }),
+        ],
+      };
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspaceRoot = yield* fs.makeTempDirectoryScoped({ prefix: "html-ownership-" });
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`UPDATE projection_projects SET workspace_root = ${workspaceRoot} WHERE project_id = ${projectId}`;
+      const sourcePath = path.join(workspaceRoot, "existing.html");
+      yield* fs.writeFileString(sourcePath, "<p>Owned by the workspace</p>");
+      const inline = sdkRecord({
+        id: "shape:inline",
+        typeName: "shape",
+        type: "html-artifact",
+        parentId: "page:imported",
+        x: 0,
+        y: 0,
+        rotation: 0,
+        index: "a1",
+        isLocked: false,
+        opacity: 1,
+        meta: {},
+        props: { w: 640, h: 480, title: "Plan", source: { kind: "inline", html: "<p>Before</p>" } },
+      });
+      const file = sdkRecord({
+        ...inline,
+        id: "shape:file",
+        index: "a2",
+        props: { w: 320, h: 240, title: "File", source: { kind: "file", path: "existing.html" } },
+      });
+      const diagram = yield* service.importDocument({
+        projectId,
+        name: "Edit artifacts",
+        document: { ...base, records: [...base.records, inline, file] },
+      });
+      const target = { projectId, diagramId: diagram.id };
+      const host = yield* connect(service, diagram);
+      const page = base.records[0]!;
+      const updated = sdkRecord({
+        ...inline,
+        props: { w: 640, h: 480, title: "Plan", source: { kind: "inline", html: "<p>After</p>" } },
+      });
+      const input = {
+        ...target,
+        namespace: "provider-session",
+        batch: {
+          requestId: "html-edit",
+          expected: [
+            { id: inline.id, record: inline },
+            { id: file.id, record: file },
+            { id: page.id, record: page },
+          ],
+          puts: [updated],
+          deletes: [file.id],
+        },
+      };
+      const receipt = yield* service.applyBatch(input);
+      const committed = yield* Deferred.await(host.committed);
+      yield* service.syncSend({
+        ...target,
+        connectionId: host.connectionId,
+        message: encode({
+          type: "diagram-adoption",
+          generation: committed.generation,
+          fence: committed.fence,
+          push: {
+            type: "push",
+            clientClock: 1,
+            diff: { [updated.id]: ["put", updated], [file.id]: ["remove"] },
+          },
+        }),
+      });
+      yield* Deferred.await(host.adopted);
+      assert.deepEqual(yield* service.applyBatch(input), receipt);
+      assert.equal(yield* fs.readFileString(sourcePath), "<p>Owned by the workspace</p>");
+      assert.deepEqual(
+        (yield* service.read(target)).structure.shapes.map((shape) => shape.htmlArtifactSource),
+        [{ kind: "inline", html: "<p>After</p>" }],
+      );
+    }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
+it.effect("imports stock diagrams created before the HTML artifact schema existed", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    const stock = { ...document(), schema: createTLSchema().serialize() };
+    const diagram = yield* service.importDocument({
+      projectId,
+      name: "Existing diagram",
+      document: stock,
+    });
+    const exported = yield* service.exportDocument({ projectId, diagramId: diagram.id });
+    assert.deepEqual(exported.records, stock.records);
+    assert.deepEqual(exported.schema, sdkSchema.serialize());
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
+it.effect("rejects malformed HTML source ownership at the diagram service boundary", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    for (const source of [
+      { kind: "inline", path: "missing.html" },
+      { kind: "file", html: "<p>Wrong owner</p>" },
+      { kind: "file", path: "" },
+      { kind: "inline", html: "<p>Two owners</p>", path: "duplicate.html" },
+    ]) {
+      const base = document();
+      const record = {
+        id: "shape:invalid",
+        typeName: "shape",
+        type: "html-artifact",
+        parentId: "page:imported",
+        x: 0,
+        y: 0,
+        rotation: 0,
+        index: "a1",
+        isLocked: false,
+        opacity: 1,
+        meta: {},
+        props: { w: 640, h: 480, title: "Invalid", source },
+      };
+      const error = yield* Effect.flip(
+        service.importDocument({
+          projectId,
+          name: "Invalid",
+          document: { ...base, records: [...base.records, record] },
+        }),
+      );
+      assert.equal(error.code, "invalid-records");
+    }
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
 
 it.effect("selects the mounted host and refuses a busy context even when images are optional", () =>
   Effect.gen(function* () {

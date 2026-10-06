@@ -1,3 +1,4 @@
+import { createDiagramSchema } from "@t3tools/diagram-compose/schema";
 import * as NodeCrypto from "node:crypto";
 import * as NodeSqlite from "node:sqlite";
 import * as Schema from "effect/Schema";
@@ -9,7 +10,7 @@ import {
   type TLSyncStorage,
   type TLSyncStorageTransaction,
 } from "@tldraw/sync-core";
-import { createTLSchema, type TLRecord } from "@tldraw/tlschema";
+import { type TLRecord } from "@tldraw/tlschema";
 
 export type DiagramMutation = {
   namespace: string;
@@ -375,7 +376,7 @@ export class DiagramDatabase {
 export class DiagramRoom {
   readonly room: TLSocketRoom<TLRecord>;
   readonly storage: TLSyncStorage<TLRecord>;
-  readonly schema = createTLSchema();
+  readonly schema = createDiagramSchema();
   private readonly sdkStorage: SQLiteSyncStorage<TLRecord>;
   private readonly hosts = new Map<
     string,

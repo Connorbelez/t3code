@@ -97,6 +97,18 @@ export const DiagramMetadata = Schema.Struct({
 });
 export type DiagramMetadata = typeof DiagramMetadata.Type;
 
+export const DiagramHtmlArtifactSource = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("inline"),
+    html: Schema.String.check(Schema.isMaxLength(1_000_000)),
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("file"),
+    path: TrimmedNonEmptyString.check(Schema.isMaxLength(4096)),
+  }),
+]);
+export type DiagramHtmlArtifactSource = typeof DiagramHtmlArtifactSource.Type;
+
 export const DiagramShapeSummary = Schema.Struct({
   id: DiagramRecordId,
   pageId: DiagramRecordId,
@@ -105,6 +117,7 @@ export const DiagramShapeSummary = Schema.Struct({
   label: Schema.String.check(Schema.isMaxLength(1000)),
   bounds: Schema.NullOr(DiagramBounds),
   locked: Schema.Boolean,
+  htmlArtifactSource: Schema.optional(DiagramHtmlArtifactSource),
 });
 export type DiagramShapeSummary = typeof DiagramShapeSummary.Type;
 

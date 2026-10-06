@@ -181,6 +181,7 @@ import * as TerminalManager from "./terminal/Manager.ts";
 import { withTerminalOutputWindow } from "./terminal/OutputProtocol.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as DiagramService from "./diagrams/DiagramService.ts";
+import * as DiagramArtifacts from "./diagrams/DiagramArtifacts.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import { remoteSshDeviceHosts } from "./device/localSshDeviceHost.ts";
 import * as PreviewManager from "./preview/Manager.ts";
@@ -1184,6 +1185,7 @@ const layerWsRpc = (
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
   previewAutomationBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"],
   diagrams: DiagramService.DiagramService["Service"],
+  diagramArtifacts: DiagramArtifacts.DiagramArtifacts["Service"],
 ) =>
   ServerWsRpcGroup.toLayer(
     Effect.gen(function* () {
@@ -3523,6 +3525,22 @@ const layerWsRpc = (
           observeRpcEffect(WS_METHODS.diagramsRead, diagrams.read(input), {
             "rpc.aggregate": "diagrams",
           }),
+        [WS_METHODS.diagramsArtifactRead]: (input) =>
+          observeRpcEffect(WS_METHODS.diagramsArtifactRead, diagramArtifacts.read(input), {
+            "rpc.aggregate": "diagrams",
+          }),
+        [WS_METHODS.diagramsArtifactCss]: (input) =>
+          observeRpcEffect(WS_METHODS.diagramsArtifactCss, diagramArtifacts.css(input), {
+            "rpc.aggregate": "diagrams",
+          }),
+        [WS_METHODS.diagramsArtifactCapture]: (input) =>
+          observeRpcEffect(WS_METHODS.diagramsArtifactCapture, diagramArtifacts.capture(input), {
+            "rpc.aggregate": "diagrams",
+          }),
+        [WS_METHODS.diagramsArtifactWatch]: (input) =>
+          observeRpcStreamEffect(WS_METHODS.diagramsArtifactWatch, diagramArtifacts.watch(input), {
+            "rpc.aggregate": "diagrams",
+          }),
         [WS_METHODS.diagramsLifecycle]: (input) =>
           observeRpcEffect(WS_METHODS.diagramsLifecycle, diagrams.lifecycle(input), {
             "rpc.aggregate": "diagrams",
@@ -3881,6 +3899,7 @@ export const layer = Layer.unwrap(
   Effect.gen(function* () {
     const previewAutomationBroker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
     const diagrams = yield* DiagramService.DiagramService;
+    const diagramArtifacts = yield* DiagramArtifacts.DiagramArtifacts;
     const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
     const pullRequests = yield* PullRequestService.PullRequestService;
     const sql = yield* SqlClient.SqlClient;
@@ -3935,6 +3954,7 @@ export const layer = Layer.unwrap(
               clientAnalyticsProps,
               previewAutomationBroker,
               diagrams,
+              diagramArtifacts,
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),

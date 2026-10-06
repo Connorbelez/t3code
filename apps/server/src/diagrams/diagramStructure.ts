@@ -267,7 +267,11 @@ export function diagramStructure(
       pageId: ancestry.get(shape.id)?.pageId ?? shape.parentId,
       parentId: shape.parentId,
       type: shape.type,
-      label: label("richText" in shape.props ? shape.props.richText : shape.props).slice(0, 256),
+      label:
+        shape.type === "html-artifact"
+          ? shape.props.title.slice(0, 256)
+          : label("richText" in shape.props ? shape.props.richText : shape.props).slice(0, 256),
+      ...(shape.type === "html-artifact" ? { htmlArtifactSource: shape.props.source } : {}),
       bounds: bounds(shape),
       locked:
         shape.isLocked ||

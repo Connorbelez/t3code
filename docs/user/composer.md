@@ -55,6 +55,24 @@ Wait for **Saved** before closing or refreshing an editor with offline changes.
 Export editable diagrams or PNG/SVG images when you need files. Removing a project
 permanently deletes its active and archived diagrams; export them first to keep them.
 
+### Add interactive HTML artifacts
+
+In Canvas, open the canvas menu and choose **Add HTML artifact** to save HTML
+inside the diagram, or **Link HTML file** to use an existing project file.
+Artifacts support CSS, Tailwind utilities, and JavaScript. Click, type, select
+text, and scroll inside the document. Drag its frame to move it, resize it with
+the canvas handles, and connect it with ordinary arrows.
+
+Use **Source** on the artifact to edit its HTML. Inline edits stay in the diagram.
+Linked source opens in the workspace file editor. Saved source changes and
+external file edits reload the document and reset its interactive state.
+Moving or zooming the canvas keeps that state.
+
+Removing an artifact keeps a linked source file. Duplicating or exporting an
+editable diagram preserves file references, so transferred diagrams may need
+those paths repaired. Diagram image exports include rendered artifacts. Mobile
+shows them in the diagram's cached preview.
+
 ### Comment on a diagram
 
 To give feedback on specific parts of a diagram, click **Annotate** in the Canvas
