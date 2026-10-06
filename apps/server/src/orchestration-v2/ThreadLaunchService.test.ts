@@ -7,6 +7,8 @@ import * as FileSystem from "effect/FileSystem";
 import * as ServerConfig from "../config.ts";
 import { createPendingAttachmentId, resolveAttachmentPath } from "../attachmentStore.ts";
 import * as ThreadMessageIntake from "./ThreadMessageIntake.ts";
+import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
+import { providerMessageTextWithAttachmentPaths } from "./AttachmentPrompt.ts";
 import { assert, it, vi } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import {
@@ -15,6 +17,7 @@ import {
   ComposerContextId,
   type ChatAttachment,
   CommandId,
+  DiagramAnnotationsContextRecord,
   DEFAULT_SERVER_SETTINGS,
   GitCommandError,
   MessageId,
@@ -2180,6 +2183,159 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
       assert.isNotNull(path);
       assert.deepEqual(yield* fs.readFile(path), new Uint8Array([1, 2, 3, 4]));
     }
+  }).pipe(Effect.provide(Layer.mergeAll(harness.layer, layerFiles)));
+});
+
+it.effect("keeps Canvas comments paired with their numbered image through intake", () => {
+  const harness = makeHarness();
+  const layerFiles = ServerConfig.layerTest(process.cwd(), {
+    prefix: "t3-annotation-intake-",
+  }).pipe(Layer.provideMerge(NodeServices.layer));
+  return Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    const fs = yield* FileSystem.FileSystem;
+    const pendingId = createPendingAttachmentId();
+    assert.isNotNull(pendingId);
+    const image: ChatAttachment = {
+      type: "image",
+      id: ChatAttachmentId.make(pendingId),
+      name: "Architecture comments-overview-image_badges.png",
+      mimeType: "image/png",
+      sizeBytes: 4,
+    };
+    const pendingPath = resolveAttachmentPath({
+      attachmentsDir: config.attachmentsDir,
+      attachment: image,
+    });
+    assert.isNotNull(pendingPath);
+    yield* fs.makeDirectory(config.attachmentsDir, { recursive: true });
+    yield* fs.writeFile(pendingPath, new Uint8Array([1, 2, 3, 4]));
+    const comments = Schema.decodeUnknownSync(DiagramAnnotationsContextRecord)({
+      version: 1,
+      contextId: "diagram-annotations_page",
+      kind: "diagram-annotations",
+      label: "Architecture comments",
+      payload: {
+        environmentId: "environment-1",
+        projectId,
+        diagramId: "00000000-0000-4000-8000-000000000001",
+        pageId: "page:one",
+        annotations: [
+          {
+            id: "ann_1",
+            number: 1,
+            comment: 'Rename this to "API Gateway"',
+            target: { kind: "shapes", shapeIds: ["shape:gateway"] },
+          },
+          {
+            id: "ann_3",
+            number: 3,
+            comment: "Leave room here",
+            target: { kind: "region", bounds: { x: -200, y: -100, w: 180, h: 120 } },
+          },
+        ],
+        capture: {
+          revision: 42,
+          resolved: [
+            { id: "ann_1", bounds: { x: 0, y: 0, w: 160, h: 80 }, marker: { x: 0, y: 0 } },
+            {
+              id: "ann_3",
+              bounds: { x: -200, y: -100, w: 180, h: 120 },
+              marker: { x: -200, y: -100 },
+            },
+          ],
+          images: [
+            {
+              contextId: "image_badges",
+              role: "overview",
+              annotationIds: ["ann_1", "ann_3"],
+              bounds: { x: -248, y: -148, w: 456, h: 276 },
+              width: 456,
+              height: 276,
+            },
+          ],
+          structure: {
+            revision: 42,
+            pages: [{ id: "page:one", name: "Page 1", shapeCount: 1 }],
+            compositions: [],
+            shapes: [],
+            bindings: [],
+            totalShapes: 1,
+            truncated: false,
+          },
+        },
+      },
+    });
+    const input = {
+      ...launchInput({ command: "annotation-launch", thread: "annotation-thread" }),
+      initialMessage: {
+        messageId: MessageId.make("annotation-first"),
+        text: "Fix these [Architecture comments](t3-context://v1/diagram-annotations/diagram-annotations_page)",
+        context: {
+          version: 1 as const,
+          records: [
+            comments,
+            {
+              version: 1 as const,
+              contextId: ComposerContextId.make("image_badges"),
+              kind: "image" as const,
+              label: image.name,
+              attachmentId: image.id,
+              name: image.name,
+              mimeType: image.mimeType,
+              sizeBytes: image.sizeBytes,
+            },
+          ],
+        },
+        attachments: [image],
+      },
+    };
+    const launched = yield* ThreadMessageIntake.launchThread(input);
+    const stored = launched.projection.messages[0];
+    assert.isDefined(stored);
+    const [storedImage] = stored.attachments;
+    assert.isDefined(storedImage);
+    assert.notEqual(storedImage.id, image.id);
+    assert.deepEqual(stored.context?.records, [
+      comments,
+      {
+        version: 1,
+        contextId: "image_badges",
+        kind: "image",
+        label: image.name,
+        attachmentId: storedImage.id,
+        name: image.name,
+        mimeType: image.mimeType,
+        sizeBytes: image.sizeBytes,
+      },
+    ]);
+
+    const storedPath = resolveAttachmentPath({
+      attachmentsDir: config.attachmentsDir,
+      attachment: storedImage,
+    });
+    const providerText = providerMessageTextWithAttachmentPaths({
+      text: projectComposerContextForProvider({
+        text: stored.text,
+        records: stored.context?.records ?? [],
+      }),
+      attachments: stored.attachments,
+      attachmentsDir: config.attachmentsDir,
+    });
+    assert.include(
+      providerText,
+      [
+        "images:",
+        '{"ref":"image_badges","role":"overview","annotations":[1,3],"bounds":{"x":-248,"y":-148,"w":456,"h":276},"width":456,"height":276}',
+        "comments:",
+        '{"number":1,"id":"ann_1","comment":"Rename this to \\"API Gateway\\"","target":{"kind":"shapes","shapeIds":["shape:gateway"]},"bounds":{"x":0,"y":0,"w":160,"h":80},"marker":{"x":0,"y":0}}',
+        '{"number":3,"id":"ann_3","comment":"Leave room here","target":{"kind":"region","bounds":{"x":-200,"y":-100,"w":180,"h":120}},"bounds":{"x":-200,"y":-100,"w":180,"h":120},"marker":{"x":-200,"y":-100}}',
+      ].join("\n"),
+    );
+    assert.include(
+      providerText,
+      `[Attached image "Architecture comments-overview-image_badges.png" is saved at: ${storedPath}]`,
+    );
   }).pipe(Effect.provide(Layer.mergeAll(harness.layer, layerFiles)));
 });
 
