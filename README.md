@@ -10,6 +10,24 @@ Nothing. We built T3 Code because we wanted the best possible development experi
 
 We wanted something performant, remote-ready, and truly open. If we ever go the wrong direction, we want you to have everything you need to fork and build the editor that you want.
 
+## Running this fork
+
+The `staging` branch includes project canvases and agent-generated diagrams,
+including flowcharts, state machines, UML and ER diagrams, C4 views, sequence
+diagrams, wireframes, and user flows. See [drawing and attaching diagrams](./docs/user/composer.md#sketch-and-attach-diagrams)
+for creating drawings, asking an agent to change them, and sending selected shapes to chat.
+
+Run the published fork on macOS ARM64 or Linux x64/ARM64:
+
+```bash
+npx @connor_beleznay/t3@latest
+```
+
+Use the local web app opened by this command to get the fork's canvas features.
+T3 Connect uses the production service and your own account. Update with the same
+`npx` command; `t3 update` downloads official builds. The installation commands
+below install upstream T3 Code. Maintainers can follow the [fork publishing guide](./docs/operations/fork-npm.md).
+
 ## Installation
 
 > [!WARNING]

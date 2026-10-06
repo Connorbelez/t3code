@@ -43,8 +43,13 @@ import serverPackageJson from "../apps/server/package.json" with { type: "json" 
 
 import { windowsSystemTar } from "./build-cli-archive.ts";
 
-export const NPM_PLATFORM_PACKAGE_SCOPE = "@t3code";
-export const NPM_LAUNCHER_PACKAGE_NAME = "t3";
+import {
+  NPM_LAUNCHER_PACKAGE_NAME,
+  NPM_PLATFORM_PACKAGE_SCOPE,
+  NPM_REPOSITORY,
+} from "./lib/npm-release.ts";
+
+export { NPM_LAUNCHER_PACKAGE_NAME, NPM_PLATFORM_PACKAGE_SCOPE };
 
 const encodePackageJson = Schema.encodeEffect(fromJsonStringPretty(Schema.Unknown));
 
@@ -109,7 +114,7 @@ export function npmPlatformPackageManifest(
     version,
     description: `T3 Code CLI executable for ${platformKey}`,
     license: serverPackageJson.license,
-    repository: serverPackageJson.repository,
+    repository: NPM_REPOSITORY,
     os: [os],
     cpu: [cpu],
     files: ["t3", "t3.exe", "client", "resource-monitor", "node_modules"],
@@ -163,7 +168,7 @@ export function npmPlatformPackageReadme(platformKey: CliArchivePlatformKey): st
     `npx ${NPM_LAUNCHER_PACKAGE_NAME}@latest`,
     "```",
     "",
-    "Source and documentation: https://github.com/pingdotgg/t3code",
+    `Source and documentation: ${NPM_REPOSITORY.url}`,
     "",
   ].join("\n");
 }
@@ -178,7 +183,7 @@ export function npmLauncherPackageManifest(
     version,
     description: "T3 Code CLI. Installs the self-contained executable for this platform.",
     license: serverPackageJson.license,
-    repository: serverPackageJson.repository,
+    repository: NPM_REPOSITORY,
     bin: { t3: "./bin/t3.js" },
     files: ["bin", "dist"],
     optionalDependencies: Object.fromEntries(
@@ -210,7 +215,7 @@ try {
       "t3: no T3 Code CLI build is available for this platform (" + key + ").",
       "Supported platforms: " + SUPPORTED.join(", ") + ".",
       "If yours is listed, reinstall t3 so npm fetches its optional dependency.",
-      "The desktop app and release archives are at https://github.com/pingdotgg/t3code/releases",
+      "The source and release archives are at ${NPM_REPOSITORY.url}/releases",
       "",
     ].join("\\n"),
   );

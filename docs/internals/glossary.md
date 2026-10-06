@@ -67,10 +67,11 @@ See [composer context references](./composer-context-references.md) for the cont
 
 ## Diagrams
 
-| Term        | Meaning                                                                                                                    |
-| ----------- | -------------------------------------------------------------------------------------------------------------------------- |
-| Composition | A keyed group of shapes within a diagram, generated from a spec and regenerable in place. A diagram can hold many.         |
-| Kit         | A notation vocabulary for compositions, such as flow, UML class, C4, or wireframe: its node kinds, edge kinds, and layout. |
-| Spec        | The typed description of a composition's nodes and edges that the composition is generated from.                           |
+| Term          | Meaning                                                                                                                    |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| Composition   | A keyed group of shapes within a diagram, generated from a spec and regenerable in place. A diagram can hold many.         |
+| Kit           | A notation vocabulary for compositions, such as flow, UML class, C4, or wireframe: its node kinds, edge kinds, and layout. |
+| Spec          | The typed description of a composition's nodes and edges that the composition is generated from.                           |
+| HTML artifact | An interactive HTML document displayed as one object on a diagram's canvas.                                                |
 
 See [diagram compositions](./diagram-compositions.md) for ownership and regeneration.

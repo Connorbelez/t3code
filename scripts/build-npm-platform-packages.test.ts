@@ -87,6 +87,74 @@ const makeFakeArchives = Effect.fn("test.makeFakeArchives")(function* () {
 });
 
 it.layer(NodeServices.layer)("build-npm-platform-packages", (it) => {
+  it.effect("runs a fork launcher using only its own scoped platform packages", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const fixture = yield* makeFakeArchives();
+      const repoRoot = yield* path.fromFileUrl(new URL("..", import.meta.url));
+      const env = {
+        ...process.env,
+        T3CODE_NPM_SCOPE: "@example-fork",
+        T3CODE_NPM_REPOSITORY: "https://github.com/example/t3code",
+      };
+      const build = yield* run(
+        process.execPath,
+        [
+          "scripts/build-npm-platform-packages.ts",
+          "--archives-dir",
+          fixture.archivesDir,
+          "--output-dir",
+          fixture.outputDir,
+          "--version",
+          VERSION,
+          "--allow-missing",
+        ],
+        { cwd: repoRoot, env },
+      );
+      assert.equal(build.exitCode, 0, build.stderr);
+      const publish = yield* run(
+        process.execPath,
+        [
+          "apps/server/scripts/cli.ts",
+          "publish",
+          "--packages-dir",
+          fixture.outputDir,
+          "--dry-run",
+          "--verbose",
+        ],
+        { cwd: repoRoot, env },
+      );
+      assert.equal(publish.exitCode, 0, publish.stderr);
+      assert.include(publish.stdout + publish.stderr, "@example-fork/t3");
+      const launcherDir = path.join(fixture.outputDir, "@example-fork/t3");
+      const manifest = yield* decodeManifest(
+        yield* fs.readFileString(path.join(launcherDir, "package.json")),
+      );
+      assert.equal(manifest.name, "@example-fork/t3");
+      assert.deepStrictEqual(manifest.optionalDependencies, {
+        "@example-fork/t3-darwin-arm64": VERSION,
+        "@example-fork/t3-linux-x64": VERSION,
+      });
+      assert.deepStrictEqual(manifest.repository, {
+        type: "git",
+        url: "https://github.com/example/t3code",
+        directory: "apps/server",
+      });
+      assert.isTrue(yield* fs.exists(path.join(fixture.outputDir, "@example-fork/t3.tgz")));
+      const hostPlatform = yield* HostProcessPlatform;
+      const hostArch = yield* HostProcessArchitecture;
+      if (KEYS.some((key) => key === `${hostPlatform}-${hostArch}`)) {
+        const launch = yield* run(process.execPath, ["bin/t3.js", "--version"], {
+          cwd: launcherDir,
+          env: { ...env, NODE_PATH: fixture.outputDir },
+        });
+        assert.equal(launch.stdout.trim(), `stub ${hostPlatform}-${hostArch} --version`);
+        assert.equal(launch.exitCode, 7);
+      }
+    }),
+  );
+
   it.effect("refuses a partial release unless --allow-missing is passed", () =>
     Effect.gen(function* () {
       const fixture = yield* makeFakeArchives();

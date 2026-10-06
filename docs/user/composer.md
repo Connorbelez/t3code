@@ -68,7 +68,10 @@ whole drawing is one Undo step. A diagram can hold several generated drawings
 side by side. When you attach a diagram, the agent sees each generated drawing as
 one summary instead of every shape, so large drawings don't crowd out the rest.
 To point at part of a drawing, select those shapes and add the selection to chat;
-the agent is told exactly which ones you mean.
+the agent is told exactly which ones you mean. For example, select two screens,
+add them to your message, and ask "add a confirmation step between these screens".
+The selection keeps the generated drawing's member names, so the agent can
+change those parts of the existing drawing.
 
 Ask for changes and the agent updates the same drawing. Shapes you moved or
 resized stay as you left them, new shapes are placed around them, and shapes you
