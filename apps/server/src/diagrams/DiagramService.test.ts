@@ -1,5 +1,7 @@
+import { createDiagramSchema } from "@t3tools/diagram-compose/schema";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
+import * as NodeSqlite from "node:sqlite";
 import {
   EnvironmentId,
   ProjectId,
@@ -7,7 +9,11 @@ import {
   DiagramPageScope,
   DiagramOperationError,
   DiagramHostConnectInput,
+  DiagramHostAnnotateInput,
+  DiagramAnnotationsContextRecord,
   DiagramReadResult,
+  DiagramAnnotatedCapture,
+  DiagramAnnotations,
   type DiagramComposeRequest,
   type DiagramCompositionSummary,
   type DiagramHostComposeResult,
@@ -24,11 +30,14 @@ import {
   type TLRecord,
 } from "@tldraw/tlschema";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
+import * as Queue from "effect/Queue";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as ServerConfig from "../config.ts";
@@ -42,7 +51,7 @@ import { diagramRecordFingerprint } from "./DiagramRoom.ts";
 const environmentId = EnvironmentId.make("environment:diagram-tests");
 const projectId = ProjectId.make("project:diagram-tests");
 const otherProjectId = ProjectId.make("project:diagram-other");
-const sdkSchema = createTLSchema();
+const sdkSchema = createDiagramSchema();
 const encode = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decode = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const dependencies = Layer.mergeAll(
@@ -86,7 +95,36 @@ function document(name = "Imported page") {
 }
 
 const decodeHostConnectInput = Schema.decodeUnknownEffect(DiagramHostConnectInput);
+const decodeAnnotateInput = Schema.decodeUnknownEffect(DiagramHostAnnotateInput);
 const allOperations: readonly DiagramHostOperation[] = ["prepare-batch", "capture", "compose"];
+const annotatingOperations: readonly DiagramHostOperation[] = [...allOperations, "annotate"];
+
+/** What a current host returns: each target outlined at a fixed spot, one overview of all. */
+const annotatedEcho = (
+  diagram: DiagramMetadata,
+  input: DiagramHostAnnotateInput,
+): DiagramAnnotatedCapture => ({
+  diagramId: diagram.id,
+  revision: input.revision,
+  pageId: input.pageId,
+  annotations: input.annotations,
+  resolved: input.annotations.map(({ id }, index) => ({
+    id,
+    bounds: { x: index * 100, y: 0, w: 50, h: 40 },
+    marker: { x: index * 100 - 12, y: -12 },
+  })),
+  images: [
+    {
+      role: "overview",
+      annotationIds: input.annotations.map(({ id }) => id),
+      bounds: { x: -60, y: -60, w: 400, h: 200 },
+      width: 400,
+      height: 200,
+      mimeType: "image/png",
+      base64: "b3ZlcnZpZXc=",
+    },
+  ],
+});
 
 const connect = Effect.fn(function* (
   service: DiagramService.DiagramService["Service"],
@@ -97,12 +135,19 @@ const connect = Effect.fn(function* (
     composeAnswers?: Array<DiagramHostComposeResult | DiagramOperationError>;
     /** Failures for the next captures; "hang" never answers. Later captures succeed. */
     captureFailures?: Array<DiagramOperationError | "hang">;
+    /**
+     * Answers for the next annotate requests: "hold" queues the reply in `annotateHeld` for the
+     * test to send, a function rewrites the echo. Later requests get the echo.
+     */
+    annotateAnswers?: Array<"hold" | ((echo: DiagramAnnotatedCapture) => DiagramAnnotatedCapture)>;
   } = {},
 ) {
   const { control } = options;
   const received: DiagramHostOperation[] = [];
   const composeInputs: unknown[] = [];
   const captureScopes: unknown[] = [];
+  const annotateInputs: unknown[] = [];
+  const annotateHeld = yield* Queue.unbounded<Effect.Effect<void, DiagramOperationError>>();
   const ready = yield* Deferred.make<string>();
   const connected = yield* Deferred.make<void>();
   const captureHung = yield* Deferred.make<void>();
@@ -217,6 +262,18 @@ const connect = Effect.fn(function* (
             },
           },
         });
+      } else if (request.operation === "annotate") {
+        annotateInputs.push(request.input);
+        const input = yield* decodeAnnotateInput(request.input);
+        const answer = options.annotateAnswers?.shift();
+        const echo = annotatedEcho(diagram, input);
+        const reply = service.hostRespond({
+          requestId: request.requestId,
+          connectionId: request.connectionId,
+          result: { ok: true, value: typeof answer === "function" ? answer(echo) : echo },
+        });
+        if (answer === "hold") yield* Queue.offer(annotateHeld, reply);
+        else yield* reply;
       } else {
         const input = yield* Schema.decodeUnknownEffect(
           Schema.Struct({ scope: DiagramPageScope, revision: Schema.Number }),
@@ -258,8 +315,240 @@ const connect = Effect.fn(function* (
     received,
     composeInputs,
     captureScopes,
+    annotateInputs,
+    annotateHeld,
   };
 });
+
+it.effect("preserves HTML source ownership across restart, duplication and editable export", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const inline = sdkRecord({
+      id: "shape:inline",
+      typeName: "shape",
+      type: "html-artifact",
+      parentId: "page:imported",
+      x: 10,
+      y: 20,
+      rotation: 0,
+      index: "a1",
+      isLocked: false,
+      opacity: 1,
+      meta: {},
+      props: {
+        w: 640,
+        h: 480,
+        title: "Plan",
+        source: { kind: "inline", html: "<button>Plan</button>" },
+      },
+    });
+    const file = sdkRecord({
+      ...inline,
+      id: "shape:file",
+      index: "a2",
+      x: 700,
+      props: { w: 320, h: 240, title: "Mock", source: { kind: "file", path: "mocks/index.html" } },
+    });
+    const target = yield* Effect.scoped(
+      Effect.gen(function* () {
+        const service = yield* DiagramService.make;
+        const base = document();
+        const diagram = yield* service.importDocument({
+          projectId,
+          name: "Artifacts",
+          document: { ...base, records: [...base.records, inline, file] },
+        });
+        return { projectId, diagramId: diagram.id };
+      }),
+    );
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const service = yield* DiagramService.make;
+        const read = yield* service.read({ ...target, includeRecords: true });
+        assert.deepEqual(
+          read.records.filter((record) => sdkRecord(record).typeName === "shape"),
+          [inline, file],
+        );
+        assert.deepEqual(
+          read.structure.shapes.map((shape) => shape.htmlArtifactSource),
+          [
+            { kind: "inline", html: "<button>Plan</button>" },
+            { kind: "file", path: "mocks/index.html" },
+          ],
+        );
+        assert.deepEqual(read.structure.shapes[0]?.bounds, { x: 10, y: 20, w: 640, h: 480 });
+        assert.equal(read.structure.shapes[0]?.label, "Plan");
+        const exported = yield* service.exportDocument(target);
+        const imported = yield* service.importDocument({
+          projectId,
+          name: "Imported artifacts",
+          document: exported,
+        });
+        const duplicate = yield* service.lifecycle({ ...target, operation: "duplicate" });
+        assert.isNotNull(duplicate);
+        for (const diagramId of [imported.id, duplicate!.id]) {
+          const copy = yield* service.read({ projectId, diagramId });
+          assert.deepEqual(
+            copy.structure.shapes.map((shape) => shape.htmlArtifactSource),
+            read.structure.shapes.map((shape) => shape.htmlArtifactSource),
+          );
+        }
+      }),
+    );
+  }).pipe(Effect.provide(dependencies)),
+);
+
+it.effect(
+  "updates inline HTML through durable diagram batches and removes only the canvas record",
+  () =>
+    Effect.gen(function* () {
+      yield* seed;
+      const service = yield* DiagramService.make;
+      const baseDocument = document();
+      const base = {
+        ...baseDocument,
+        records: [
+          ...baseDocument.records,
+          sdkRecord({
+            id: "document:document",
+            typeName: "document",
+            gridSize: 10,
+            name: "",
+            meta: {},
+          }),
+        ],
+      };
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspaceRoot = yield* fs.makeTempDirectoryScoped({ prefix: "html-ownership-" });
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`UPDATE projection_projects SET workspace_root = ${workspaceRoot} WHERE project_id = ${projectId}`;
+      const sourcePath = path.join(workspaceRoot, "existing.html");
+      yield* fs.writeFileString(sourcePath, "<p>Owned by the workspace</p>");
+      const inline = sdkRecord({
+        id: "shape:inline",
+        typeName: "shape",
+        type: "html-artifact",
+        parentId: "page:imported",
+        x: 0,
+        y: 0,
+        rotation: 0,
+        index: "a1",
+        isLocked: false,
+        opacity: 1,
+        meta: {},
+        props: { w: 640, h: 480, title: "Plan", source: { kind: "inline", html: "<p>Before</p>" } },
+      });
+      const file = sdkRecord({
+        ...inline,
+        id: "shape:file",
+        index: "a2",
+        props: { w: 320, h: 240, title: "File", source: { kind: "file", path: "existing.html" } },
+      });
+      const diagram = yield* service.importDocument({
+        projectId,
+        name: "Edit artifacts",
+        document: { ...base, records: [...base.records, inline, file] },
+      });
+      const target = { projectId, diagramId: diagram.id };
+      const host = yield* connect(service, diagram);
+      const page = base.records[0]!;
+      const updated = sdkRecord({
+        ...inline,
+        props: { w: 640, h: 480, title: "Plan", source: { kind: "inline", html: "<p>After</p>" } },
+      });
+      const input = {
+        ...target,
+        namespace: "provider-session",
+        batch: {
+          requestId: "html-edit",
+          expected: [
+            { id: inline.id, record: inline },
+            { id: file.id, record: file },
+            { id: page.id, record: page },
+          ],
+          puts: [updated],
+          deletes: [file.id],
+        },
+      };
+      const receipt = yield* service.applyBatch(input);
+      const committed = yield* Deferred.await(host.committed);
+      yield* service.syncSend({
+        ...target,
+        connectionId: host.connectionId,
+        message: encode({
+          type: "diagram-adoption",
+          generation: committed.generation,
+          fence: committed.fence,
+          push: {
+            type: "push",
+            clientClock: 1,
+            diff: { [updated.id]: ["put", updated], [file.id]: ["remove"] },
+          },
+        }),
+      });
+      yield* Deferred.await(host.adopted);
+      assert.deepEqual(yield* service.applyBatch(input), receipt);
+      assert.equal(yield* fs.readFileString(sourcePath), "<p>Owned by the workspace</p>");
+      assert.deepEqual(
+        (yield* service.read(target)).structure.shapes.map((shape) => shape.htmlArtifactSource),
+        [{ kind: "inline", html: "<p>After</p>" }],
+      );
+    }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
+it.effect("imports stock diagrams created before the HTML artifact schema existed", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    const stock = { ...document(), schema: createTLSchema().serialize() };
+    const diagram = yield* service.importDocument({
+      projectId,
+      name: "Existing diagram",
+      document: stock,
+    });
+    const exported = yield* service.exportDocument({ projectId, diagramId: diagram.id });
+    assert.deepEqual(exported.records, stock.records);
+    assert.deepEqual(exported.schema, sdkSchema.serialize());
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
+it.effect("rejects malformed HTML source ownership at the diagram service boundary", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    for (const source of [
+      { kind: "inline", path: "missing.html" },
+      { kind: "file", html: "<p>Wrong owner</p>" },
+      { kind: "file", path: "" },
+      { kind: "inline", html: "<p>Two owners</p>", path: "duplicate.html" },
+    ]) {
+      const base = document();
+      const record = {
+        id: "shape:invalid",
+        typeName: "shape",
+        type: "html-artifact",
+        parentId: "page:imported",
+        x: 0,
+        y: 0,
+        rotation: 0,
+        index: "a1",
+        isLocked: false,
+        opacity: 1,
+        meta: {},
+        props: { w: 640, h: 480, title: "Invalid", source },
+      };
+      const error = yield* Effect.flip(
+        service.importDocument({
+          projectId,
+          name: "Invalid",
+          document: { ...base, records: [...base.records, record] },
+        }),
+      );
+      assert.equal(error.code, "invalid-records");
+    }
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
 
 it.effect("selects the mounted host and refuses a busy context even when images are optional", () =>
   Effect.gen(function* () {
@@ -2010,5 +2299,487 @@ it.effect("captures and prepares context by composition key, and fails a missing
     const missing = { ...target, scope: { kind: "composition" as const, key: "gone" } };
     assert.equal((yield* Effect.flip(service.capture(missing))).code, "scope-unavailable");
     assert.equal((yield* Effect.flip(service.prepareContext(missing))).code, "scope-unavailable");
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
+const annotationsOf = Schema.decodeUnknownSync(DiagramAnnotations);
+const capturedOf = Schema.decodeUnknownSync(DiagramAnnotatedCapture);
+const isAnnotationsRecord = Schema.is(DiagramAnnotationsContextRecord);
+
+function geoShape(id: string, parentId: string, x: number, label = "") {
+  return sdkRecord({
+    id,
+    typeName: "shape",
+    type: "geo",
+    parentId,
+    index: "a1",
+    x,
+    y: 0,
+    rotation: 0,
+    isLocked: false,
+    opacity: 1,
+    meta: {},
+    props: {
+      geo: "rectangle",
+      dash: "draw",
+      url: "",
+      w: 100,
+      h: 100,
+      growY: 0,
+      scale: 1,
+      flipX: false,
+      flipY: false,
+      labelColor: "black",
+      color: "black",
+      fill: "none",
+      size: "m",
+      font: "draw",
+      align: "middle",
+      verticalAlign: "middle",
+      richText: toRichText(label),
+    },
+  });
+}
+
+/**
+ * "page:imported" holds boxes first (x 0), second (x 200), third (x 400) and the auth composition;
+ * "page:other" holds one more box. The default annotations target second and a region on third.
+ */
+const importAnnotated = Effect.fn(function* (
+  service: DiagramService.DiagramService["Service"],
+  name: string,
+) {
+  const page = document().records[0]!;
+  const other = sdkSchema.types.page.validate({
+    id: PageRecordType.createId("other"),
+    typeName: "page",
+    meta: {},
+    name: "Other",
+    index: "a2",
+  });
+  const { records } = yield* composeRecords(
+    [
+      sdkRecord({
+        id: "document:document",
+        typeName: "document",
+        gridSize: 10,
+        name: "",
+        meta: {},
+      }),
+      page,
+      other,
+      geoShape("shape:first", page.id, 0),
+      geoShape("shape:second", page.id, 200),
+      geoShape("shape:third", page.id, 400),
+      geoShape("shape:elsewhere", other.id, 0),
+    ],
+    authSpec,
+  );
+  const diagram = yield* service.importDocument({
+    projectId,
+    name,
+    document: { ...document(), records },
+  });
+  const annotations = annotationsOf([
+    {
+      id: "resize",
+      number: 1,
+      comment: "Make this one wider",
+      target: { kind: "shapes", shapeIds: ["shape:second"] },
+    },
+    {
+      id: "corner",
+      number: 3,
+      comment: "Put the legend here",
+      target: { kind: "region", bounds: { x: 410, y: 10, w: 20, h: 20 } },
+    },
+  ]);
+  return {
+    diagram,
+    records,
+    input: { projectId, diagramId: diagram.id, pageId: "page:imported", annotations },
+  };
+});
+
+const previewRowCount = Effect.gen(function* () {
+  const config = yield* ServerConfig.ServerConfig;
+  const path = yield* Path.Path;
+  const database = new NodeSqlite.DatabaseSync(path.join(config.stateDir, "diagrams.sqlite"), {
+    readOnly: true,
+  });
+  try {
+    return database.prepare("SELECT COUNT(*) AS count FROM diagram_previews").get()?.["count"];
+  } finally {
+    database.close();
+  }
+});
+
+it.effect("sends annotations verbatim to an annotating host and prepares them with structure", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    const { diagram, records, input } = yield* importAnnotated(service, "Annotated");
+    const sessionId = memberShape(records, "session").id;
+    const host = yield* connect(service, diagram, { operations: annotatingOperations });
+    const annotations = annotationsOf([
+      ...input.annotations,
+      {
+        id: "member",
+        number: 4,
+        comment: "Rename this step",
+        target: { kind: "shapes", shapeIds: [sessionId] },
+      },
+    ]);
+
+    const prepared = yield* service.prepareAnnotations({ ...input, annotations });
+
+    assert.deepEqual(host.annotateInputs, [
+      {
+        pageId: "page:imported",
+        revision: 1,
+        annotations: [
+          {
+            id: "resize",
+            number: 1,
+            comment: "Make this one wider",
+            target: { kind: "shapes", shapeIds: ["shape:second"] },
+          },
+          {
+            id: "corner",
+            number: 3,
+            comment: "Put the legend here",
+            target: { kind: "region", bounds: { x: 410, y: 10, w: 20, h: 20 } },
+          },
+          {
+            id: "member",
+            number: 4,
+            comment: "Rename this step",
+            target: { kind: "shapes", shapeIds: [sessionId] },
+          },
+        ],
+      },
+    ]);
+    assert.deepEqual(
+      prepared.capture,
+      capturedOf({
+        diagramId: diagram.id,
+        revision: 1,
+        pageId: "page:imported",
+        annotations,
+        resolved: [
+          { id: "resize", bounds: { x: 0, y: 0, w: 50, h: 40 }, marker: { x: -12, y: -12 } },
+          { id: "corner", bounds: { x: 100, y: 0, w: 50, h: 40 }, marker: { x: 88, y: -12 } },
+          { id: "member", bounds: { x: 200, y: 0, w: 50, h: 40 }, marker: { x: 188, y: -12 } },
+        ],
+        images: [
+          {
+            role: "overview",
+            annotationIds: ["resize", "corner", "member"],
+            bounds: { x: -60, y: -60, w: 400, h: 200 },
+            width: 400,
+            height: 200,
+            mimeType: "image/png",
+            base64: "b3ZlcnZpZXc=",
+          },
+        ],
+      }),
+    );
+    assert.equal(prepared.diagram.revision, 1);
+    assert.deepEqual(
+      prepared.structure.shapes.map((shape) => shape.id),
+      ["shape:second", "shape:third", "shape:first"],
+    );
+    assert.deepEqual(
+      prepared.structure.compositions.map(({ key, selectedMembers }) => [
+        key,
+        selectedMembers?.map((member) => member.key),
+      ]),
+      [["auth", ["session"]]],
+    );
+    assert.deepEqual(host.received, ["annotate"]);
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
+it.effect("refuses annotations without an annotating editor and says what to do", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    const { diagram, input } = yield* importAnnotated(service, "No editor");
+
+    const closed = yield* Effect.flip(service.prepareAnnotations(input));
+    assert.deepEqual(
+      [closed.code, closed.details],
+      [
+        "no-editor",
+        {
+          issues: [
+            {
+              path: "editor",
+              message: "Open this diagram in T3 Code web or desktop to capture comments.",
+            },
+          ],
+        },
+      ],
+    );
+
+    const legacy = yield* connect(service, diagram, { operations: allOperations });
+    const outdated = yield* Effect.flip(service.captureAnnotated(input));
+    assert.deepEqual(
+      [outdated.code, outdated.details],
+      [
+        "no-editor",
+        {
+          issues: [
+            {
+              path: "editor",
+              message:
+                "Connected editors are too old for Canvas comments. Update T3 Code on the device with this diagram open.",
+            },
+          ],
+        },
+      ],
+    );
+    assert.deepEqual(legacy.received, []);
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
+it.effect("names each comment whose shape is gone from the page before asking any host", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    const { diagram, input } = yield* importAnnotated(service, "Moved targets");
+    const host = yield* connect(service, diagram, { operations: annotatingOperations });
+    const retarget = (number: number) => ({
+      path: `annotations/${number}`,
+      message: `Comment ${number} targets a shape that was deleted or moved to another page. Retarget or delete it.`,
+    });
+
+    const failure = yield* Effect.flip(
+      service.prepareAnnotations({
+        ...input,
+        annotations: annotationsOf([
+          {
+            id: "kept",
+            number: 1,
+            comment: "Still here",
+            target: { kind: "shapes", shapeIds: ["shape:first"] },
+          },
+          {
+            id: "moved",
+            number: 2,
+            comment: "Now on another page",
+            target: { kind: "shapes", shapeIds: ["shape:first", "shape:elsewhere"] },
+          },
+          {
+            id: "deleted",
+            number: 5,
+            comment: "Deleted",
+            target: { kind: "shapes", shapeIds: ["shape:gone"] },
+          },
+          {
+            id: "page",
+            number: 6,
+            comment: "A page is not a shape",
+            target: { kind: "shapes", shapeIds: ["page:other"] },
+          },
+        ]),
+      }),
+    );
+    assert.deepEqual(
+      [failure.code, failure.details],
+      ["scope-unavailable", { issues: [retarget(2), retarget(5), retarget(6)] }],
+    );
+    assert.equal(
+      (yield* Effect.flip(service.captureAnnotated({ ...input, pageId: "page:missing" }))).code,
+      "scope-unavailable",
+    );
+    assert.deepEqual(host.received, []);
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
+it.effect("fails stale when the diagram changes while the host captures annotations", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    const { diagram, input } = yield* importAnnotated(service, "Concurrent edit");
+    const host = yield* connect(service, diagram, {
+      operations: annotatingOperations,
+      annotateAnswers: ["hold"],
+    });
+    const page = sdkSchema.types.page.validate({
+      id: PageRecordType.createId("added"),
+      typeName: "page",
+      meta: {},
+      name: "Added",
+      index: "a3",
+    });
+
+    const prepared = yield* service.prepareAnnotations(input).pipe(Effect.forkScoped);
+    const reply = yield* Queue.take(host.annotateHeld);
+    const receipt = yield* service.applyBatch({
+      projectId,
+      diagramId: diagram.id,
+      namespace: "provider",
+      batch: {
+        requestId: "edit",
+        expected: [{ id: page.id, record: null }],
+        puts: [page],
+        deletes: [],
+      },
+    });
+    yield* reply;
+
+    assert.equal(receipt.revision, 2);
+    assert.equal((yield* Effect.flip(Fiber.join(prepared))).code, "stale");
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
+it.effect("fails stale when the host echoes different annotations than it was sent", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    const { diagram, input } = yield* importAnnotated(service, "Echo");
+    yield* connect(service, diagram, {
+      operations: annotatingOperations,
+      annotateAnswers: [
+        (echo) => ({
+          ...echo,
+          annotations: annotationsOf(
+            echo.annotations.map((annotation) => ({ ...annotation, comment: "Something else" })),
+          ),
+        }),
+      ],
+    });
+
+    assert.equal((yield* Effect.flip(service.captureAnnotated(input))).code, "stale");
+    assert.equal((yield* service.captureAnnotated(input)).revision, 1);
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
+it.effect("waits 45 seconds for an annotating host before failing busy", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    const { diagram, input } = yield* importAnnotated(service, "Slow host");
+    const host = yield* connect(service, diagram, {
+      operations: annotatingOperations,
+      annotateAnswers: ["hold", "hold"],
+    });
+
+    const slow = yield* service.captureAnnotated(input).pipe(Effect.forkScoped);
+    const reply = yield* Queue.take(host.annotateHeld);
+    yield* TestClock.adjust("20 seconds");
+    yield* reply;
+    assert.equal((yield* Fiber.join(slow)).revision, 1);
+
+    const hung = yield* service.captureAnnotated(input).pipe(Effect.forkScoped);
+    yield* Queue.take(host.annotateHeld).pipe(Effect.asVoid);
+    yield* TestClock.adjust("45 seconds");
+    assert.equal((yield* Effect.flip(Fiber.join(hung))).code, "busy");
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
+it.effect("never stores an annotated capture as the diagram's preview", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    const { diagram, input } = yield* importAnnotated(service, "Preview");
+    const host = yield* connect(service, diagram, { operations: annotatingOperations });
+    const target = { projectId, diagramId: diagram.id };
+    yield* service.capture({ ...target, scope: { kind: "diagram", pageId: "page:imported" } });
+    const clean = yield* service.preview(target);
+
+    yield* service.prepareAnnotations(input);
+    yield* service.captureAnnotated(input);
+
+    assert.equal(clean.capture?.base64, "aW1hZ2U=");
+    assert.deepEqual(yield* service.preview(target), clean);
+    assert.equal(yield* previewRowCount, 1);
+    assert.deepEqual(host.received, ["capture", "annotate", "annotate"]);
+  }).pipe(Effect.scoped, Effect.provide(dependencies)),
+);
+
+it.effect("lists targeted shapes first and trims the rest so the context record fits", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const service = yield* DiagramService.make;
+    const page = document().records[0]!;
+    const spare = Array.from({ length: 90 }, (_, index) =>
+      sdkSchema.types.page.validate({
+        id: PageRecordType.createId(`spare${index}`),
+        typeName: "page",
+        meta: {},
+        name: "s".repeat(256),
+        index: "a2",
+      }),
+    );
+    const shapes = Array.from({ length: 60 }, (_, index) =>
+      geoShape(`shape:item-${index}`, page.id, index * 200, "l".repeat(256)),
+    );
+    const diagram = yield* service.importDocument({
+      projectId,
+      name: "Budget",
+      document: { ...document(), records: [page, ...spare, ...shapes] },
+    });
+    yield* connect(service, diagram, { operations: annotatingOperations });
+    const comment = "c".repeat(1_800);
+    const annotations = annotationsOf([
+      { id: "a1", number: 1, comment, target: { kind: "shapes", shapeIds: ["shape:item-59"] } },
+      { id: "a2", number: 2, comment, target: { kind: "shapes", shapeIds: ["shape:item-58"] } },
+      {
+        id: "a3",
+        number: 3,
+        comment,
+        target: { kind: "region", bounds: { x: 6_010, y: 10, w: 20, h: 20 } },
+      },
+      ...Array.from({ length: 9 }, (_, index) => ({
+        id: `a${index + 4}`,
+        number: index + 4,
+        comment,
+        target: { kind: "region", bounds: { x: -5_000, y: -5_000, w: 10, h: 10 } },
+      })),
+    ]);
+
+    const prepared = yield* service.prepareAnnotations({
+      projectId,
+      diagramId: diagram.id,
+      pageId: page.id,
+      annotations,
+    });
+
+    assert.deepEqual(
+      prepared.structure.shapes.slice(0, 4).map((shape) => shape.id),
+      ["shape:item-59", "shape:item-58", "shape:item-30", "shape:item-0"],
+    );
+    assert.isTrue(prepared.structure.truncated);
+    assert.isAbove(prepared.structure.shapes.length, 4);
+    assert.isBelow(prepared.structure.shapes.length, 40);
+    const { capture } = prepared;
+    assert.isTrue(
+      isAnnotationsRecord({
+        version: 1,
+        contextId: "diagram-annotations-budget",
+        label: "Budget",
+        kind: "diagram-annotations",
+        payload: {
+          environmentId,
+          projectId,
+          diagramId: diagram.id,
+          pageId: page.id,
+          annotations,
+          capture: {
+            revision: capture.revision,
+            resolved: capture.resolved,
+            images: capture.images.map(
+              ({ mimeType: _mimeType, base64: _base64, ...image }, index) => ({
+                ...image,
+                contextId: `image_00000000-0000-0000-0000-00000000000${index}`,
+              }),
+            ),
+            structure: prepared.structure,
+          },
+        },
+      }),
+    );
   }).pipe(Effect.scoped, Effect.provide(dependencies)),
 );

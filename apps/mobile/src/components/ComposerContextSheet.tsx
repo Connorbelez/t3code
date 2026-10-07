@@ -1,9 +1,11 @@
-import { DiagramContextRecord } from "@t3tools/contracts";
+import { DiagramContextRecord, isKnownComposerContextRecord } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { SourceFileSurface } from "../features/files/SourceFileSurface";
 import { filePreviewKind } from "@t3tools/shared/filePreview";
 import type {
   ComposerContextRecord,
+  DiagramAnnotationsContextRecord,
+  DiagramAnnotationTarget,
   ElementContextSource,
   EnvironmentId,
   ScopedThreadRef,
@@ -81,6 +83,47 @@ function ContextSource(props: { source: ElementContextSource | null }) {
   );
 }
 
+function annotationTargetSummary(target: DiagramAnnotationTarget) {
+  if (target.kind === "region") return "Region";
+  const count = target.shapeIds.length;
+  return `${count} ${count === 1 ? "shape" : "shapes"}`;
+}
+
+/** Reads only the record, so a sent message shows what was captured, not the live diagram. */
+function DiagramAnnotationsDetails(props: { record: DiagramAnnotationsContextRecord }) {
+  const { pageId, annotations, capture } = props.record.payload;
+  const pageName = capture?.structure.pages.find((page) => page.id === pageId)?.name;
+  const imageCount = capture?.images.length ?? 0;
+  return (
+    <View className="gap-3">
+      <ContextField label="Diagram" value={props.record.label} />
+      <ContextField label="Page" value={pageName || pageId} />
+      <ContextField
+        label="Snapshot"
+        value={capture ? `Snapshot from revision ${capture.revision}` : "Not captured yet"}
+      />
+      {capture ? (
+        <ContextField
+          label="Images"
+          value={`${imageCount} numbered ${imageCount === 1 ? "image" : "images"}`}
+        />
+      ) : null}
+      {[...annotations]
+        .sort((a, b) => a.number - b.number)
+        .map((annotation) => (
+          <View key={annotation.id} className="gap-1">
+            <Text selectable className="text-base text-foreground">
+              #{annotation.number} {annotation.comment}
+            </Text>
+            <Text className="text-xs text-foreground-muted">
+              {annotationTargetSummary(annotation.target)}
+            </Text>
+          </View>
+        ))}
+    </View>
+  );
+}
+
 /** Touch equivalent of the web context popover; snapshots remain readable offline. */
 export function ComposerContextSheet(props: {
   readonly label: string;
@@ -113,7 +156,11 @@ export function ComposerContextSheet(props: {
     localAttachment && isFileBackedComposerAttachment(localAttachment)
       ? localAttachment
       : undefined;
-  if (record && !("payload" in record) && (record.kind === "image" || record.kind === "file")) {
+  if (
+    record &&
+    isKnownComposerContextRecord(record) &&
+    (record.kind === "image" || record.kind === "file")
+  ) {
     const mimeType = videoMimeType(record) ?? record.mimeType;
     const previewKind = filePreviewKind(record);
     const resource = {
@@ -182,7 +229,8 @@ export function ComposerContextSheet(props: {
     record?.kind === "review-comment" && "pullRequest" in record
       ? record.pullRequest?.url
       : undefined;
-  const terminal = record?.kind === "terminal" && !("payload" in record) ? record : null;
+  const terminal =
+    record && isKnownComposerContextRecord(record) && record.kind === "terminal" ? record : null;
   return (
     <Modal
       animationType="slide"
@@ -285,7 +333,9 @@ export function ComposerContextSheet(props: {
                   />
                 ))}
               </View>
-            ) : "payload" in record ? (
+            ) : isKnownComposerContextRecord(record) && record.kind === "diagram-annotations" ? (
+              <DiagramAnnotationsDetails record={record} />
+            ) : !isKnownComposerContextRecord(record) ? (
               <Text className="text-foreground">
                 This context type is not supported by this version of the app. Its payload will be
                 preserved when sent.

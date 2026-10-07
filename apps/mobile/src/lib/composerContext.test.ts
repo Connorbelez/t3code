@@ -6,8 +6,10 @@ import {
   DiagramId,
   ProviderInstanceId,
   ComposerContextId,
+  DiagramAnnotationsContextRecord,
   type OrchestrationMessageContext,
 } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { collectComposerInlineTokens } from "@t3tools/shared/composerInlineTokens";
 import {
   collectComposerContextReferences,
@@ -321,6 +323,113 @@ describe("diagram context dependencies", () => {
         payload: { ...diagram.payload, screenshotContextId: "image_copy" },
       },
       { ...image, contextId: "image_copy" },
+    ]);
+  });
+});
+
+const decodeAnnotationSet = Schema.decodeUnknownSync(DiagramAnnotationsContextRecord);
+
+describe("Canvas comment set dependencies", () => {
+  const box = { x: 100, y: 80, w: 200, h: 120 };
+  const annotations = [
+    {
+      id: "a1",
+      number: 1,
+      comment: "Make this box blue",
+      target: { kind: "shapes", shapeIds: ["shape:box"] },
+    },
+  ];
+  const draftPayload = {
+    environmentId: "env-1",
+    projectId: "project-1",
+    diagramId: "0b6d3f4e-1a2b-4c3d-8e9f-0123456789ab",
+    pageId: "page:main",
+    annotations,
+  };
+  const sentSet = decodeAnnotationSet({
+    version: 1,
+    kind: "diagram-annotations",
+    contextId: "diagram-annotations_main",
+    label: "Architecture",
+    payload: {
+      ...draftPayload,
+      capture: {
+        revision: 7,
+        resolved: [{ id: "a1", bounds: box, marker: { x: 100, y: 80 } }],
+        images: [
+          {
+            role: "overview",
+            annotationIds: ["a1"],
+            bounds: box,
+            width: 200,
+            height: 120,
+            contextId: "image_overview",
+          },
+          {
+            role: "detail",
+            annotationIds: ["a1"],
+            bounds: box,
+            width: 400,
+            height: 240,
+            contextId: "image_detail",
+          },
+        ],
+        structure: {
+          revision: 7,
+          pages: [{ id: "page:main", name: "Main", shapeCount: 1 }],
+          compositions: [],
+          shapes: [],
+          bindings: [],
+          totalShapes: 1,
+          truncated: false,
+        },
+      },
+    },
+  });
+  const numberedImage = (role: string) => ({
+    version: 1 as const,
+    kind: "image" as const,
+    contextId: ComposerContextId.make(`image_${role}`),
+    label: `Architecture-${role}.png`,
+    attachmentId: `attachment_${role}`,
+    name: `Architecture-${role}.png`,
+    mimeType: "image/png",
+    sizeBytes: 20,
+  });
+  const context = {
+    version: 1 as const,
+    records: [terminal, sentSet, numberedImage("overview"), numberedImage("detail")],
+  };
+
+  it("keeps the numbered images while the set is referenced and drops them with it", () => {
+    expect(
+      referencedComposerContext(formatComposerContextReference(sentSet), context)?.records,
+    ).toEqual([sentSet, numberedImage("overview"), numberedImage("detail")]);
+    expect(
+      referencedComposerContext(formatComposerContextReference(terminal), context)?.records,
+    ).toEqual([terminal]);
+  });
+
+  it("imports a sent set as uncaptured work without its numbered images", () => {
+    let next = 0;
+    const imported = reidentifyComposerContext(
+      `${formatComposerContextReference(sentSet)} ${formatComposerContextReference(terminal)}`,
+      context.records,
+      () => `copy-${++next}`,
+    );
+    expect(collectComposerContextReferences(imported.text).map((ref) => ref.contextId)).toEqual([
+      "copy-2",
+      "copy-1",
+    ]);
+    expect(imported.context.records).toEqual([
+      { ...terminal, contextId: "copy-1" },
+      {
+        version: 1,
+        kind: "diagram-annotations",
+        contextId: "copy-2",
+        label: "Architecture",
+        payload: draftPayload,
+      },
     ]);
   });
 });

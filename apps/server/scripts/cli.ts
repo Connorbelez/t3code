@@ -19,6 +19,10 @@ import {
   ServerCliDevelopmentIconTargetMissingError,
   ServerCliExecutableImportError,
 } from "./cliErrors.ts";
+import {
+  NPM_LAUNCHER_PACKAGE_NAME,
+  NPM_PLATFORM_PACKAGE_SCOPE,
+} from "../../../scripts/lib/npm-release.ts";
 import { publishPlatformsThenLauncher } from "./publishOrder.ts";
 
 const RepoRoot = Effect.service(Path.Path).pipe(
@@ -192,8 +196,8 @@ const publishCmd = Command.make(
       // npm runs with cwd set to the packages dir below, so tarball paths are
       // resolved once here rather than joined twice.
       const packagesDir = path.resolve(config.packagesDir);
-      const scopeDir = path.join(packagesDir, "@t3code");
-      const launcherTarball = path.join(packagesDir, "t3.tgz");
+      const scopeDir = path.join(packagesDir, NPM_PLATFORM_PACKAGE_SCOPE);
+      const launcherTarball = path.join(packagesDir, `${NPM_LAUNCHER_PACKAGE_NAME}.tgz`);
       const platformTarballs = (yield* fs
         .readDirectory(scopeDir)
         .pipe(Effect.orElseSucceed((): ReadonlyArray<string> => [])))

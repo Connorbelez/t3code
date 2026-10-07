@@ -512,16 +512,26 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
   });
 });
 
+interface ToolImage {
+  readonly mimeType: "image/png";
+  readonly data: string;
+  readonly width: number;
+  readonly height: number;
+}
+
 interface ImageToolResult {
   /** Absent when a tool returns an image only on request. */
-  readonly screenshot?: {
-    readonly mimeType: "image/png";
-    readonly data: string;
-    readonly width: number;
-    readonly height: number;
-  };
+  readonly screenshot?: ToolImage;
+  /** Further images, sent after `screenshot` in order. */
+  readonly screenshots?: ReadonlyArray<ToolImage>;
   readonly [key: string]: unknown;
 }
+
+const toolImageMetadata = (image: ToolImage) => ({
+  mimeType: image.mimeType,
+  width: image.width,
+  height: image.height,
+});
 
 /**
  * Failures surface only their tag unless the tool describes them: the remote
@@ -575,8 +585,8 @@ const imageToolFailure =
 /**
  * `McpServer.toolkit` serializes every result as JSON text, which is the
  * wrong shape for a screenshot: the model needs image content. Tools whose
- * result carries a `screenshot` field are registered by hand so the PNG goes
- * out as an image block and the rest of the payload as JSON metadata.
+ * result carries `screenshot` or `screenshots` are registered by hand so each
+ * PNG goes out as an image block and the rest of the payload as JSON metadata.
  */
 const registerImageTool = <T extends Tool.Any, E, R>(
   tool: T,
@@ -621,35 +631,28 @@ const registerImageTool = <T extends Tool.Any, E, R>(
             Effect.matchCauseEffect({
               onFailure: imageToolFailure(tool.name, operation, failureText),
               onSuccess: ({ encodedResult }) => {
-                const { screenshot, ...rest } = encodedResult as ImageToolResult;
-                const includeImage =
-                  screenshot !== undefined &&
+                const { screenshot, screenshots, ...rest } = encodedResult as ImageToolResult;
+                const includeImages =
                   (payload as { readonly includeImage?: boolean } | undefined)?.includeImage !==
-                    false;
-                const metadata = screenshot
-                  ? {
-                      ...rest,
-                      screenshot: {
-                        mimeType: screenshot.mimeType,
-                        width: screenshot.width,
-                        height: screenshot.height,
-                      },
-                    }
-                  : rest;
+                  false;
+                const images = [...(screenshot ? [screenshot] : []), ...(screenshots ?? [])];
+                const metadata = {
+                  ...rest,
+                  ...(screenshot ? { screenshot: toolImageMetadata(screenshot) } : {}),
+                  ...(screenshots ? { screenshots: screenshots.map(toolImageMetadata) } : {}),
+                };
                 return Effect.succeed(
                   new McpSchema.CallToolResult({
                     isError: false,
                     structuredContent: metadata,
                     content: [
                       { type: "text", text: JSON.stringify(metadata) },
-                      ...(includeImage
-                        ? [
-                            {
-                              type: "image" as const,
-                              data: new Uint8Array(Buffer.from(screenshot.data, "base64")),
-                              mimeType: screenshot.mimeType,
-                            },
-                          ]
+                      ...(includeImages
+                        ? images.map((image) => ({
+                            type: "image" as const,
+                            data: new Uint8Array(Buffer.from(image.data, "base64")),
+                            mimeType: image.mimeType,
+                          }))
                         : []),
                     ],
                   }),
@@ -738,7 +741,7 @@ const registerDiagramImageTools = Effect.fn("McpHttpServer.registerDiagramImageT
   },
 );
 
-const layerDiagramToolkit = Layer.mergeAll(
+export const layerDiagramToolkit = Layer.mergeAll(
   McpServer.toolkit(DiagramToolkit).pipe(Layer.provide(DiagramHandlersLive)),
   Layer.effectDiscard(registerDiagramImageTools()).pipe(Layer.provide(DiagramImageHandlersLive)),
 );

@@ -1,4 +1,11 @@
-import { ComposerContextId, type ComposerContextRecord } from "@t3tools/contracts";
+import {
+  ComposerContextId,
+  DiagramAnnotationId,
+  DiagramId,
+  EnvironmentId,
+  ProjectId,
+  type ComposerContextRecord,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { upgradeLegacyContextMessage } from "./composerContextLegacy.ts";
@@ -145,6 +152,35 @@ describe("serializeLegacyContextMessage", () => {
         },
       ],
     });
+  });
+
+  it("reduces a diagram annotation set to its label, like a diagram", () => {
+    const set = {
+      version: 1,
+      contextId: ComposerContextId.make("diagram-annotations_main"),
+      kind: "diagram-annotations",
+      label: "Architecture",
+      payload: {
+        environmentId: EnvironmentId.make("env-1"),
+        projectId: ProjectId.make("project-1"),
+        diagramId: DiagramId.make("0b6d3f4e-1a2b-4c3d-8e9f-0123456789ab"),
+        pageId: "page:main",
+        annotations: [
+          {
+            id: DiagramAnnotationId.make("a1"),
+            number: 1,
+            comment: "Make this box blue",
+            target: { kind: "shapes", shapeIds: ["shape:box"] },
+          },
+        ],
+      },
+    } satisfies ComposerContextRecord;
+    expect(
+      serializeLegacyContextMessage({
+        text: `Fix ${formatComposerContextReference(set)} now`,
+        records: [set],
+      }),
+    ).toBe("Fix Architecture now");
   });
 
   it("keeps prose without context untouched", () => {

@@ -65,6 +65,7 @@ export type EnvironmentSubscriptionRpcTag =
   | typeof WS_METHODS.diagramsChanges
   | typeof WS_METHODS.diagramsSyncConnect
   | typeof WS_METHODS.diagramsHostConnect
+  | typeof WS_METHODS.diagramsArtifactWatch
   | typeof WS_METHODS.subscribeVcsStatus
   | typeof WS_METHODS.subscribeWorktreeSetup
   | typeof WS_METHODS.subscribeProjectClones

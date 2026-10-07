@@ -13,6 +13,7 @@ import {
   type TLAnyShapeUtilConstructor,
   type TLRecord,
 } from "tldraw";
+import { HtmlArtifactShapeUtil } from "./HtmlArtifactShapeUtil";
 import { parseDocumentRecord } from "./diagramSocket";
 
 const isDiagramError = Schema.is(DiagramOperationError);
@@ -35,9 +36,12 @@ export function rehearseDiagramChanges(
   try {
     // The pinned SDK's ArrowShapeUtil declaration widens optional callback fields to undefined;
     // its own default array is nevertheless the native Editor's supported runtime configuration.
-    const shapeUtils = defaultShapeUtils.map((util) =>
-      util.type === "embed" ? EmbedShapeUtil.configure({ embedDefinitions: [] }) : util,
-    ) as unknown as readonly TLAnyShapeUtilConstructor[];
+    const shapeUtils = [
+      ...defaultShapeUtils.map((util) =>
+        util.type === "embed" ? EmbedShapeUtil.configure({ embedDefinitions: [] }) : util,
+      ),
+      HtmlArtifactShapeUtil,
+    ] as unknown as readonly TLAnyShapeUtilConstructor[];
     rehearsal = new Editor({
       store: createTLStore({ schema: mountedEditor.store.schema, initialData: records }),
       shapeUtils,

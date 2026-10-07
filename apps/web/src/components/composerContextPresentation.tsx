@@ -3,6 +3,7 @@ import { ReadOnlySourcePreview } from "./files/AttachmentFilePreview";
 import type {
   PreviewAnnotationPayload,
   ThreadContextRecord,
+  DiagramAnnotationsContextRecord,
   DiagramContextRecord,
 } from "@t3tools/contracts";
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
@@ -35,6 +36,7 @@ import {
 import type { TerminalContextDraft } from "~/lib/terminalContext";
 import type { ReviewCommentContext } from "~/reviewCommentContext";
 import { ComposerPendingTerminalContextChip } from "./chat/ComposerPendingTerminalContexts";
+import { DiagramAnnotationsContextChip } from "./DiagramAnnotationsContextChip";
 import { DiagramContextChip } from "./DiagramContextChip";
 import { ThreadContextChip } from "./ThreadContextChip";
 import {
@@ -64,7 +66,8 @@ export type ComposerDraftContextRecord =
   | { kind: "image"; record: ComposerImageAttachment; upload?: AttachmentUploadState | undefined }
   | { kind: "file"; record: ComposerFileAttachment; upload?: AttachmentUploadState | undefined }
   | { kind: "thread"; record: ThreadContextRecord }
-  | { kind: "diagram"; record: DiagramContextRecord };
+  | { kind: "diagram"; record: DiagramContextRecord }
+  | { kind: "diagram-annotations"; record: DiagramAnnotationsContextRecord };
 
 /** What a chip can do beyond showing itself; the composer supplies the handlers. */
 export interface ComposerContextActions {
@@ -104,6 +107,7 @@ export function composerContextRecordsFromDraft(input: {
   previewAnnotations?: ReadonlyArray<PreviewAnnotationPayload>;
   threadContexts?: ReadonlyArray<ThreadContextRecord>;
   diagramContexts?: ReadonlyArray<DiagramContextRecord>;
+  diagramAnnotations?: ReadonlyArray<DiagramAnnotationsContextRecord>;
   images?: ReadonlyArray<ComposerImageAttachment>;
   files?: ReadonlyArray<ComposerFileAttachment>;
   uploadsByImageId?: Readonly<Record<string, AttachmentUploadState>>;
@@ -137,6 +141,9 @@ export function composerContextRecordsFromDraft(input: {
   }
   for (const record of input.diagramContexts ?? []) {
     records.set(record.contextId, { kind: "diagram", record });
+  }
+  for (const record of input.diagramAnnotations ?? []) {
+    records.set(record.contextId, { kind: "diagram-annotations", record });
   }
   return records;
 }
@@ -430,6 +437,16 @@ const composerContextPresentationRegistry = createContextPresentationRegistry<
       render: (entry, context) =>
         entry.kind === "diagram" ? (
           <DiagramContextChip record={entry.record} />
+        ) : (
+          <UnresolvedContextChip label={context.label} />
+        ),
+    },
+    {
+      kind: "diagram-annotations",
+      canRender: (entry) => entry.kind === "diagram-annotations",
+      render: (entry, context) =>
+        entry.kind === "diagram-annotations" ? (
+          <DiagramAnnotationsContextChip record={entry.record} />
         ) : (
           <UnresolvedContextChip label={context.label} />
         ),

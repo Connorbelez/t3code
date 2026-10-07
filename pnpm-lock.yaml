@@ -30,6 +30,9 @@ catalogs:
     jose:
       specifier: 6.2.2
       version: 6.2.2
+    tailwindcss:
+      specifier: 4.3.3
+      version: 4.3.3
     typescript:
       specifier: 7.0.2
       version: 7.0.2
@@ -580,6 +583,9 @@ importers:
       stream-json:
         specifier: 3.6.0
         version: 3.6.0
+      tailwindcss:
+        specifier: 4.3.3
+        version: 4.3.3
       yaml:
         specifier: ^2.9.0
         version: 2.9.0
@@ -846,6 +852,9 @@ importers:
       react-test-renderer:
         specifier: 19.2.6
         version: 19.2.6(react@19.2.6)
+      sharp:
+        specifier: 0.35.4
+        version: 0.35.4(@types/node@24.12.4)
       tailwindcss:
         specifier: 4.3.3
         version: 4.3.3
@@ -1003,6 +1012,9 @@ importers:
       '@tldraw/tlschema':
         specifier: 5.5.2
         version: 5.5.2(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
+      '@tldraw/validate':
+        specifier: 5.5.2
+        version: 5.5.2
       effect:
         specifier: 4.0.1
         version: 4.0.1(patch_hash=a33cba07c41f32374c2aaa86ea4a84d3ab9a872a78c94b65e929b19f8361856f)

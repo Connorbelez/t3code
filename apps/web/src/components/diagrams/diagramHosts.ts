@@ -1,8 +1,10 @@
 import {
   DiagramOperationError,
+  type DiagramAnnotatedCapture,
   type DiagramBatch,
   type DiagramCapture,
   type DiagramComposeRequest,
+  type DiagramHostAnnotateInput,
   type DiagramHostComposeResult,
   type DiagramId,
   type DiagramMetadata,
@@ -32,6 +34,8 @@ export type MountedDiagramHost = {
     expectedRevision?: number,
   ) => Promise<DiagramCapture>;
   compose: (request: DiagramComposeRequest) => Promise<DiagramHostComposeResult>;
+  /** Renders numbered comments over the page; never touches the store, selection or camera. */
+  annotate: (input: DiagramHostAnnotateInput) => Promise<DiagramAnnotatedCapture>;
   scope: (kind: DiagramPageScope["kind"]) => DiagramPageScope;
   saveState: () => DiagramSaveState;
   flush: () => Promise<void>;

@@ -56,6 +56,7 @@ import {
   MessageSquareDashedIcon,
   LinkIcon,
   MessageSquareIcon,
+  MessageSquarePlusIcon,
   MonitorIcon,
   MoonIcon,
   PaletteIcon,
@@ -191,8 +192,11 @@ import { ProjectFilePicker } from "./files/ProjectFilePicker";
 import { openLinkPullRequestDialog } from "./pullRequest/LinkPullRequestDialog";
 import {
   addCanvasSelectionToChat,
+  annotateCanvasSelection,
+  canvasAnnotationState,
   canvasSelectionChatState,
   subscribeCanvasSelectionChat,
+  toggleCanvasAnnotationMode,
 } from "./diagrams/canvasSelectionChat";
 import { ProjectContentSearchDialog } from "./search/ProjectContentSearchDialog";
 import { toggleThemeEditorForTheme } from "./settings/themeEditorStore";
@@ -720,6 +724,10 @@ function OpenCommandPaletteDialog(props: {
   const canvasSelection = useSyncExternalStore(
     subscribeCanvasSelectionChat,
     canvasSelectionChatState,
+  );
+  const canvasAnnotation = useSyncExternalStore(
+    subscribeCanvasSelectionChat,
+    canvasAnnotationState,
   );
   const createProject = useAtomCommand(projectEnvironment.create, {
     reportFailure: false,
@@ -2015,6 +2023,32 @@ function OpenCommandPaletteDialog(props: {
       shortcutCommand: "canvas.addSelectionToChat",
       run: async () => {
         addCanvasSelectionToChat();
+      },
+    });
+  }
+
+  if (canvasAnnotation !== "unavailable") {
+    actionItems.push({
+      kind: "action",
+      value: "action:toggle-canvas-annotation",
+      searchTerms: ["canvas", "diagram", "annotate", "comment", "feedback", "mode"],
+      title: canvasAnnotation === "on" ? "Stop annotating Canvas" : "Annotate Canvas",
+      icon: <MessageSquarePlusIcon className={ITEM_ICON_CLASS} />,
+      shortcutCommand: "canvas.toggleAnnotationMode",
+      run: async () => {
+        toggleCanvasAnnotationMode();
+      },
+    });
+    actionItems.push({
+      kind: "action",
+      value: "action:annotate-canvas-selection",
+      searchTerms: ["canvas", "diagram", "selection", "shapes", "annotate", "comment"],
+      title: "Annotate selection",
+      disabled: canvasSelection !== "selected",
+      icon: <MessageSquarePlusIcon className={ITEM_ICON_CLASS} />,
+      shortcutCommand: "canvas.annotateSelection",
+      run: async () => {
+        annotateCanvasSelection();
       },
     });
   }

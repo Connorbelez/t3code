@@ -1,0 +1,163 @@
+name: Publish fork to npm
+
+on:
+  push:
+    branches: [staging]
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: "Your npm scope, including @ (for example @connor_beleznay)"
+        default: "@connor_beleznay"
+        required: true
+        type: string
+      version:
+        description: "Unique package version (for example 0.0.45-fork.1)"
+        required: true
+        type: string
+      tag:
+        description: "npm dist-tag"
+        default: latest
+        required: true
+        type: string
+      publish:
+        description: "Publish to npm after building and verifying"
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-npm-${{ inputs.scope || '@connor_beleznay' }}
+  cancel-in-progress: false
+
+env:
+  T3CODE_NPM_SCOPE: ${{ inputs.scope || '@connor_beleznay' }}
+  T3CODE_NPM_REPOSITORY: https://github.com/${{ github.repository }}
+  RELEASE_VERSION: ${{ inputs.version || format('0.0.45-staging.{0}', github.run_number) }}
+  RELEASE_TAG: ${{ inputs.tag || 'latest' }}
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Validate publishing inputs
+        shell: bash
+        run: |
+          [[ "$T3CODE_NPM_SCOPE" =~ ^@[a-z0-9][a-z0-9_-]*$ ]]
+          [[ "$T3CODE_NPM_SCOPE" != '@t3code' ]]
+          [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]]
+          [[ "$RELEASE_TAG" =~ ^[a-z][a-z0-9-]*$ ]]
+
+  build:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux
+            arch: x64
+            resource_key: linux-x64
+            rust_target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+            resource_key: linux-arm64
+            rust_target: aarch64-unknown-linux-gnu
+          - runner: macos-15
+            platform: mac
+            arch: arm64
+            resource_key: darwin-arm64
+            rust_target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+      - uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version: "26.8.2"
+          run-install: true
+      - name: Enable production T3 Connect and set package version
+        run: |
+          cp .env.example .env
+          node scripts/update-release-package-versions.ts "$RELEASE_VERSION"
+      - name: Build web client and server
+        run: vp run --filter t3 build
+      - name: Build CLI executable
+        env:
+          VP_NODE_VERSION: "26.8.2"
+        run: node apps/server/scripts/cli.ts build-exe --verbose
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+      - name: Build resource monitor
+        env:
+          RUST_TARGET: ${{ matrix.rust_target }}
+        run: cargo build --locked --release --target "$RUST_TARGET" --manifest-path native/resource-monitor/Cargo.toml
+      - name: Stage resource monitor
+        env:
+          RESOURCE_KEY: ${{ matrix.resource_key }}
+          RUST_TARGET: ${{ matrix.rust_target }}
+          BUILD_PLATFORM: ${{ matrix.platform }}
+        run: |
+          binary_name=t3-resource-monitor
+          if [[ "$BUILD_PLATFORM" == win ]]; then binary_name=t3-resource-monitor.exe; fi
+          mkdir -p "cli-resource-monitor/$RESOURCE_KEY"
+          cp "native/resource-monitor/target/$RUST_TARGET/release/$binary_name" "cli-resource-monitor/$RESOURCE_KEY/$binary_name"
+      - name: Package CLI archive
+        env:
+          BUILD_PLATFORM: ${{ matrix.platform }}
+          BUILD_ARCH: ${{ matrix.arch }}
+        run: |
+          node scripts/build-cli-archive.ts --platform "$BUILD_PLATFORM" --arch "$BUILD_ARCH" \
+            --version "$RELEASE_VERSION" --resource-monitor-dir cli-resource-monitor --output-dir release-cli
+      - name: Smoke-test packaged CLI
+        run: node scripts/smoke-cli-archive.ts --archive release-cli/* --expect-version "$RELEASE_VERSION"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fork-cli-${{ matrix.resource_key }}
+          path: release-cli/*
+          if-no-files-found: error
+
+  package:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version: "24.13.1"
+          run-install: true
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: fork-cli-*
+          merge-multiple: true
+          path: release-cli
+      - name: Build npm packages
+        run: node scripts/build-npm-platform-packages.ts --archives-dir release-cli --version "$RELEASE_VERSION" --output-dir npm-packages --allow-missing
+      - name: Check npm package contents
+        run: node apps/server/scripts/cli.ts publish --packages-dir npm-packages --tag "$RELEASE_TAG" --dry-run --verbose
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fork-npm-packages
+          path: npm-packages/**/*.tgz
+          if-no-files-found: error
+      - name: Configure first-publish token when provided
+        if: inputs.publish
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [[ -n "$NPM_TOKEN" ]]; then
+            printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > "$HOME/.npmrc"
+          fi
+      - name: Publish platform packages and launcher
+        if: inputs.publish
+        run: node apps/server/scripts/cli.ts publish --packages-dir npm-packages --tag "$RELEASE_TAG" --verbose

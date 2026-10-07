@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from "@effect/vitest";
 import {
   CommandId,
+  DiagramAnnotationsContextRecord,
+  OrchestrationMessageContext,
   ComposerContextId,
   EnvironmentId,
   MessageId,
@@ -9,6 +11,8 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { onTestFinished, vi } from "vite-plus/test";
+import * as Schema from "effect/Schema";
+import { reidentifyComposerContext } from "../lib/composerContext";
 
 const composerDraftFileMocks = vi.hoisted(() => {
   let document = JSON.stringify({ schemaVersion: 1, drafts: {} });
@@ -2724,4 +2728,176 @@ describe("mobile composer drafts", () => {
     });
     expect(composerAttachmentCleanupMocks.remove).not.toHaveBeenCalled();
   });
+});
+
+const decodeAnnotationSet = Schema.decodeUnknownSync(DiagramAnnotationsContextRecord);
+const isDiagramAnnotationsRecord = Schema.is(DiagramAnnotationsContextRecord);
+const isMessageContext = Schema.is(OrchestrationMessageContext);
+
+const annotationSet = (pageId: string, id: string) =>
+  decodeAnnotationSet({
+    version: 1,
+    kind: "diagram-annotations",
+    contextId: `comments_${id}`,
+    label: "Canvas comments",
+    payload: {
+      environmentId: "env-1",
+      projectId: "project-1",
+      diagramId: "00000000-0000-4000-8000-000000000001",
+      pageId,
+      annotations: [
+        {
+          id,
+          number: 1,
+          comment: `Comment ${id}`,
+          target: { kind: "shapes", shapeIds: ["shape:one"] },
+        },
+      ],
+    },
+  });
+
+it("merges pasted Canvas comments by page, renumbers conflicts, and skips repeated identities", () => {
+  const key = "annotations:mobile-paste";
+  const paste = (record: DiagramAnnotationsContextRecord, id: string) => {
+    const imported = reidentifyComposerContext(
+      formatComposerContextReference(record),
+      [record],
+      () => id,
+    );
+    return insertComposerDraftContext(key, imported);
+  };
+  expect(paste(annotationSet("page:one", "a"), "paste_a")).toBe(true);
+  expect(paste(annotationSet("page:two", "b"), "paste_b")).toBe(true);
+  expect(paste(annotationSet("page:one", "c"), "paste_c")).toBe(true);
+  expect(paste(annotationSet("page:one", "a"), "paste_again")).toBe(true);
+  const draft = getComposerDraftSnapshot(key);
+  const sets = draft.context?.records.filter(isDiagramAnnotationsRecord) ?? [];
+  expect(
+    sets.map((r) => [r.payload.pageId, r.payload.annotations.map((a) => [a.id, a.number])]),
+  ).toEqual([
+    [
+      "page:one",
+      [
+        ["a", 1],
+        ["c", 3],
+      ],
+    ],
+    ["page:two", [["b", 2]]],
+  ]);
+  expect(isMessageContext(draft.context)).toBe(true);
+  expect(draft.text).toContain("diagram-annotations/paste_a");
+  expect(draft.text).not.toContain("paste_c");
+  expect(draft.text).not.toContain("paste_again");
+});
+
+it("keeps Canvas numbering after deleting all chips and resets it on explicit clear", async () => {
+  const key = "annotations:mobile-counter";
+  const record = annotationSet("page:one", "a");
+  const content = {
+    text: formatComposerContextReference(record),
+    context: { version: 1 as const, records: [record] },
+  };
+  expect(insertComposerDraftContext(key, content)).toBe(true);
+  setComposerDraftText(key, "");
+  expect(getComposerDraftSnapshot(key).nextDiagramAnnotationNumber).toBe(2);
+  await flushComposerDrafts();
+  expect(
+    JSON.parse(composerDraftFileMocks.getDocument()).drafts[key].nextDiagramAnnotationNumber,
+  ).toBe(2);
+  expect(insertComposerDraftContext(key, content)).toBe(true);
+  expect(
+    getComposerDraftSnapshot(key).context?.records.find(isDiagramAnnotationsRecord)?.payload
+      .annotations[0]?.number,
+  ).toBe(2);
+  clearComposerDraftContent(key);
+  expect(insertComposerDraftContext(key, content)).toBe(true);
+  expect(
+    getComposerDraftSnapshot(key).context?.records.find(isDiagramAnnotationsRecord)?.payload
+      .annotations[0]?.number,
+  ).toBe(1);
+});
+
+it("merges Canvas numbers and identities when restoring shared draft content", () => {
+  const key = "annotations:mobile-restore";
+  const first = annotationSet("page:one", "a");
+  const second = annotationSet("page:two", "b");
+  const restore = (state: Record<string, ComposerDraft>, record: DiagramAnnotationsContextRecord) =>
+    mergeComposerDraftContentState(state, key, {
+      text: formatComposerContextReference(record),
+      attachments: [],
+      context: { version: 1, records: [record] },
+    });
+  const state = restore(restore(restore({}, first), second), first);
+  expect(
+    state[key]?.context?.records
+      .filter(isDiagramAnnotationsRecord)
+      .flatMap((record) =>
+        record.payload.annotations.map((annotation) => [annotation.id, annotation.number]),
+      ),
+  ).toEqual([
+    ["a", 1],
+    ["b", 2],
+  ]);
+  expect(isMessageContext(state[key]?.context)).toBe(true);
+});
+
+it("preserves distinct Canvas numbers when cloud recovery meets a live draft", async () => {
+  const load = vi.spyOn(threadOutboxManager, "load").mockResolvedValue(true);
+  onTestFinished(() => load.mockRestore());
+  await waitForComposerDraftsLoaded();
+  const key = "env-1:annotation-recovery";
+  const makeDraft = (id: string): ComposerDraft => {
+    const record = annotationSet("page:one", id);
+    return {
+      text: formatComposerContextReference(record),
+      attachments: [],
+      context: { version: 1, records: [record] },
+      nextDiagramAnnotationNumber: 2,
+    };
+  };
+  appAtomRegistry.set(composerDraftsAtom, { [key]: makeDraft("live") });
+  appAtomRegistry.set(composerCloudDraftsAtom, {
+    accountId: null,
+    signedOut: { account: { drafts: { [key]: makeDraft("saved") }, queuedMessages: [] } },
+  });
+  await restoreCloudComposerDrafts("account");
+  const draft = getComposerDraftSnapshot(key);
+  expect(
+    draft.context?.records
+      .find(isDiagramAnnotationsRecord)
+      ?.payload.annotations.map((annotation) => [annotation.id, annotation.number]),
+  ).toEqual([
+    ["live", 1],
+    ["saved", 2],
+  ]);
+  expect(draft.nextDiagramAnnotationNumber).toBe(3);
+  expect(draft.text).not.toContain("diagram-annotations/comments_saved");
+  const persisted = decodePersistedComposerState(JSON.parse(composerDraftFileMocks.getDocument()));
+  expect(persisted.drafts[key]).toEqual(draft);
+});
+
+it("rolls back imported Canvas comments without losing edits made during a draft merge", () => {
+  const key = "annotations:mobile-undo-merge";
+  const first = annotationSet("page:one", "original");
+  const imported = annotationSet("page:one", "imported");
+  const snapshot: ComposerDraft = {
+    text: formatComposerContextReference(first),
+    attachments: [],
+    context: { version: 1, records: [first] },
+    nextDiagramAnnotationNumber: 2,
+  };
+  const merged = mergeComposerDraftContentState({ [key]: snapshot }, key, {
+    text: formatComposerContextReference(imported),
+    attachments: [],
+    context: { version: 1, records: [imported] },
+  })[key]!;
+  const edited = { ...merged, text: `${merged.text} Please preserve my edit` };
+  const restored = undoComposerDraftMergeState({ [key]: edited }, key, snapshot, merged)[key]!;
+  expect(restored.text).toBe(`${snapshot.text} Please preserve my edit`);
+  expect(
+    restored.context?.records
+      .find(isDiagramAnnotationsRecord)
+      ?.payload.annotations.map((annotation) => annotation.id),
+  ).toEqual(["original"]);
+  expect(restored.nextDiagramAnnotationNumber).toBe(3);
 });

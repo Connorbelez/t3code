@@ -30,7 +30,7 @@ const list = Tool.make("t3_diagram_list", {
 const read = Tool.make("t3_diagram_read", {
   ...shared,
   description:
-    "Read current diagram revision and bounded all-page shape/binding summaries. Each composition is listed once instead of its member shapes; pass compositionKey (or includeCompositions) for its detail: each member's last composed spec including ref, whether someone edited it, and its current text when edited, paged by compositionOffset and compositionLimit. Set includeRecords or recordIds for schema-bearing records and paginate with nextOffset. Retain exact target, ancestor, binding and asset records as expected preconditions before editing. Reads work without an editor.",
+    'Read current diagram revision and bounded all-page shape/binding summaries. Each composition is listed once instead of its member shapes; pass compositionKey (or includeCompositions) for its detail: each member\'s last composed spec including ref, whether someone edited it, and its current text when edited, paged by compositionOffset and compositionLimit. Set includeRecords or recordIds for schema-bearing records and paginate with nextOffset. Retain exact target, ancestor, binding and asset records as expected preconditions before editing. HTML artifact summaries include htmlArtifactSource. Read their records for props {w,h,title,source}, where source is {kind: "inline", html} owned by the diagram or {kind: "file", path} relative to its project. Reads work without an editor.',
   parameters: Schema.Struct({ ...Contracts.DiagramReadInput.fields, projectId }),
   success: Contracts.DiagramReadResult,
 })
@@ -48,7 +48,7 @@ const create = Tool.make("t3_diagram_create", {
 const apply = Tool.make("t3_diagram_apply", {
   ...shared,
   description:
-    "Apply one atomic bounded SDK record batch. Read first and pass expected records for every target and required ancestor, parent, binding or asset dependency. Respect the attached selection focus and leave unrelated records unchanged. A connected editor host is required. Success is a durable receipt with one host Undo step. Reuse requestId with the identical batch after an uncertain response. Read the receipt before fresh work. Failed or disconnected work is never replayed later. Prefer t3_diagram_compose for composition members (shapes whose meta has t3Composition); raw edits to them count as human edits.",
+    'Apply one atomic bounded SDK record batch. Read first and pass expected records for every target and required ancestor, parent, binding or asset dependency. Respect the attached selection focus and leave unrelated records unchanged. A connected editor host is required. Success is a durable receipt with one host Undo step. Reuse requestId with the identical batch after an uncertain response. Read the receipt before fresh work. Failed or disconnected work is never replayed later. Prefer t3_diagram_compose for composition members (shapes whose meta has t3Composition); raw edits to them count as human edits. Create or update interactive HTML using type "html-artifact" with props {w,h,title,source}. Source is either {kind: "inline", html} or {kind: "file", path} pointing to an existing project HTML file. Removing its shape never deletes the file. Bind ordinary arrows to the artifact shape.',
   parameters: Schema.Struct({ ...target, batch: Contracts.DiagramBatch }),
   success: Contracts.DiagramMutationReceipt,
 })
@@ -137,23 +137,67 @@ const exportDocument = Tool.make("t3_diagram_export", {
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false);
 
+const screenshot = Schema.Struct({
+  data: Schema.String,
+  mimeType: Schema.Literal("image/png"),
+  width: Contracts.NonNegativeInt,
+  height: Contracts.NonNegativeInt,
+});
+const { number, comment, target: annotationTarget } = Contracts.DiagramAnnotation.fields;
+
 export const DiagramCaptureTool = Tool.make("t3_diagram_capture", {
   ...shared,
   failureMode: "error",
-  description:
+  description: [
     'Capture a fresh PNG of the specified page, saved selection IDs/bounds, viewport, or composition frame ({kind: "composition", key}). Returns actual image content plus page-space bounds, dimensions and committed revision. Requires a connected web/desktop editor and preserves human camera/selection. A missing selected shape fails scope recovery rather than expanding the scope.',
-  parameters: Schema.Struct({ ...target, scope: Contracts.DiagramScope }),
+    'To point at parts of a page, pass annotations with scope {kind: "diagram", pageId}: each number becomes a badge beside its outlined target (shape IDs or a page-space region). These are your own notes for this call, not user feedback. The result is one overview image listing every number, plus detail images when the overview shrinks small targets, with each annotation\'s page-space bounds and badge position. Annotated captures are never cached as diagram previews.',
+  ].join(" "),
+  parameters: Schema.Struct({
+    ...target,
+    scope: Contracts.DiagramScope,
+    annotations: Schema.optional(
+      Schema.Array(Schema.Struct({ number, comment, target: annotationTarget })).check(
+        Schema.isMinLength(1),
+        Schema.isMaxLength(Contracts.DIAGRAM_ANNOTATIONS_MAX_PER_PAGE),
+        Schema.makeFilter(
+          (items) =>
+            new Set(items.map((item) => item.number)).size === items.length ||
+            "Annotation numbers must be unique.",
+        ),
+      ),
+    ),
+  }),
   success: Schema.Struct({
     diagramId: Contracts.DiagramId,
     revision: Contracts.DiagramRevision,
     scope: Contracts.DiagramScope,
     bounds: Contracts.DiagramBounds,
-    screenshot: Schema.Struct({
-      data: Schema.String,
-      mimeType: Schema.Literal("image/png"),
-      width: Contracts.NonNegativeInt,
-      height: Contracts.NonNegativeInt,
-    }),
+    pageId: Schema.optional(Contracts.DiagramRecordId),
+    annotations: Schema.optional(
+      Schema.Array(
+        Schema.Struct({
+          number,
+          comment,
+          target: annotationTarget,
+          bounds: Contracts.DiagramBounds,
+          marker: Contracts.DiagramPoint,
+        }),
+      ),
+    ),
+    images: Schema.optional(
+      Schema.Array(
+        Schema.Struct({
+          role: Contracts.DiagramAnnotationImage.fields.role,
+          annotations: Schema.Array(number),
+          bounds: Contracts.DiagramBounds,
+          width: Contracts.PositiveInt,
+          height: Contracts.PositiveInt,
+        }),
+      ),
+    ),
+    screenshot,
+    /** Detail images of an annotated capture, after the overview in `screenshot`. */
+    screenshots: Schema.optional(Schema.Array(screenshot)),
   }),
 })
   .annotate(Tool.Readonly, true)

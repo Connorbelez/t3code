@@ -74,6 +74,8 @@ export const STATIC_KEYBINDING_COMMANDS = [
   "preview.toggle",
   "canvas.open",
   "canvas.addSelectionToChat",
+  "canvas.annotateSelection",
+  "canvas.toggleAnnotationMode",
   "preview.refresh",
   "preview.focusUrl",
   "preview.zoomIn",

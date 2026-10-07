@@ -1,4 +1,5 @@
 import {
+  DiagramAnnotations,
   DiagramLifecycleInput,
   DiagramOperationError,
   OrchestratorMcpFailure,
@@ -92,10 +93,68 @@ export const DiagramHandlersLive = DiagramToolkit.toLayer({
     }),
 });
 
+const decodeAnnotations = Schema.decodeUnknownEffect(DiagramAnnotations);
+
 export const DiagramImageHandlersLive = DiagramImageToolkit.toLayer({
-  t3_diagram_capture: (input) =>
+  t3_diagram_capture: ({ annotations, ...input }) =>
     Effect.gen(function* () {
       const { diagrams, projectId } = yield* access(input.projectId);
+      if (annotations) {
+        const { scope } = input;
+        if (scope.kind !== "diagram")
+          return yield* new DiagramOperationError({
+            code: "scope-unavailable",
+            details: {
+              issues: [
+                {
+                  path: "scope",
+                  message:
+                    'Annotations cover a whole page. Pass scope {kind: "diagram", pageId} with the annotations.',
+                },
+              ],
+            },
+          });
+        // Every other bound is in the tool parameters; only the set's total size can fail here.
+        const authored = yield* decodeAnnotations(
+          annotations.map((annotation) => ({ id: `tool-${annotation.number}`, ...annotation })),
+        ).pipe(Effect.mapError(() => new DiagramOperationError({ code: "too-large" })));
+        const capture = yield* diagrams.captureAnnotated({
+          projectId,
+          diagramId: input.diagramId,
+          pageId: scope.pageId,
+          annotations: authored,
+        });
+        // The capture schema guarantees an overview first and geometry for every annotation.
+        const overview = capture.images[0]!;
+        const numbers = new Map(authored.map((annotation) => [annotation.id, annotation.number]));
+        const resolved = new Map(capture.resolved.map(({ id, ...geometry }) => [id, geometry]));
+        const screenshot = (image: typeof overview) => ({
+          data: image.base64,
+          mimeType: image.mimeType,
+          width: image.width,
+          height: image.height,
+        });
+        return {
+          diagramId: capture.diagramId,
+          revision: capture.revision,
+          scope,
+          bounds: overview.bounds,
+          pageId: capture.pageId,
+          annotations: authored.map(({ id, ...annotation }) => ({
+            ...annotation,
+            ...resolved.get(id)!,
+          })),
+          images: capture.images.map((image) => ({
+            role: image.role,
+            annotations: image.annotationIds.map((id) => numbers.get(id)!),
+            bounds: image.bounds,
+            width: image.width,
+            height: image.height,
+          })),
+          screenshot: screenshot(overview),
+          screenshots: capture.images.slice(1).map(screenshot),
+        };
+      }
       const capture = yield* diagrams.capture({ ...input, projectId, format: "png" });
       return {
         diagramId: capture.diagramId,

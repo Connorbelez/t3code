@@ -70,6 +70,17 @@ links, so a context link is never mistaken for a mention.
 Attachment bytes travel on the existing attachment channel; the envelope only carries metadata.
 Text without references is returned unchanged.
 
+Diagram, `diagram-annotations`, and other payload-shaped kinds share the `payload` field with
+`UnknownContextRecord`, so code tells them apart with `isKnownComposerContextRecord`, never by
+the presence of `payload`.
+
+Some records name image records by `contextId` instead of by a link in the text: diagram and
+preview-annotation screenshots, and the numbered images of a Canvas comment set. Those images get
+no envelope entry. The agent pairs a `ref=image_<id>` with its picture only through the attachment
+file name, which repeats `image_<id>`. `composerContextImageDependencies` lists them so pruning,
+paste, and send keep or drop them with their parent. A comment set's capture and images exist only
+on sent messages: drafts, restores, and pastes strip them and the next send captures again.
+
 ## Legacy messages
 
 Messages sent before this feature carry trailing `<terminal_context>`, `<element_context>`, and

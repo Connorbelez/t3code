@@ -55,6 +55,46 @@ Wait for **Saved** before closing or refreshing an editor with offline changes.
 Export editable diagrams or PNG/SVG images when you need files. Removing a project
 permanently deletes its active and archived diagrams; export them first to keep them.
 
+### Add interactive HTML artifacts
+
+In Canvas, open the canvas menu and choose **Add HTML artifact** to save HTML
+inside the diagram, or **Link HTML file** to use an existing project file.
+Artifacts support CSS, Tailwind utilities, and JavaScript. Click, type, select
+text, and scroll inside the document. Drag its frame to move it, resize it with
+the canvas handles, and connect it with ordinary arrows.
+
+Use **Source** on the artifact to edit its HTML. Inline edits stay in the diagram.
+Linked source opens in the workspace file editor. Saved source changes and
+external file edits reload the document and reset its interactive state.
+Moving or zooming the canvas keeps that state.
+
+Removing an artifact keeps a linked source file. Duplicating or exporting an
+editable diagram preserves file references, so transferred diagrams may need
+those paths repaired. Diagram image exports include rendered artifacts. Mobile
+shows them in the diagram's cached preview.
+
+### Comment on a diagram
+
+To give feedback on specific parts of a diagram, click **Annotate** in the Canvas
+toolbar or choose **Annotate Canvas** in the command palette. Click a shape or drag
+a rectangle around any area, including empty space, then write your comment and
+save it. To comment on shapes you already selected, right-click them and choose
+**Annotate selection**, or press Ctrl+Alt+P (Cmd+Option+P on macOS). Annotating
+never moves or changes shapes.
+
+Each saved comment gets a numbered bubble. Numbers count up across the whole
+message and never change, so deleting a comment leaves a gap. Click a bubble to
+edit, retarget, or delete its comment. Press Escape to cancel the comment you are
+writing, and again to leave annotation mode; saved comments stay.
+
+Each annotated page appears as one item in your message; remove it to drop that
+page's comments. Sending captures each annotated page again and gives the agent
+images with the same numbers drawn in, plus the matching comments. Comments on
+shapes follow those shapes if you move them first. If a commented shape was
+deleted or moved to another page, sending stops and names the comments to fix.
+Sent messages keep their images and comments even after the diagram changes.
+Mobile shows sent comments but can't create them.
+
 ### Ask the agent for a diagram
 
 Ask the agent for a flowchart, a state machine, a class diagram of your models,
@@ -68,7 +108,10 @@ whole drawing is one Undo step. A diagram can hold several generated drawings
 side by side. When you attach a diagram, the agent sees each generated drawing as
 one summary instead of every shape, so large drawings don't crowd out the rest.
 To point at part of a drawing, select those shapes and add the selection to chat;
-the agent is told exactly which ones you mean.
+the agent is told exactly which ones you mean. For example, select two screens,
+add them to your message, and ask "add a confirmation step between these screens".
+The selection keeps the generated drawing's member names, so the agent can
+change those parts of the existing drawing.
 
 Ask for changes and the agent updates the same drawing. Shapes you moved or
 resized stay as you left them, new shapes are placed around them, and shapes you

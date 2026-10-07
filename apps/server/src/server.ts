@@ -151,6 +151,8 @@ import * as UsageService from "./usage/UsageService.ts";
 import * as RuntimeLayer from "./orchestration-v2/runtimeLayer.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as DiagramService from "./diagrams/DiagramService.ts";
+import * as DiagramArtifacts from "./diagrams/DiagramArtifacts.ts";
+import * as PreviewBrowser from "./htmlRender/PreviewBrowser.ts";
 import { diagramAssetRouteLayer } from "./diagrams/http.ts";
 import * as ThreadSearch from "./orchestration-v2/ThreadSearch.ts";
 import * as ResourceCleanupService from "./orchestration-v2/ResourceCleanupService.ts";
@@ -428,6 +430,14 @@ const layerDiagramService = DiagramService.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
 );
 
+const layerDiagramArtifacts = DiagramArtifacts.layer.pipe(
+  Layer.provide(layerDiagramService),
+  Layer.provide(layerWorkspace),
+  Layer.provide(ProjectStore.layer.pipe(Layer.provide(layerPersistence))),
+  Layer.provide(PreviewBrowser.layer),
+  Layer.provide(ServerSecretStore.layer),
+);
+
 const layerDiagramProjectCleanup = DiagramService.projectCleanupLayer.pipe(
   Layer.provideMerge(layerDiagramService),
 );
@@ -637,6 +647,7 @@ const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
 
 const layerRuntimeDependencies = layerRuntimeCoreDependencies.pipe(
   Layer.provideMerge(layerDiagramProjectCleanup),
+  Layer.provideMerge(layerDiagramArtifacts),
   // Misc.
   Layer.provideMerge(layerBackground),
   Layer.provideMerge(layerResourceDiagnostics),

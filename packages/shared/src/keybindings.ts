@@ -34,6 +34,11 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
   { key: "mod+r", command: "preview.refresh", when: "previewFocus" },
   { key: "mod+l", command: "preview.focusUrl", when: "previewFocus" },
   { key: "mod+l", command: "canvas.addSelectionToChat", when: "!terminalFocus && !previewFocus" },
+  {
+    key: "mod+alt+p",
+    command: "canvas.annotateSelection",
+    when: "!terminalFocus && !previewFocus",
+  },
   { key: "mod+=", command: "preview.zoomIn", when: "previewFocus" },
   { key: "mod++", command: "preview.zoomIn", when: "previewFocus" },
   { key: "mod+-", command: "preview.zoomOut", when: "previewFocus" },

@@ -7,6 +7,7 @@ import {
 } from "@t3tools/shared/composerContextClipboard";
 import {
   collectComposerContextReferences,
+  composerContextImageDependencies,
   formatComposerContextReference,
   replaceComposerContextReferences,
 } from "@t3tools/shared/composerContextReferences";
@@ -25,14 +26,8 @@ export function readPastedComposerContext(
     collectComposerContextReferences(pastedText).map((occurrence) => occurrence.contextId),
   );
   for (const record of decodedFragment.records) {
-    if (
-      record.kind === "preview-annotation" &&
-      !("payload" in record) &&
-      pastedIds.has(record.contextId) &&
-      record.screenshotContextId
-    ) {
-      pastedIds.add(record.screenshotContextId);
-    }
+    if (!pastedIds.has(record.contextId)) continue;
+    for (const imageId of composerContextImageDependencies(record)) pastedIds.add(imageId);
   }
   return {
     ...decodedFragment,

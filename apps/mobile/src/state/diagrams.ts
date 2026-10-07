@@ -20,5 +20,9 @@ const commands = {
     label: "Prepare diagram context",
     tag: WS_METHODS.diagramsPrepareContext,
   }),
+  prepareAnnotations: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "Prepare Canvas comments",
+    tag: WS_METHODS.diagramsPrepareAnnotations,
+  }),
 };
 export const diagramCommands = commands;

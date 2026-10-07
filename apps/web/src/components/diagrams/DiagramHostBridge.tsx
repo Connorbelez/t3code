@@ -2,6 +2,7 @@ import { RegistryContext } from "@effect/atom-react";
 import {
   DIAGRAM_SDK_VERSION,
   DiagramBatch,
+  DiagramHostAnnotateInput,
   DiagramOperationError,
   DiagramPageScope,
   type DiagramHostRequest,
@@ -33,6 +34,7 @@ const captureInput = Schema.Struct({
 });
 const decodeCaptureInput = Schema.decodeUnknownSync(captureInput);
 const decodeBatch = Schema.decodeUnknownSync(DiagramBatch);
+const decodeAnnotateInput = Schema.decodeUnknownSync(DiagramHostAnnotateInput);
 
 export default function DiagramHostBridge() {
   const configs = useServerConfigs();
@@ -144,6 +146,14 @@ function EnvironmentDiagramHost({ environmentId }: { environmentId: EnvironmentI
             connectionId: request.connectionId,
             result: { ok: true, value },
           });
+        } else if (request.operation === "annotate") {
+          const value = await host.annotate(decodeAnnotateInput(request.input));
+          requireConnected();
+          await api.hostRespond({
+            requestId: request.requestId,
+            connectionId: request.connectionId,
+            result: { ok: true, value },
+          });
         } else {
           const input = decodeCaptureInput(request.input);
           const value = await host.capture(input.scope, input.format, input.revision);
@@ -179,7 +189,7 @@ function EnvironmentDiagramHost({ environmentId }: { environmentId: EnvironmentI
         sdkVersion: DIAGRAM_SDK_VERSION,
         focused,
         mountedDiagramIds,
-        operations: ["prepare-batch", "capture", "compose"],
+        operations: ["prepare-batch", "capture", "compose", "annotate"],
       },
       onEvent: (request) => {
         if (request.operation === "ready") {

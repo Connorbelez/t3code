@@ -1,3 +1,4 @@
+import { createDiagramSchema } from "./diagramSchema";
 // @vitest-environment jsdom
 import * as NodeSqlite from "node:sqlite";
 import { DiagramId, ProjectId } from "@t3tools/contracts";
@@ -90,7 +91,7 @@ function fixture() {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const editor = new Editor({
-      store: createTLStore(),
+      store: createTLStore({ schema: createDiagramSchema() }),
       shapeUtils: [GeoShapeUtil],
       bindingUtils: [],
       tools: [],
